@@ -195,7 +195,7 @@ void r_ident(float *m) {
     m[15] = 1.0f;
 }
 
-void r_mul(float *o, float *a, float *b) {
+void r_mul(float *o, const float *a, const float *b) {
     float t[16];
     for (int c = 0; c < 4; c++) {
         for (int r = 0; r < 4; r++) {

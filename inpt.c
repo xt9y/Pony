@@ -10,6 +10,7 @@ typedef struct Input {
     int left;
     int right;
     int run;
+    int debug_mode;
     float dx;
     float dy;
 } INPUT;
@@ -43,6 +44,18 @@ int i_poll(INPUT *i, SDL_Window *win) {
                     break;
                 case SDL_SCANCODE_ESCAPE:
                     SDL_SetWindowRelativeMouseMode(win, false);
+                    break;
+                case SDL_SCANCODE_F1:
+                    i->debug_mode = 0;
+                    break;
+                case SDL_SCANCODE_F2:
+                    i->debug_mode = 1;
+                    break;
+                case SDL_SCANCODE_F3:
+                    i->debug_mode = 2;
+                    break;
+                case SDL_SCANCODE_F4:
+                    i->debug_mode = 3;
                     break;
                 default:
                     break;
