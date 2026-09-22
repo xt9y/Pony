@@ -50,9 +50,12 @@ typedef struct Transform {
 typedef struct RenderInstance {
     MESH_HANDLE mesh;
     TRANSFORM transform;
+    float world_inverse[16];
     MOBILITY mobility;
     uint32_t material_id;
     uint32_t entity_id;
+    uint32_t query_mask;
+    float orientation_sign;
     AABB world_bounds;
 } RENDER_INSTANCE;
 

@@ -14,6 +14,7 @@
 
 #include "ren.c"
 #include "msh.c"
+#include "col.c"
 #include "shdr.c"
 #include "cmp.c"
 #include "inpt.c"
@@ -39,8 +40,9 @@ static int setup_instance(
     instance->mobility = mobility;
     instance->material_id = 0;
     instance->entity_id = entity_id;
+    instance->query_mask = 0xffffffffu;
     r_xform(instance->transform.matrix, x, y, z, angle, sx, sy, sz);
-    return m_world_bounds(mesh->local_bounds, instance->transform.matrix, &instance->world_bounds);
+    return scene_instance_update(instance, mesh);
 }
 
 int main(void)
