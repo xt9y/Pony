@@ -11,8 +11,19 @@ void build(C_Build *b)
     c_dep_header_only(nk);
 
     C_Target *app = c_executable(b, "app");
-    c_sources(app, "src/*.c");
+    c_sources(app, "main.c");
+
     c_use(app, nk);
+
+#ifdef __APPLE__
+    c_include(app, "/opt/homebrew/include");
+    c_link_flag(app, "-L/opt/homebrew/lib");
+    c_link_flag(app, "-Wl,-rpath,/opt/homebrew/lib");
+#endif
+
+    c_link_system(app, "SDL3_shadercross");
     c_link_system(app, "SDL3");
+    c_link_system(app, "m");
+
     c_default_target(b, app);
 }
