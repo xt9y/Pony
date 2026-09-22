@@ -787,7 +787,8 @@ static int scene_gpu_upload_dynamic(SCENE *scene, SDL_GPUDevice *device)
         SDL_memcpy(dst->world, src->transform.matrix, sizeof(dst->world));
         SDL_memcpy(dst->inverse, src->world_inverse, sizeof(dst->inverse));
         dst->mesh_accel_index = src->mesh;
-        dst->flags = src->mobility == MOBILITY_DYNAMIC ? 1u : 0u;
+        dst->flags = (src->mobility == MOBILITY_DYNAMIC ? 1u : 0u) |
+            (src->orientation_sign < 0.0f ? 2u : 0u);
         dst->query_mask = src->query_mask;
     }
 

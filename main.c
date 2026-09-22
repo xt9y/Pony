@@ -17,6 +17,7 @@
 #include "col.c"
 #include "bvh.c"
 #include "shdr.c"
+#include "lmap.c"
 #include "cmp.c"
 #include "inpt.c"
 
@@ -82,6 +83,7 @@ int main(void)
     MESH meshes[MESH_COUNT] = {0};
     RENDER_INSTANCE instances[6] = {0};
     SCENE scene = {0};
+    LIGHTMAP_BAKE lightmap = {0};
     PIPE pipe = {0};
     CMP cmp = {0};
     int ret = 0;
@@ -118,7 +120,18 @@ int main(void)
     CHECK(scene_accel_update(&scene, renderer.device), "scene acceleration");
     CHECK(bvh_gpu_verify_scene(renderer.device, &scene, 1024), "GPU TLAS/BLAS parity");
 
-    if (getenv("UNTITLED_SMOKE")) goto deinit;
+    int smoke = getenv("UNTITLED_SMOKE") != NULL;
+    CHECK(lm_init(&renderer, &scene, 0, 64, 64, smoke ? 4u : 32u, &lightmap), "lightmap init");
+
+    if (smoke) {
+        uint32_t bake_ticks = 0;
+        while (!lm_complete(&lightmap)) {
+            CHECK(++bake_ticks <= 128u, "lightmap smoke bake did not complete");
+            CHECK(lm_tick(&renderer, &scene, &lightmap), "lightmap smoke bake");
+        }
+        CHECK(lm_validate_nonempty(renderer.device, &lightmap), "lightmap output validation");
+        goto deinit;
+    }
 
     INPUT input = {0};
     SDL_SetWindowRelativeMouseMode(renderer.win, true);
@@ -134,6 +147,10 @@ int main(void)
     float mvp[16];
 
     while (i_poll(&input, renderer.win)) {
+        if (!lm_complete(&lightmap)) {
+            CHECK(lm_tick(&renderer, &scene, &lightmap), "lightmap bake tick");
+        }
+
         uint64_t now = SDL_GetTicks();
         float dt = (float)(now - last) / 1000.0f;
         last = now;
@@ -208,12 +225,17 @@ int main(void)
             SDL_GPUGraphicsPipeline *mesh_pipeline = pipe.gfx;
             if (input.debug_mode == 1) mesh_pipeline = pipe.uv;
             if (input.debug_mode == 2) mesh_pipeline = pipe.triangle;
-            SDL_BindGPUGraphicsPipeline(pass, mesh_pipeline);
-
             for (uint32_t i = 0; i < 6; ++i) {
                 const RENDER_INSTANCE *instance = &instances[i];
                 r_mul(tmp, view, instance->transform.matrix);
                 r_mul(mvp, proj, tmp);
+
+                if (input.debug_mode == 0 && i == lightmap.target_instance && lm_complete(&lightmap)) {
+                    lm_draw_runtime(cmd, pass, &lightmap, mvp);
+                    continue;
+                }
+
+                SDL_BindGPUGraphicsPipeline(pass, mesh_pipeline);
                 SDL_PushGPUVertexUniformData(cmd, 0, mvp, sizeof(mvp));
                 if (input.debug_mode == 2) {
                     m_draw_triangle_debug(pass, &meshes[instance->mesh]);
@@ -265,6 +287,7 @@ deinit:
     if (renderer.device) {
         c_deinit(renderer.device, &cmp);
         p_deinit(renderer.device, &pipe);
+        lm_deinit(renderer.device, &lightmap);
         scene_accel_destroy(&scene, renderer.device);
         for (uint32_t i = 0; i < MESH_COUNT; ++i) {
             m_deinit(renderer.device, &meshes[i]);
