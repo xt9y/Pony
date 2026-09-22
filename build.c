@@ -34,6 +34,7 @@ void build(C_Build *b)
     c_link_flag(tests, "-Wl,-rpath,/opt/homebrew/lib");
 #endif
 
+    c_link_system(tests, "SDL3_shadercross");
     c_link_system(tests, "SDL3");
     c_link_system(tests, "m");
 

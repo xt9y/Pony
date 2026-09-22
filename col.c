@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #define RAY_EPSILON 1e-4f
+#define RAY_TIE_EPSILON 1e-5f
 
 typedef struct Ray {
     VEC3 origin;
@@ -39,6 +40,7 @@ typedef struct Scene {
     RENDER_INSTANCE *instances;
     uint32_t instance_count;
     struct Bvh *tlas;
+    struct SceneGpuAccel *gpu_accel;
     uint32_t transform_revision;
     uint32_t geometry_revision;
 } SCENE;
@@ -218,6 +220,7 @@ static RAY_HIT mesh_raycast_internal(const MESH *mesh, RAY ray, int cull_backfac
 {
     RAY_HIT best = {0};
     best.t = ray.t_max;
+    best.triangle_index = UINT32_MAX;
     best.instance_index = UINT32_MAX;
 
     if (!mesh || !mesh->vertices || !mesh->indices) return best;
@@ -228,17 +231,20 @@ static RAY_HIT mesh_raycast_internal(const MESH *mesh, RAY ray, int cull_backfac
         if (!m_triangle(mesh, i, &tri)) continue;
 
         RAY clipped = ray;
-        clipped.t_max = best.t;
+        clipped.t_max = best.hit ? SDL_min(ray.t_max, best.t + RAY_TIE_EPSILON) : best.t;
         float t, u, v;
         if (!ray_triangle_ex(clipped, tri, cull_backfaces, orientation_sign, &t, &u, &v)) continue;
 
-        best.hit = 1;
-        best.t = t;
-        best.triangle_index = i;
-        best.bary_u = u;
-        best.bary_v = v;
-        best.position = c_add(ray.origin, c_mul(ray.direction, t));
-        best.geometric_normal = m_triangle_normal(tri);
+        if (!best.hit || t < best.t - RAY_TIE_EPSILON ||
+            (fabsf(t - best.t) <= RAY_TIE_EPSILON && i < best.triangle_index)) {
+            best.hit = 1;
+            best.t = t;
+            best.triangle_index = i;
+            best.bary_u = u;
+            best.bary_v = v;
+            best.position = c_add(ray.origin, c_mul(ray.direction, t));
+            best.geometric_normal = m_triangle_normal(tri);
+        }
     }
 
     return best;
@@ -365,10 +371,11 @@ static int query_filter_instance(const QUERY_FILTER *filter, const RENDER_INSTAN
     return 1;
 }
 
-RAY_HIT scene_raycast(const SCENE *scene, RAY ray, QUERY_FILTER filter)
+RAY_HIT scene_raycast_bruteforce(const SCENE *scene, RAY ray, QUERY_FILTER filter)
 {
     RAY_HIT best = {0};
     best.t = ray.t_max;
+    best.triangle_index = UINT32_MAX;
     best.instance_index = UINT32_MAX;
     if (!scene || !scene->meshes || !scene->instances) return best;
 
@@ -377,14 +384,14 @@ RAY_HIT scene_raycast(const SCENE *scene, RAY ray, QUERY_FILTER filter)
         if (instance->mesh >= scene->mesh_count || !query_filter_instance(&filter, instance)) continue;
 
         RAY broad = ray;
-        broad.t_max = best.t;
+        broad.t_max = best.hit ? SDL_min(ray.t_max, best.t + RAY_TIE_EPSILON) : best.t;
         if (!ray_aabb(broad, instance->world_bounds, NULL)) continue;
 
         RAY local = {
             .origin = transform_point(instance->world_inverse, ray.origin),
             .direction = transform_direction(instance->world_inverse, ray.direction),
             .t_min = ray.t_min,
-            .t_max = best.t
+            .t_max = best.hit ? SDL_min(ray.t_max, best.t + RAY_TIE_EPSILON) : best.t
         };
         if (c_len2(local.direction) <= 1e-20f) continue;
 
@@ -395,7 +402,13 @@ RAY_HIT scene_raycast(const SCENE *scene, RAY ray, QUERY_FILTER filter)
 
         VEC3 world_position = transform_point(instance->transform.matrix, local_hit.position);
         float world_t = c_len(c_sub(world_position, ray.origin));
-        if (world_t < ray.t_min || world_t > best.t) continue;
+        if (world_t < ray.t_min || world_t > best.t + RAY_TIE_EPSILON) continue;
+
+        int better = !best.hit || world_t < best.t - RAY_TIE_EPSILON ||
+            (fabsf(world_t - best.t) <= RAY_TIE_EPSILON &&
+                (i < best.instance_index ||
+                 (i == best.instance_index && local_hit.triangle_index < best.triangle_index)));
+        if (!better) continue;
 
         best = local_hit;
         best.t = world_t;
@@ -408,7 +421,7 @@ RAY_HIT scene_raycast(const SCENE *scene, RAY ray, QUERY_FILTER filter)
     return best;
 }
 
-int scene_occluded(const SCENE *scene, RAY ray, QUERY_FILTER filter)
+int scene_occluded_bruteforce(const SCENE *scene, RAY ray, QUERY_FILTER filter)
 {
     if (!scene || !scene->meshes || !scene->instances) return 0;
 

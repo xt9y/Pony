@@ -11,6 +11,7 @@ typedef struct Input {
     int right;
     int run;
     int debug_mode;
+    uint32_t debug_bvh_depth;
     float dx;
     float dy;
 } INPUT;
@@ -56,6 +57,14 @@ int i_poll(INPUT *i, SDL_Window *win) {
                     break;
                 case SDL_SCANCODE_F4:
                     i->debug_mode = 3;
+                    break;
+                case SDL_SCANCODE_F5:
+                    if (i->debug_mode == 4) {
+                        i->debug_bvh_depth = (i->debug_bvh_depth + 1u) % 8u;
+                    } else {
+                        i->debug_mode = 4;
+                        i->debug_bvh_depth = 0;
+                    }
                     break;
                 default:
                     break;

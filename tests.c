@@ -4,6 +4,7 @@
 
 #include "msh.c"
 #include "col.c"
+#include "bvh.c"
 
 static int nearf(float a, float b)
 {
@@ -271,6 +272,166 @@ static void test_bruteforce_random_reference_is_deterministic(void)
     }
 }
 
+static void test_blas_matches_bruteforce(void)
+{
+    VERTEX vertices[8] = {
+        {{-1,-1,0},{0,0,1},{0}}, {{1,-1,0},{0,0,1},{0}},
+        {{1,1,0},{0,0,1},{0}}, {{-1,1,0},{0,0,1},{0}},
+        {{-1,-1,2},{0,0,1},{0}}, {{1,-1,2},{0,0,1},{0}},
+        {{1,1,2},{0,0,1},{0}}, {{-1,1,2},{0,0,1},{0}},
+    };
+    uint32_t indices[12] = {0,1,2,0,2,3,4,5,6,4,6,7};
+    MESH mesh = {
+        .vertices = vertices,
+        .vertex_count = 8,
+        .indices = indices,
+        .index_count = 12,
+        .geometry_revision = 1,
+    };
+    assert(bvh_build_mesh(&mesh, 2));
+    assert(bvh_validate(mesh.blas));
+
+    uint32_t seed = 0x51a73u;
+    for (uint32_t i = 0; i < 512; ++i) {
+        VEC3 origin = {test_rng_signed(&seed) * 2.5f, test_rng_signed(&seed) * 2.5f, -3.0f};
+        VEC3 direction = {test_rng_signed(&seed) * 0.25f, test_rng_signed(&seed) * 0.25f, 1.0f};
+        RAY ray;
+        assert(ray_make(origin, direction, 0.0f, 100.0f, &ray));
+        RAY_HIT brute = mesh_raycast_bruteforce(&mesh, ray, 0);
+        BVH_TRACE_STATS stats = {0};
+        RAY_HIT accel = bvh_mesh_raycast(&mesh, mesh.blas, ray, 0, 1.0f, &stats);
+        assert(accel.hit == brute.hit);
+        if (brute.hit) {
+            assert(accel.triangle_index == brute.triangle_index);
+            assert(fabsf(accel.t - brute.t) < 1e-5f);
+        }
+        assert(bvh_mesh_occluded(&mesh, mesh.blas, ray, 0, 1.0f, NULL) == brute.hit);
+    }
+
+    bvh_destroy_mesh(&mesh, NULL);
+}
+
+static void test_tlas_matches_scene_bruteforce_and_refits(void)
+{
+    VERTEX vertices[3] = {
+        {{-1,-1,0},{0,0,1},{0}},
+        {{1,-1,0},{0,0,1},{0}},
+        {{0,1,0},{0,0,1},{0}},
+    };
+    uint32_t indices[3] = {0,1,2};
+    MESH mesh = {
+        .vertices = vertices,
+        .vertex_count = 3,
+        .indices = indices,
+        .index_count = 3,
+        .local_bounds = {{-1,-1,0},{1,1,0}},
+        .geometry_revision = 1,
+    };
+    RENDER_INSTANCE instances[2] = {
+        {.mesh = 0, .mobility = MOBILITY_STATIC, .query_mask = 0xffffffffu},
+        {.mesh = 0, .mobility = MOBILITY_DYNAMIC, .query_mask = 0xffffffffu},
+    };
+    float a[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, -2,0,5,1};
+    float b[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0,  2,0,7,1};
+    SDL_memcpy(instances[0].transform.matrix, a, sizeof(a));
+    SDL_memcpy(instances[1].transform.matrix, b, sizeof(b));
+    assert(scene_instance_update(&instances[0], &mesh));
+    assert(scene_instance_update(&instances[1], &mesh));
+
+    SCENE scene = {
+        .meshes = &mesh,
+        .mesh_count = 1,
+        .instances = instances,
+        .instance_count = 2,
+        .transform_revision = 1,
+        .geometry_revision = 1,
+    };
+    assert(scene_accel_update(&scene, NULL));
+    BVH *original_blas = mesh.blas;
+
+    RAY ray;
+    assert(ray_make((VEC3){-2,0,0}, (VEC3){0,0,1}, 0, 100, &ray));
+    QUERY_FILTER filter = query_filter_all();
+    RAY_HIT accel = bvh_scene_raycast(&scene, ray, filter, NULL);
+    assert(accel.hit && accel.instance_index == 0 && nearf(accel.t, 5.0f));
+
+    instances[0].transform.matrix[12] = 20.0f;
+    assert(scene_instance_update(&instances[0], &mesh));
+    ++scene.transform_revision;
+    assert(scene_accel_update(&scene, NULL));
+    assert(mesh.blas == original_blas);
+    accel = bvh_scene_raycast(&scene, ray, filter, NULL);
+    assert(!accel.hit);
+
+    scene_accel_destroy(&scene, NULL);
+}
+
+static void test_flattened_escape_indices(void)
+{
+    VERTEX vertices[6] = {
+        {{-3,0,0},{0,1,0},{0}}, {{-2,0,0},{0,1,0},{0}}, {{-2.5f,1,0},{0,1,0},{0}},
+        {{ 2,0,0},{0,1,0},{0}}, {{ 3,0,0},{0,1,0},{0}}, {{ 2.5f,1,0},{0,1,0},{0}},
+    };
+    uint32_t indices[6] = {0,1,2,3,4,5};
+    MESH mesh = {.vertices=vertices,.vertex_count=6,.indices=indices,.index_count=6,.geometry_revision=1};
+    assert(bvh_build_mesh(&mesh, 1));
+    GPU_BVH_NODE *flat = NULL;
+    uint32_t count = 0;
+    assert(bvh_flatten(mesh.blas, &flat, &count));
+    assert(count == mesh.blas->node_count);
+    assert(flat[0].escape == UINT32_MAX);
+    for (uint32_t i = 0; i < count; ++i) {
+        assert(flat[i].escape == UINT32_MAX || flat[i].escape > i);
+        if ((flat[i].meta & 1u) == 0) assert(flat[i].right > i);
+    }
+    SDL_free(flat);
+    bvh_destroy_mesh(&mesh, NULL);
+}
+
+static void test_bvh_degenerate_builds(void)
+{
+    MESH empty = {0};
+    assert(bvh_build_mesh(&empty, 4));
+    assert(empty.blas == NULL);
+
+    VERTEX vertices[3] = {
+        {{0,0,0},{0,0,1},{0}},
+        {{1,0,0},{0,0,1},{0}},
+        {{0,1,0},{0,0,1},{0}},
+    };
+    uint32_t one_indices[3] = {0,1,2};
+    MESH one = {
+        .vertices = vertices,
+        .vertex_count = 3,
+        .indices = one_indices,
+        .index_count = 3,
+        .geometry_revision = 1,
+    };
+    assert(bvh_build_mesh(&one, 1));
+    assert(one.blas && one.blas->node_count == 1);
+    assert(bvh_validate(one.blas));
+    bvh_destroy_mesh(&one, NULL);
+
+    uint32_t same_centroid_indices[12] = {
+        0,1,2, 0,1,2, 0,1,2, 0,1,2
+    };
+    MESH same_centroid = {
+        .vertices = vertices,
+        .vertex_count = 3,
+        .indices = same_centroid_indices,
+        .index_count = 12,
+        .geometry_revision = 1,
+    };
+    assert(bvh_build_mesh(&same_centroid, 1));
+    assert(same_centroid.blas);
+    assert(bvh_validate(same_centroid.blas));
+
+    AABB debug_bounds[8];
+    assert(bvh_debug_bounds_at_depth(same_centroid.blas, 0, debug_bounds, 8) == 1);
+    assert(bvh_debug_bounds_at_depth(same_centroid.blas, 1, debug_bounds, 8) == 2);
+    bvh_destroy_mesh(&same_centroid, NULL);
+}
+
 int main(void)
 {
     test_mesh_validation_rejects_bad_index();
@@ -284,6 +445,10 @@ int main(void)
     test_scene_nonuniform_transform_keeps_world_distance();
     test_overlap_queries();
     test_bruteforce_random_reference_is_deterministic();
+    test_blas_matches_bruteforce();
+    test_tlas_matches_scene_bruteforce_and_refits();
+    test_flattened_escape_indices();
+    test_bvh_degenerate_builds();
     puts("geometry/query tests ok");
     return 0;
 }

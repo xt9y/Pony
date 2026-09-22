@@ -15,6 +15,7 @@
 #include "ren.c"
 #include "msh.c"
 #include "col.c"
+#include "bvh.c"
 #include "shdr.c"
 #include "cmp.c"
 #include "inpt.c"
@@ -45,11 +46,42 @@ static int setup_instance(
     return scene_instance_update(instance, mesh);
 }
 
+typedef struct BoundsUniform {
+    float view_proj[16];
+    float color[4];
+} BOUNDS_UNIFORM;
+
+static void draw_debug_aabb(
+    SDL_GPUCommandBuffer *cmd,
+    SDL_GPURenderPass *pass,
+    const float view[16],
+    const float proj[16],
+    AABB b,
+    const float color[4])
+{
+    float model[16];
+    float tmp[16];
+    BOUNDS_UNIFORM uniform;
+    float cx = (b.min.x + b.max.x) * 0.5f;
+    float cy = (b.min.y + b.max.y) * 0.5f;
+    float cz = (b.min.z + b.max.z) * 0.5f;
+    float sx = b.max.x - b.min.x;
+    float sy = b.max.y - b.min.y;
+    float sz = b.max.z - b.min.z;
+    r_xform(model, cx, cy, cz, 0.0f, sx, sy, sz);
+    r_mul(tmp, view, model);
+    r_mul(uniform.view_proj, proj, tmp);
+    SDL_memcpy(uniform.color, color, sizeof(uniform.color));
+    SDL_PushGPUVertexUniformData(cmd, 0, &uniform, sizeof(uniform));
+    SDL_DrawGPUPrimitives(pass, 24, 1, 0, 0);
+}
+
 int main(void)
 {
     RENDERER renderer = {.w = 1270, .h = 750};
     MESH meshes[MESH_COUNT] = {0};
     RENDER_INSTANCE instances[6] = {0};
+    SCENE scene = {0};
     PIPE pipe = {0};
     CMP cmp = {0};
     int ret = 0;
@@ -75,6 +107,17 @@ int main(void)
     CHECK(setup_instance(&instances[5], &meshes[MESH_CUBE], MESH_CUBE, 5, MOBILITY_STATIC,
         2.2f, 0.1f, 1.0f, 0.0f, 0.6f, 2.2f, 0.6f), "cube instance 3");
 
+    scene = (SCENE){
+        .meshes = meshes,
+        .mesh_count = MESH_COUNT,
+        .instances = instances,
+        .instance_count = 6,
+        .transform_revision = 1,
+        .geometry_revision = 1,
+    };
+    CHECK(scene_accel_update(&scene, renderer.device), "scene acceleration");
+    CHECK(bvh_gpu_verify_scene(renderer.device, &scene, 1024), "GPU TLAS/BLAS parity");
+
     if (getenv("UNTITLED_SMOKE")) goto deinit;
 
     INPUT input = {0};
@@ -87,7 +130,6 @@ int main(void)
 
     float proj[16];
     float view[16];
-    float model[16];
     float tmp[16];
     float mvp[16];
 
@@ -182,19 +224,34 @@ int main(void)
 
             if (input.debug_mode == 3) {
                 SDL_BindGPUGraphicsPipeline(pass, pipe.bounds);
+                const float color[4] = {0.1f, 1.0f, 0.2f, 1.0f};
                 for (uint32_t i = 0; i < 6; ++i) {
-                    const AABB b = instances[i].world_bounds;
-                    float cx = (b.min.x + b.max.x) * 0.5f;
-                    float cy = (b.min.y + b.max.y) * 0.5f;
-                    float cz = (b.min.z + b.max.z) * 0.5f;
-                    float sx = b.max.x - b.min.x;
-                    float sy = b.max.y - b.min.y;
-                    float sz = b.max.z - b.min.z;
-                    r_xform(model, cx, cy, cz, 0.0f, sx, sy, sz);
-                    r_mul(tmp, view, model);
-                    r_mul(mvp, proj, tmp);
-                    SDL_PushGPUVertexUniformData(cmd, 0, mvp, sizeof(mvp));
-                    SDL_DrawGPUPrimitives(pass, 24, 1, 0, 0);
+                    draw_debug_aabb(cmd, pass, view, proj, instances[i].world_bounds, color);
+                }
+            }
+
+            if (input.debug_mode == 4 && scene.tlas) {
+                static const float depth_colors[8][4] = {
+                    {1.0f, 0.2f, 0.2f, 1.0f},
+                    {1.0f, 0.6f, 0.1f, 1.0f},
+                    {1.0f, 1.0f, 0.1f, 1.0f},
+                    {0.2f, 1.0f, 0.2f, 1.0f},
+                    {0.1f, 1.0f, 1.0f, 1.0f},
+                    {0.2f, 0.4f, 1.0f, 1.0f},
+                    {0.8f, 0.2f, 1.0f, 1.0f},
+                    {1.0f, 0.2f, 0.7f, 1.0f},
+                };
+                AABB debug_bounds[256];
+                uint32_t count = bvh_debug_bounds_at_depth(
+                    (const BVH *)scene.tlas,
+                    input.debug_bvh_depth,
+                    debug_bounds,
+                    (uint32_t)(sizeof(debug_bounds) / sizeof(debug_bounds[0])));
+                count = SDL_min(count, (uint32_t)(sizeof(debug_bounds) / sizeof(debug_bounds[0])));
+                SDL_BindGPUGraphicsPipeline(pass, pipe.bounds);
+                const float *color = depth_colors[input.debug_bvh_depth % 8u];
+                for (uint32_t i = 0; i < count; ++i) {
+                    draw_debug_aabb(cmd, pass, view, proj, debug_bounds[i], color);
                 }
             }
 
@@ -208,6 +265,7 @@ deinit:
     if (renderer.device) {
         c_deinit(renderer.device, &cmp);
         p_deinit(renderer.device, &pipe);
+        scene_accel_destroy(&scene, renderer.device);
         for (uint32_t i = 0; i < MESH_COUNT; ++i) {
             m_deinit(renderer.device, &meshes[i]);
         }

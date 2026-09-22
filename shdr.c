@@ -110,6 +110,7 @@ static const char bounds_vs_src[] =
     "cbuffer Camera : register(b0, space1)\n"
     "{\n"
     "    float4x4 view_proj;\n"
+    "    float4 line_color;\n"
     "};\n"
     "static const float3 kLines[24] = {\n"
     "    float3(-0.5,-0.5,-0.5), float3( 0.5,-0.5,-0.5),\n"
@@ -125,15 +126,23 @@ static const char bounds_vs_src[] =
     "    float3( 0.5, 0.5,-0.5), float3( 0.5, 0.5, 0.5),\n"
     "    float3(-0.5, 0.5,-0.5), float3(-0.5, 0.5, 0.5)\n"
     "};\n"
-    "float4 main(uint vertex_id : SV_VertexID) : SV_Position\n"
+    "struct VSOut\n"
     "{\n"
-    "    return mul(view_proj, float4(kLines[vertex_id], 1.0));\n"
+    "    float4 position : SV_Position;\n"
+    "    float4 color : TEXCOORD0;\n"
+    "};\n"
+    "VSOut main(uint vertex_id : SV_VertexID)\n"
+    "{\n"
+    "    VSOut o;\n"
+    "    o.position = mul(view_proj, float4(kLines[vertex_id], 1.0));\n"
+    "    o.color = line_color;\n"
+    "    return o;\n"
     "}\n";
 
 static const char bounds_fs_src[] =
-    "float4 main() : SV_Target\n"
+    "float4 main(float4 color : TEXCOORD0) : SV_Target\n"
     "{\n"
-    "    return float4(0.1, 1.0, 0.2, 1.0);\n"
+    "    return color;\n"
     "}\n";
 
 static const char cs_src[] =
