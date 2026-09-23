@@ -231,7 +231,8 @@ float integrate_sun_grid(float3 world_origin, float3 world_direction,
     return integrated;
 }
 
-float3 volume_radiance(float3 p)
+float3 volume_radiance(float3 p, float3 surface_position,
+                       float3 surface_normal, bool has_surface)
 {
     float3 coord = clamp((p - grid_origin_spacing.xyz) / grid_origin_spacing.w,
                          0.0f, float3(grid_dims_width.xyz) - 1.0f);
@@ -247,6 +248,12 @@ float3 volume_radiance(float3 p)
         float weight = w.x*w.y*w.z;
         VolumeProbe probe = VolumeProbes[cell.x + grid_dims_width.x *
             (cell.y + grid_dims_width.y * cell.z)];
+        // Do not interpolate light from a probe behind the visible surface.
+        // Probes embedded in thick walls or roofs can otherwise brighten fog
+        // in front of those surfaces even though their own validity is true.
+        if (has_surface && dot(probe.position.xyz - surface_position,
+                               surface_normal) < -0.01f)
+            continue;
         weight *= probe.position.w;
         float3 indirect = probe.coefficient[0].rgb * 0.2820947918f;
         radiance += max(indirect, 0.0f) * weight;
@@ -278,9 +285,18 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
             leave = min(leave, max(a,b));
         }
     }
-    float depth = NormalDepth.SampleLevel(DepthSampler, uv, 0.0f).w;
+    float4 surface = NormalDepth.SampleLevel(DepthSampler, uv, 0.0f);
+    float depth = surface.w;
     if (depth > 0.0f) leave = min(leave, depth / max(dot(direction,forward_g.xyz),0.01f));
     if (leave <= enter) { Output[id.xy] = float4(0,0,0,1); return; }
+    float3 surface_position = eye_density.xyz + direction *
+        (depth / max(dot(direction, forward_g.xyz), 0.01f));
+    float3 view_normal = normalize(surface.xyz * 2.0f - 1.0f);
+    float3 surface_normal = normalize(normalize(right_tan.xyz) * view_normal.x +
+                                      normalize(up_tan.xyz) * view_normal.y -
+                                      forward_g.xyz * view_normal.z);
+    if (dot(eye_density.xyz - surface_position, surface_normal) < 0.0f)
+        surface_normal = -surface_normal;
     float step_size = (leave-enter) * 0.25f;
     float3 sum = 0.0f;
     float sun_fraction = 0.0f;
@@ -289,7 +305,9 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     [unroll] for (uint i = 0; i < 4u; ++i) {
         float t = enter + (float(i) + 0.5f) * step_size;
         float integral = probe_remaining * (1.0f - probe_transmission);
-        sum += volume_radiance(eye_density.xyz + direction * t) * integral * 0.15f;
+        sum += volume_radiance(eye_density.xyz + direction * t,
+                               surface_position, surface_normal, depth > 0.0f) *
+               integral * 0.15f;
         probe_remaining *= probe_transmission;
     }
     float g = forward_g.w;
