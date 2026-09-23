@@ -16,6 +16,8 @@ static vec3 beam_u(vec3 sun) {
 
 }
 
+#if 0
+/* Reference exact-visibility path. */
 static bool intersects_box(vec3 p, vec3 d, const bvh_node *node) {
 
     float lo = 0.0f;
@@ -85,6 +87,7 @@ static bool shaded(const bvh *tree, vec3 p, vec3 sun) {
 
     return false;
 }
+#endif
 
 static uint32_t beam_depth_for_span(float span) {
 
@@ -283,7 +286,13 @@ bool dm_beam_build(dm_beam_grid *grid, const mesh *scene, const bvh *tree,
                                               min.z + (z + 0.5f) * grid->step.z);
                             const vec3 p = v3_add(v3_add(v3_scale(u, q.x), v3_scale(v, q.y)),
                                                   v3_scale(sun, q.z));
-                            visible = !shaded(tree, p, sun);
+                            const dm_trace_ray ray = {
+                                .origin = p,
+                                .tmin = 0.001f,
+                                .direction = sun,
+                                .tmax = 1.0e20f
+                            };
+                            visible = !dm_trace_any(tree, ray);
                             ++traced;
                         }
                         samples[i + (size_t)grid->width * (j + (size_t)grid->height * z)] = visible;
