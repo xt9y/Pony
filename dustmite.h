@@ -1,0 +1,383 @@
+#ifndef DUSTMITE_H
+#define DUSTMITE_H
+
+/* Single public header for the whole app.
+ *
+ * The module dependency chain is linear:
+ *   init -> glb -> gltf -> bvh -> lmap -> fx -> render
+ * so one header in that order replaces the previous seven
+ * per-module headers with zero cycles and zero ordering puzzles.
+ */
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include <SDL3/SDL.h>
+
+    //// init: math + mesh
+
+typedef struct vec3 {
+    float x, y, z;
+} vec3;
+
+typedef struct vector {
+    void *buffer;
+    size_t count;
+    size_t capacity;
+    size_t type_size;
+} vector;
+
+typedef struct point {
+    vec3 p;
+} point;
+
+typedef struct mesh_face {
+    uint32_t indices[3];
+    vec3 normal;
+} mesh_face;
+
+typedef struct aabb {
+    vec3 min;
+    vec3 max;
+    vec3 center;
+    vec3 extents;
+} aabb;
+
+typedef struct mesh {
+    vector vertices; /* point */
+    vector faces;    /* mesh_face */
+    aabb bounds;
+} mesh;
+
+vec3 v3(float x, float y, float z);
+vec3 v3_add(vec3 a, vec3 b);
+vec3 v3_sub(vec3 a, vec3 b);
+vec3 v3_scale(vec3 v, float s);
+float v3_dot(vec3 a, vec3 b);
+vec3 v3_cross(vec3 a, vec3 b);
+float v3_len_sq(vec3 v);
+vec3 v3_normalize(vec3 v);
+void mesh_free(mesh *m);
+
+    //// glb: container + JSON tokenizer + accessors
+
+typedef enum glb_token_type { GLB_TOKEN_OBJECT, GLB_TOKEN_ARRAY, GLB_TOKEN_STRING, GLB_TOKEN_PRIMITIVE } glb_token_type;
+
+typedef struct glb_token {
+    uint32_t start;
+    uint32_t end;
+    int32_t parent;
+    uint32_t children;
+    glb_token_type type;
+} glb_token;
+
+typedef struct glb_doc {
+    unsigned char *data;
+    size_t data_size;
+    const char *json;
+    size_t json_size;
+    const unsigned char *bin;
+    size_t bin_size;
+    glb_token *tokens;
+    uint32_t token_count;
+    uint32_t token_capacity;
+    char error[192];
+} glb_doc;
+
+typedef struct glb_span {
+    const unsigned char *data;
+    size_t size;
+} glb_span;
+
+typedef struct glb_accessor {
+    const unsigned char *data;
+    size_t count;
+    size_t stride;
+    uint32_t component_type;
+    uint32_t components;
+    bool normalized;
+    int token;
+    int sparse_token;
+} glb_accessor;
+
+bool glb_load(glb_doc *doc, const char *path);
+void glb_free(glb_doc *doc);
+const char *glb_error(const glb_doc *doc);
+
+int glb_root(const glb_doc *doc);
+int glb_get(const glb_doc *doc, int object_token, const char *key);
+int glb_at(const glb_doc *doc, int array_token, size_t index);
+size_t glb_count(const glb_doc *doc, int token);
+bool glb_string(const glb_doc *doc, int token, const char **data, size_t *length);
+bool glb_number(const glb_doc *doc, int token, double *value);
+bool glb_boolean(const glb_doc *doc, int token, bool *value);
+
+bool glb_buffer_view(const glb_doc *doc, size_t index, glb_span *span, size_t *stride);
+bool glb_accessor_open(const glb_doc *doc, size_t index, glb_accessor *out);
+bool glb_accessor_f32(const glb_accessor *accessor, size_t element, uint32_t component, float *value);
+bool glb_accessor_u32(const glb_accessor *accessor, size_t element, uint32_t *value);
+
+bool glb_extract_mesh(const glb_doc *doc, mesh *out);
+
+//// gltf: visual scene (materials, textures, images)
+
+typedef struct gltf_vertex {
+    vec3 position;
+    vec3 normal;
+    float u, v;
+    uint32_t material;
+} gltf_vertex;
+
+typedef struct gltf_material {
+    float base_color[4];
+    float emissive[3];
+    float metallic;
+    float roughness;
+    float normal_scale;
+    float occlusion_strength;
+    int32_t base_color_texture;
+    int32_t metallic_roughness_texture;
+    int32_t normal_texture;
+    int32_t occlusion_texture;
+    int32_t emissive_texture;
+} gltf_material;
+
+typedef struct gltf_texture {
+    int32_t image;
+} gltf_texture;
+
+typedef struct gltf_image {
+    glb_span bytes;
+    char mime[32];
+} gltf_image;
+
+typedef struct gltf_scene {
+    gltf_vertex *vertices;
+    size_t vertex_count;
+    size_t vertex_capacity;
+
+    gltf_material *materials;
+    uint32_t material_count;
+    uint32_t default_material;
+
+    gltf_texture *textures;
+    uint32_t texture_count;
+
+    gltf_image *images;
+    uint32_t image_count;
+} gltf_scene;
+
+bool gltf_extract(const glb_doc *doc, gltf_scene *scene);
+void gltf_free(gltf_scene *scene);
+
+    //// bvh
+
+typedef struct bvh_triangle {
+    float a[4];
+    float b[4];
+    float c[4];
+    float normal[4];
+} bvh_triangle;
+
+typedef struct bvh_node {
+    float min[4];
+    float max[4];
+    uint32_t meta[4]; /* left, next, first triangle, triangle count */
+} bvh_node;
+
+typedef struct bvh {
+    bvh_node *nodes;
+    uint32_t node_count;
+    uint32_t node_capacity;
+    bvh_triangle *triangles;
+    uint32_t triangle_count;
+} bvh;
+
+bool bvh_build(bvh *tree, const mesh *m, const gltf_scene *visual);
+void bvh_free(bvh *tree);
+
+    //// lmap: lightmap atlas
+
+typedef struct lmap_uv {
+    float u, v;
+} lmap_uv;
+
+typedef struct lmap_sample {
+    float position[4]; /* xyz + pixel index bitcast */
+    float normal[4];
+} lmap_sample;
+
+typedef struct lightmap {
+    uint32_t width;
+    uint32_t height;
+    uint32_t padding;
+    uint32_t chart_count;
+    float texel_density;
+    lmap_uv *uvs; /* 3 entries per mesh face */
+    lmap_sample *samples;
+    uint32_t sample_count;
+} lightmap;
+
+bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit, uint32_t max_size);
+void lmap_free(lightmap *lm);
+
+typedef struct dm_probe {
+    float position[4]; /* xyz and validity */
+    float coefficients[9][4]; /* RGB SH9; coefficient[1].w is sun visibility */
+} dm_probe;
+
+typedef struct dm_probe_grid {
+    vec3 origin;
+    float spacing;
+    uint32_t count_x, count_y, count_z;
+    dm_probe *probes;
+} dm_probe_grid;
+
+typedef struct dm_beam_cell {
+    uint32_t x, y, z, side;
+} dm_beam_cell;
+
+typedef struct dm_beam_grid {
+    vec3 origin;
+    vec3 step; /* world-space spacing along the three sun-space axes */
+    uint32_t width, height, depth;
+    uint32_t count;
+    dm_beam_cell *cells; /* visible quadtree squares; all other voxels are shaded */
+    float *shadow_depth; /* first sun-facing surface for each x/y column */
+} dm_beam_grid;
+
+bool dm_beam_build(dm_beam_grid *grid, const mesh *scene, const bvh *tree,
+                   vec3 sun_direction);
+void dm_beam_free(dm_beam_grid *grid);
+float *dm_beam_expand(const dm_beam_grid *grid);
+
+    //// fx: HDR post stack
+
+typedef struct fx_state {
+    SDL_GPUDevice *device;
+
+    SDL_GPUGraphicsPipeline *compose_pipeline;
+    SDL_GPUComputePipeline *ssao_pipeline;
+    SDL_GPUComputePipeline *bloom_pipeline;
+    SDL_GPUComputePipeline *grade_pipeline;
+    SDL_GPUComputePipeline *volume_pipeline;
+    SDL_GPUComputePipeline *volume_compose_pipeline;
+    SDL_GPUSampler *sampler;
+    SDL_GPUSampler *depth_sampler;
+
+    SDL_GPUTexture *hdr;
+    SDL_GPUTexture *normal_depth;
+    SDL_GPUTexture *ao;
+    SDL_GPUTexture *bloom_a;
+    SDL_GPUTexture *bloom_b;
+    SDL_GPUTexture *lut;
+    SDL_GPUTexture *volume;
+    SDL_GPUTexture *lit;
+
+    Uint32 width, height;
+    Uint32 ao_width, ao_height;
+    bool volume_ready;
+    uint32_t debug_view;
+} fx_state;
+
+bool fx_init(fx_state *fx, SDL_GPUDevice *device, SDL_Window *window);
+bool fx_ensure(fx_state *fx, Uint32 width, Uint32 height);
+bool fx_volume(fx_state *fx, SDL_GPUCommandBuffer *cmd, SDL_GPUBuffer *probes,
+               SDL_GPUBuffer *beams, const dm_probe_grid *grid,
+               const dm_beam_grid *beam_grid, vec3 eye, vec3 right, vec3 up,
+               vec3 forward, vec3 sun, float tan_half_fov, float aspect);
+bool fx_apply(fx_state *fx, SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swap, float tan_half_fov, float aspect);
+void fx_deinit(fx_state *fx);
+
+    //// render
+
+typedef struct render_vertex {
+    float x, y, z;
+    float nx, ny, nz;
+    float u, v;
+    float lu, lv;
+    float r, g, b, a;
+} render_vertex;
+
+typedef struct gpu_material gpu_material;
+typedef struct draw_range draw_range;
+
+typedef struct renderer {
+    SDL_Window *window;
+    SDL_GPUDevice *device;
+    SDL_GPUGraphicsPipeline *sky_pipeline;
+    SDL_GPUGraphicsPipeline *solid_pipeline;
+    SDL_GPUGraphicsPipeline *line_pipeline;
+    SDL_GPUComputePipeline *bake_pipeline;
+
+    SDL_GPUBuffer *vertex_buffer;
+    SDL_GPUBuffer *bvh_node_buffer;
+    SDL_GPUBuffer *bvh_triangle_buffer;
+    SDL_GPUBuffer *lightmap_sample_buffer;
+
+    SDL_GPUTexture *depth_texture;
+    SDL_GPUTexture *lightmap_texture;
+    SDL_GPUTexture *lightmap_scratch;
+    SDL_GPUSampler *lightmap_sampler;
+    SDL_GPUSampler *material_sampler;
+    SDL_GPUTextureFormat depth_format;
+    Uint32 depth_width;
+    Uint32 depth_height;
+
+    SDL_GPUTexture **image_textures;
+    uint32_t image_texture_count;
+    SDL_GPUTexture *default_white;
+    SDL_GPUTexture *default_normal;
+
+    gpu_material *materials;
+    uint32_t material_count;
+    draw_range *draws;
+    uint32_t draw_count;
+
+    render_vertex *vertices;
+    uint32_t vertex_count;
+    uint32_t vertex_capacity;
+    uint32_t debug_vertex_start;
+    uint32_t debug_vertex_count;
+
+    uint32_t lightmap_width;
+    uint32_t lightmap_height;
+    uint32_t lightmap_sample_count;
+    uint32_t bake_target_samples;
+    float bake_epsilon;
+    bool has_bake;
+    const char *bake_stage;
+    dm_probe_grid object_probes;
+    dm_probe_grid volume_probes;
+    SDL_GPUBuffer *volume_probe_buffer;
+    SDL_GPUBuffer *beam_buffer;
+    dm_beam_grid beams;
+
+    fx_state fx;
+
+    float yaw;
+    float pitch;
+    float distance;
+    float scene_radius;
+    double frame_time_ms;
+    vec3 target;
+
+    bool dragging;
+    bool show_debug;
+    bool show_volume;
+    uint32_t debug_view;
+} renderer;
+
+bool r_init(renderer *r, const char *title, int width, int height);
+bool r_build_scene(renderer *r, const mesh *m, const gltf_scene *visual, const lightmap *lm);
+bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash,
+                            uint64_t layout_hash, const lightmap *lm);
+bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual,
+                            const lightmap *lm,
+                            const char *path, uint64_t scene_hash, uint64_t layout_hash);
+void r_event(renderer *r, const SDL_Event *event);
+bool r_draw(renderer *r);
+void r_deinit(renderer *r);
+
+#endif
