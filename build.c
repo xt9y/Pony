@@ -9,7 +9,7 @@ void build(C_Build *b) {
     c_sources(app, "gltf.c");
     c_sources(app, "bvh.c");
     c_sources(app, "lmap.c");
-    c_sources(app, "fx.c");
+    c_sources(app, "fx_vision.c");
     c_sources(app, "render.c");
     c_sources(app, "cache.c");
     c_sources(app, "beam.c");
