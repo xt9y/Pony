@@ -61,7 +61,8 @@ float integrate_beam_interval(float3 ray_origin, float3 ray_direction,
         float2 axis_weight = lerp(1.0f - fraction, fraction, float2(x, y));
         float weight = axis_weight.x * axis_weight.y;
         float blocker = SunBeams[beam_shadow_index((uint)index.x, (uint)index.y, beam_depth)];
-        bool interval_has_light = blocker < -1.0e20f || interval_max_z > blocker + blocker_guard;
+        bool interval_has_light = blocker >= -1.0e20f && interval_max_z > blocker + blocker_guard;
+        // bool interval_has_light = blocker < -1.0e20f || interval_max_z > blocker + blocker_guard;
         raw_visibility += interval_has_light ? weight : 0.0f;
     }
 
@@ -85,6 +86,7 @@ float integrate_beam_interval(float3 ray_origin, float3 ray_direction,
         float a = t0;
         float b = t1;
         float blocker = SunBeams[beam_shadow_index((uint)index.x, (uint)index.y, beam_depth)];
+        if (blocker < -1.0e20f) continue;
 
         if (blocker >= -1.0e20f)
         {
@@ -274,7 +276,15 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     float3 maximum = minimum + grid_origin_spacing.w *
         float3(grid_dims_width.xyz - 1u);
     float enter = 0.0f, leave = 10000.0f;
+
+    // [unroll] for (uint axis = 0; axis < 3u; ++axis) {
+    //
+    //     if (abs(direction[axis]) < 1.0e-6f) {
+    //         if (eye_density[axis] < minimum[axis] ||
+    //             eye_density[axis] > maximum[axis]) { Output[id.xy] = float4(0,0,0,1); return; }
+    //     } else {
     [unroll] for (uint axis = 0; axis < 3u; ++axis) {
+
         if (abs(direction[axis]) < 1.0e-6f) {
             if (eye_density[axis] < minimum[axis] ||
                 eye_density[axis] > maximum[axis]) { Output[id.xy] = float4(0,0,0,1); return; }
@@ -285,8 +295,91 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
             leave = min(leave, max(a,b));
         }
     }
+
+
     float4 surface = NormalDepth.SampleLevel(DepthSampler, uv, 0.0f);
     float depth = surface.w;
+
+
+
+    // if (height_debug.y == 3u) {
+    //     if (depth <= 0.0f) {
+    //         Output[id.xy] = float4(0, 0, 0, 1);
+    //         return;
+    //     }
+    //
+    //     float distance = depth / max(dot(direction, forward_g.xyz), 0.01f);
+    //     float3 reconstructed = eye_density.xyz + direction * distance;
+    //     float error = length(reconstructed - surface.xyz);
+    //
+    //     Output[id.xy] = error < 0.2f
+    //         ? float4(0, 1, 0, 1)   // camera ray reaches the actual surface
+    //         : float4(1, 0, 0, 1);  // depth/ray reconstruction disagrees
+    //     return;
+    // }
+
+
+    if (height_debug.y == 3u) {
+        if (depth <= 0.0f) {
+            Output[id.xy] = float4(0, 0, 0, 1);
+            return;
+        }
+
+
+        // float3 actual = surface.xyz - eye_density.xyz;
+
+        float3 actual = surface.xyz;
+
+
+        float depth_error = abs(depth - dot(actual, forward_g.xyz));
+        float direction_error = length(direction - normalize(actual));
+
+        Output[id.xy] = float4(
+            saturate(depth_error * 2.0f),      // red: view-depth disagreement
+            0.0f,
+            saturate(direction_error * 25.0f), // blue: camera-ray disagreement
+            1.0f);
+        return;
+    }
+
+
+    // if (height_debug.y == 3u) {
+    //
+    //     if (depth <= 0.0f) {
+    //         Output[id.xy] = float4(0, 0, 0, 1);
+    //         return;
+    //     }
+    //
+    //     float surface_t = depth / max(dot(direction, forward_g.xyz), 0.01f);
+    //     float3 p = eye_density.xyz + direction * max(surface_t - 0.02f, 0.0f);
+    //     float3 sun = normalize(sun_intensity.xyz);
+    //     float3 u = normalize(cross(float3(0, 1, 0), sun));
+    //     float3 v = cross(sun, u);
+    //
+    //     float2 xy = float2(dot(p, u), dot(p, v));
+    //     int2 pixel = clamp(
+    //         int2(floor((xy - beam_origin.xy) / beam_step.xy)),
+    //         int2(0, 0), int2(63, 63));
+    //
+    //     float blocker = SunBeams[64u * 64u * height_debug.z +
+    //                              (uint)pixel.x + 64u * (uint)pixel.y];
+    //
+    //     // Magenta: no blocker. Red: blocker says ceiling is sunlit.
+    //     // Green: ceiling is correctly shadowed at its own position.
+    //     Output[id.xy] = blocker < -1.0e20f ? float4(1, 0, 1, 1) :
+    //         dot(p, sun) > blocker + 0.02f ? float4(1, 0, 0, 1) :
+    //                                         float4(0, 1, 0, 1);
+    //     return;
+    // }
+
+    // if (height_debug.y == 3u) {
+    //     Output[id.xy] = depth > 0.0f
+    //         ? float4(0.0f, 1.0f, 0.0f, 1.0f)  // surface depth exists
+    //         : float4(1.0f, 0.0f, 0.0f, 1.0f); // shader sees sky/no surface
+    //     return;
+    // }
+
+
     if (depth > 0.0f) leave = min(leave, depth / max(dot(direction,forward_g.xyz),0.01f));
     if (leave <= enter) { Output[id.xy] = float4(0,0,0,1); return; }
     float3 surface_position = eye_density.xyz + direction *
@@ -317,14 +410,9 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     float sun_integral = integrate_sun_grid(eye_density.xyz, direction, enter, leave,
                                             eye_density.w, sun_fraction);
     sum += sun_integral * sun_intensity.w * hg * float3(1.0f, 0.94f, 0.84f);
-    if (height_debug.y == 3u) {
-        Output[id.xy] = float4(sun_fraction, sun_fraction, sun_fraction, 1.0f);
-        return;
-    }
-    if (height_debug.y == 4u) {
-        Output[id.xy] = float4(sum, 1.0f);
-        return;
-    }
+    // float T = exp(-eye_density.w * (leave - enter));
+    // Output[id.xy] = float4(T.xxx, 1.0f);
+    // return;
     Output[id.xy] = float4(sum, exp(-eye_density.w * (leave-enter)));
 }
 #else

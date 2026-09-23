@@ -936,6 +936,7 @@ static SDL_GPUBuffer *upload_beams(renderer *r, const dm_beam_grid *grid) {
 }
 
 static bool make_probe_grid(const mesh *m, float spacing, dm_probe_grid *grid) {
+
     if (!m || !grid || spacing <= 0.0f) return false;
     memset(grid, 0, sizeof(*grid));
     const vec3 extent = v3_sub(m->bounds.max, m->bounds.min);
@@ -967,6 +968,7 @@ static bool make_probe_grid(const mesh *m, float spacing, dm_probe_grid *grid) {
 }
 
 static bool bake_probe_grid(renderer *r, dm_probe_grid *grid, Uint32 samples) {
+
     uint64_t count = (uint64_t)grid->count_x * grid->count_y * grid->count_z;
     const Uint32 output_bytes = (Uint32)(count * 9u * sizeof(float[4]));
     const Uint32 input_bytes = (Uint32)(count * sizeof(float[4]));
@@ -1103,6 +1105,8 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
     Uint64 started = SDL_GetPerformanceCounter();
     bvh tree = {0};
     if (!bvh_build(&tree, m, visual)) return false;
+    // SDL_Log("probe grid %ux%ux%u spacing=%.2f", grid->count_x, grid->count_y, grid->count_z, grid->spacing);
+    
     bake_timing("scene geometry", started);
 
     bake_progress(r, "lightmap shader", 0u, 0u);
@@ -1387,6 +1391,9 @@ bool r_draw(renderer *r) {
 
     if (!r || !r->device || !r->solid_pipeline || !r->sky_pipeline || !r->vertex_buffer || !r->lightmap_texture || !r->lightmap_sampler) return false;
 
+    r->debug_view = 3u;
+    r->show_volume = true;
+
     SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(r->device);
     if (!cmd) return false;
     SDL_GPUTexture *swap = NULL;
@@ -1483,6 +1490,8 @@ bool r_draw(renderer *r) {
 
         SDL_PushGPUFragmentUniformData(cmd, 0, &material, sizeof(material));
         SDL_DrawGPUPrimitives(pass, draw->count, 1, draw->first, 0);
+
+        // SDL_Log("BVH: %u nodes, %u triangles", tree.node_count, tree.triangle_count);
     
     }
 
@@ -1495,11 +1504,25 @@ bool r_draw(renderer *r) {
 
     r->fx.volume_ready = false;
     r->fx.debug_view = r->debug_view;
-    if (r->show_volume && r->has_bake && (r->debug_view==0u || r->debug_view>=3u) &&
+    
+    static uint32_t last_logged_view = UINT32_MAX;
+    if (last_logged_view != r->fx.debug_view) {
+        SDL_Log("GPU debug view: %u | fog: %d | bake: %d",
+                r->fx.debug_view, r->show_volume, r->has_bake);
+        last_logged_view = r->fx.debug_view;
+    }
+
+    if (/* false &&  */r->show_volume && r->has_bake &&
+    (r->debug_view == 0u || r->debug_view >= 3u) &&
         r->volume_probe_buffer && r->beam_buffer &&
         !fx_volume(&r->fx, cmd, r->volume_probe_buffer, r->beam_buffer,
-                   &r->volume_probes, &r->beams,
-                   eye, right, up, forward, sun, tan_half, aspect)) {
+               &r->volume_probes, &r->beams,
+               eye, right, up, forward, sun, tan_half, aspect)) {
+    // if (r->show_volume && r->has_bake && (r->debug_view==0u || r->debug_view>=3u) &&
+    //     r->volume_probe_buffer && r->beam_buffer &&
+    //     !fx_volume(&r->fx, cmd, r->volume_probe_buffer, r->beam_buffer,
+    //                &r->volume_probes, &r->beams,
+    //                eye, right, up, forward, sun, tan_half, aspect)) {
         SDL_CancelGPUCommandBuffer(cmd);
         return false;
     }

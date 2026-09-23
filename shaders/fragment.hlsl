@@ -94,15 +94,56 @@ SurfaceOutput surface_fs(SurfaceInput input)
 
     float4 base_sample = BaseColor.Sample(BaseColorSampler, input.uv);
     float3 base = srgb_to_linear(base_sample.rgb) * base_color_factor.rgb;
+    // output.hdr = float4(base, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+
     float4 mr = MetallicRoughness.Sample(MetallicRoughnessSampler, input.uv);
     float metallic = saturate(emissive_metallic.w * mr.b);
+    // output.hdr = float4(metallic.xxx, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+
     float roughness = clamp(roughness_normal_ao_sun.x * mr.g, 0.045f, 1.0f);
+    // output.hdr = float4(roughness.xxx, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+
     float ao_sample = Occlusion.Sample(OcclusionSampler, input.uv).r;
     float material_ao = lerp(1.0f, ao_sample, saturate(roughness_normal_ao_sun.z));
+    // output.hdr = float4(material_ao.xxx, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+
     float3 emissive = srgb_to_linear(Emissive.Sample(EmissiveSampler, input.uv).rgb) *
                       emissive_metallic.rgb;
-
+    // output.hdr = float4(emissive, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+    
     float3 n = mapped_normal(input, roughness_normal_ao_sun.y);
+    // output.hdr = float4(n * 0.5f + 0.5f, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+ 
     float3 v = normalize(camera_position.xyz - input.world_position);
     float3 l = normalize(sun_direction.xyz);
     float3 h = normalize(v + l);
@@ -131,15 +172,36 @@ SurfaceOutput surface_fs(SurfaceInput input)
         ? saturate(baked_luma * 0.55f) : 1.0f;
     float3 direct_specular = specular * sun_color.rgb * roughness_normal_ao_sun.w *
                              n_dot_l * sun_visibility;
+    // output.hdr = float4(direct_specular, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+
     float3 environment_specular = f0 * (0.025f + 0.10f * (1.0f - roughness)) *
                                   material_ao * (camera_position.w > 0.5f
                                   ? saturate(baked_luma * 2.0f) : 1.0f);
+    // output.hdr = float4(environment_specular, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
 
     float3 diffuse = base * baked * material_ao * (1.0f - metallic);
     output.hdr = float4(max(diffuse + direct_specular + environment_specular + emissive, 0.0f),
                         base_sample.a * base_color_factor.a);
-    output.normal_depth = float4(normalize(input.view_normal) * 0.5f + 0.5f,
-                                 input.view_depth);
+
+    // output.normal_depth = float4(input.world_position, input.view_depth);
+
+    output.normal_depth = float4(input.world_position - camera_position.xyz,
+                             input.view_depth);
+
+    // output.normal_depth = float4(normalize(input.view_normal) * 0.5f + 0.5f,
+    //                              input.view_depth);
+
+
     return output;
 }
 #elif defined(BUILD_SKY_FS)
@@ -249,6 +311,11 @@ float4 compose_fs(ComposeInput input) : SV_Target0
     uint width, height;
     Hdr.GetDimensions(width, height);
     float2 uv = input.position.xy / float2(width, height);
+    
+
+    if (exposure < 0.0f) 
+        return float4(saturate(Hdr.SampleLevel(HdrSampler, uv, 0.0f).rgb), 1.0f);
+
 
     float3 hdr = Hdr.SampleLevel(HdrSampler, uv, 0.0f).rgb * exposure;
     float ao = Ao.SampleLevel(AoSampler, uv, 0.0f).r;

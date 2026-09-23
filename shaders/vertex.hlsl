@@ -35,7 +35,8 @@ SurfaceOutput surface_vs(SurfaceInput input)
     output.uv = input.uv;
     output.lightmap_uv = input.lightmap_uv;
     output.view_normal = normalize(mul((float3x3)view, input.normal));
-    output.view_depth = max(-view_position.z, 0.0f);
+    // output.view_depth = max(-view_position.z, 0.0f);
+    output.view_depth = max(output.position.w, 0.0f);
     return output;
 }
 #elif defined(BUILD_FULLSCREEN_VS)

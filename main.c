@@ -36,12 +36,13 @@ int main(int argc, char **argv) {
     const char *model_path = argc > 1 ? argv[1] : "poolroom.glb";
     const char *filename = strrchr(model_path, '/');
     const char *windows_filename = strrchr(model_path, '\\');
+
     if (windows_filename && (!filename || windows_filename > filename)) filename = windows_filename;
     const char *extension = strrchr(model_path, '.');
-    size_t stem_length = extension && (!filename || extension > filename)
-        ? (size_t)(extension - model_path) : strlen(model_path);
+    size_t stem_length = extension && (!filename || extension > filename) ? (size_t)(extension - model_path) : strlen(model_path);
     char *bake_path = malloc(stem_length + sizeof(".baked"));
     if (!bake_path) return 1;
+
     memcpy(bake_path, model_path, stem_length);
     memcpy(bake_path + stem_length, ".baked", sizeof(".baked"));
 
@@ -144,17 +145,15 @@ int main(int argc, char **argv) {
                     SDL_Log("B: rebaking current scene (this may take a while)");
 
                     const Uint64 begin = SDL_GetPerformanceCounter();
-                    const bool good = r_rebake_current_scene(&r, &scene, &visual, &lm,
-                                                              bake_path, scene_hash, layout_hash);
+                    const bool good = r_rebake_current_scene(&r, &scene, &visual, &lm, bake_path, scene_hash, layout_hash);
 
-                    SDL_SetWindowTitle(r.window, good ? "Dustmite - bake saved (B to rebake)" :
-                                       "Dustmite - bake FAILED (see console; B to retry)");
                     SDL_Log("B: %s after %.2f ms%s%s%s%s",
                             good ? "bake saved" : "bake failed; previous lighting retained",
                             elapsed_ms(begin), good ? "" : " at ",
                             good ? "" : (r.bake_stage ? r.bake_stage : "unknown stage"),
                             good ? "" : ": ",
                             good ? "" : (*SDL_GetError() ? SDL_GetError() : "see the failing stage"));
+                    // SDL_Log("draw %u: material=%u first=%u count=%u", i, draw->material, draw->first, draw->count);
                 }
             }
 
