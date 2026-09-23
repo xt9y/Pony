@@ -95,7 +95,7 @@ typedef struct material_uniforms {
     float sun_direction[4];
     float sun_color[4];
     float camera_position[4];
-    float camera_forward[4];
+    // float camera_forward[4]; // Fragment depth diagnostic.
 } material_uniforms;
 
 struct gpu_material {
@@ -1490,8 +1490,7 @@ bool r_draw(renderer *r) {
             .sun_color = {1.00f, 0.94f, 0.84f, 1},
             .camera_position = {eye.x, eye.y, eye.z,
                                 r->debug_view==1u ? 2.0f : (r->has_bake ? 1.0f : 0.0f)},
-
-            .camera_forward = {forward.x, forward.y, forward.z, 0}
+            // .camera_forward = {forward.x, forward.y, forward.z, 0}
         };
 
         SDL_PushGPUFragmentUniformData(cmd, 0, &material, sizeof(material));

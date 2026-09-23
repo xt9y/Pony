@@ -362,14 +362,14 @@ bool fx_apply(fx_state *fx, SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swap, flo
     };
     SDL_BindGPUFragmentSamplers(pass, 0, bindings, 4);
     const compose_uniforms u = {
-        .exposure = -1.0f,
-        .ao_strength = 0.0f,
-        .bloom_strength = 0.0f
+        .exposure = 1.0f,
+        .ao_strength = fx->debug_view >= 3u ? 0.0f : 0.62f,
+        .bloom_strength = fx->debug_view >= 3u ? 0.0f : 0.22f
     };
     // const compose_uniforms u = {
-    //      .exposure = 1.0f, 
-    //      .ao_strength = fx->debug_view >= 3u ? 0.0f : 0.62f,
-    //      .bloom_strength = fx->debug_view >= 3u ? 0.0f : 0.22f
+    //      .exposure = -1.0f,
+    //      .ao_strength = 0.0f,
+    //      .bloom_strength = 0.0f
     //  };
     SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof(u));
     SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
