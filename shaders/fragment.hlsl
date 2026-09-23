@@ -92,6 +92,28 @@ SurfaceOutput surface_fs(SurfaceInput input)
 {
     SurfaceOutput output;
 
+    float3 relative = input.world_position - camera_position.xyz;
+
+    // float error = abs(input.view_depth - dot(relative, camera_forward.xyz));
+    // float error = abs(input.view_depth - dot(input.world_position - camera_position.xyz, camera_forward.xyz));
+    // float error = abs(input.view_depth - dot(input.world_position - camera_position.xyz, camera_forward.xyz));
+    output.hdr = float4(0, 0, 0, 1);
+    output.normal_depth = float4(normalize(input.view_normal) * 0.5f + 0.5f, max(input.view_depth, 0.0f));
+    // output.normal_depth = float4(saturate(error * 2.0f), 0, 0, max(input.view_depth, 0.0f));
+    return output;
+    
+    // float error = abs(input.view_depth - input.world_position.z);
+    // output.normal_depth = float4(saturate(error * 2.0f), 0, 0, 1.0f);
+
+    // float raster_depth = 1.0f / max(input.position.w, 1.0e-6f);
+    // float error = abs(input.view_depth - raster_depth);
+
+    // output.hdr = float4(0, 0, 0, 1);
+    // output.normal_depth = float4(camera_forward.xyz, input.view_depth);
+    // output.normal_depth = float4(saturate(error * 2.0f), 0, 0, input.view_depth);
+    // output.normal_depth = float4(camera_position.xyz, input.view_depth);
+    // return output;
+
     float4 base_sample = BaseColor.Sample(BaseColorSampler, input.uv);
     float3 base = srgb_to_linear(base_sample.rgb) * base_color_factor.rgb;
     // output.hdr = float4(base, 1.0f);

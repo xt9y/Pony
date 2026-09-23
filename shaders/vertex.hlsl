@@ -26,7 +26,7 @@ struct SurfaceOutput
 
 SurfaceOutput surface_vs(SurfaceInput input)
 {
-    SurfaceOutput output;
+    SurfaceOutput output; 
     float4 world = float4(input.position, 1.0f);
     float4 view_position = mul(view, world);
     output.position = mul(mvp, world);
@@ -36,7 +36,11 @@ SurfaceOutput surface_vs(SurfaceInput input)
     output.lightmap_uv = input.lightmap_uv;
     output.view_normal = normalize(mul((float3x3)view, input.normal));
     // output.view_depth = max(-view_position.z, 0.0f);
-    output.view_depth = max(output.position.w, 0.0f);
+    // output.view_depth = max(dot(input.position - camera_eye.xyz, camera_forward.xyz), 0.0f);
+    // output.view_depth = dot(input.position - camera_eye.xyz, camera_forward.xyz);
+    // output.view_depth = input.position.z;
+    // output.view_depth = max(output.position.w, 0.0f);
+    output.view_depth = -view_position.z;
     return output;
 }
 #elif defined(BUILD_FULLSCREEN_VS)
