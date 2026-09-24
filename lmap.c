@@ -6,7 +6,10 @@
 
 #define LMAP_PADDING 3u
 #define LMAP_MIN_DENSITY 1.0f
-#define LMAP_CHART_DOT 0.984807753f
+/* Face-to-face joining is transitive: a loose normal threshold lets a folded
+ * surface merge into one chart and project different locations onto the same
+ * texel. Keep connected charts effectively planar. */
+#define LMAP_CHART_DOT 0.99999f
 
 
 typedef struct edge_ref {
@@ -421,11 +424,12 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
     if (!width || !height) goto fail;
 
-    lm->uvs = malloc((size_t)face_count * 3u * sizeof(*lm->uvs));
+    if (height > max_size || height > UINT32_MAX / 2u) goto fail;
+    lm->uvs = malloc((size_t)face_count * 6u * sizeof(*lm->uvs));
     if (!lm->uvs) goto fail;
 
     lm->width = width;
-    lm->height = height;
+    lm->height = height * 2u;
     lm->padding = LMAP_PADDING;
     lm->chart_count = chart_count;
     lm->texel_density = density;
@@ -446,7 +450,9 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
             if (px > max_x) px = max_x;
             if (py > max_y) py = max_y;
-            lm->uvs[i * 3u + k] = (lmap_uv){px / (float)width, py / (float)height};
+            lm->uvs[i * 6u + k] = (lmap_uv){px / (float)width, py / (float)lm->height};
+            lm->uvs[i * 6u + 3u + k] = (lmap_uv){px / (float)width,
+                                                    (py + (float)height) / (float)lm->height};
         }
     }
 
@@ -461,9 +467,9 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
         lmap_uv uv[3];
         for (uint32_t k = 0; k < 3u; ++k) {
 
-            uv[k] = lm->uvs[i * 3u + k];
+            uv[k] = lm->uvs[i * 6u + k];
             uv[k].u *= width;
-            uv[k].v *= height;
+            uv[k].v *= lm->height;
         }
 
         int min_x = (int)floorf(fminf(uv[0].u, fminf(uv[1].u, uv[2].u)));
@@ -497,6 +503,11 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
     }
 
 
+    if (sample_count > UINT32_MAX / 2u) {
+        free(occupied);
+        goto fail;
+    }
+    sample_count *= 2u;
     lm->samples = malloc((size_t)sample_count * sizeof(*lm->samples));
     if (!lm->samples && sample_count) {
         free(occupied);
@@ -515,9 +526,9 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
         for (uint32_t k = 0; k < 3u; ++k) {
 
-            uv[k] = lm->uvs[i * 3u + k];
+            uv[k] = lm->uvs[i * 6u + k];
             uv[k].u *= width;
-            uv[k].v *= height;
+            uv[k].v *= lm->height;
         }
 
 
@@ -566,6 +577,14 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
                 s->normal[1] = n.y;
                 s->normal[2] = n.z;
                 s->normal[3] = 0.0f;
+
+                lmap_sample *back = &lm->samples[out_sample++];
+                *back = *s;
+                bits.u = (uint32_t)(pixel + pixel_count);
+                back->position[3] = bits.f;
+                back->normal[0] = -n.x;
+                back->normal[1] = -n.y;
+                back->normal[2] = -n.z;
             }
         }
     

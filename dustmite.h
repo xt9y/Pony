@@ -230,7 +230,7 @@ typedef struct lightmap {
     uint32_t padding;
     uint32_t chart_count;
     float texel_density;
-    lmap_uv *uvs; /* 3 entries per mesh face */
+    lmap_uv *uvs; /* front 3, back 3 per mesh face */
     lmap_sample *samples;
     uint32_t sample_count;
 } lightmap;
