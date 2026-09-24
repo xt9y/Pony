@@ -33,7 +33,7 @@ static void print_required_extensions(const glb_doc *doc) {
 
 int main(int argc, char **argv) {
 
-    const char *model_path = argc > 1 ? argv[1] : "poolroom.glb";
+    const char *model_path = argc > 1 ? argv[1] : "concrete_temple.glb";
     const char *filename = strrchr(model_path, '/');
     const char *windows_filename = strrchr(model_path, '\\');
 
