@@ -534,7 +534,7 @@ struct TraceHit
     float t;
     float3 normal;
     float3 albedo;
-    uint triangle;
+    uint triangle_index;
 };
 
 struct BakeSample
@@ -769,7 +769,7 @@ bool trace_closest(TraceRay ray, out TraceHit hit)
     hit.t = ray.tmax;
     hit.normal = 0.0f;
     hit.albedo = 0.0f;
-    hit.triangle = INVALID_NODE;
+    hit.triangle_index = INVALID_NODE;
 
     while (node_index != INVALID_NODE)
     {
@@ -801,7 +801,7 @@ bool trace_closest(TraceRay ray, out TraceHit hit)
                 hit.albedo = saturate(float3(Triangles[tri_index].a.w,
                                              Triangles[tri_index].b.w,
                                              Triangles[tri_index].c.w));
-                hit.triangle = tri_index;
+                hit.triangle_index = tri_index;
                 found = true;
             }
             node_index = node.meta.y;
