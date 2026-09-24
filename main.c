@@ -1,5 +1,4 @@
 #include "dustmite.h"
-#include "cache.h"
 
 #include <SDL3/SDL.h>
 
