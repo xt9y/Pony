@@ -16,6 +16,8 @@ static vec3 beam_u(vec3 sun) {
 
 }
 
+#if 0
+/* Reference exact-visibility path. */
 static bool intersects_box(vec3 p, vec3 d, const bvh_node *node) {
 
     float lo = 0.0f;
@@ -85,6 +87,7 @@ static bool shaded(const bvh *tree, vec3 p, vec3 sun) {
 
     return false;
 }
+#endif
 
 static uint32_t beam_depth_for_span(float span) {
 
@@ -149,30 +152,35 @@ static void raster_depth(float *depth, const dm_beam_grid *grid, const bvh *tree
 
 /* Classify a coarse tile only when all of its depth pixels agree. A
  * silhouette, an opening, or a depth change falls back to exact BVH rays. */
-static int depth_tile(const float *depth, const dm_beam_grid *grid,
-                      uint32_t x, uint32_t y, uint32_t z) {
+typedef struct depth_tile_info {
+    float nearest, farthest;
+    uint32_t covered;
+} depth_tile_info;
 
-    float nearest = INFINITY, farthest = -INFINITY;
-    uint32_t covered = 0;
-
+static depth_tile_info measure_depth_tile(const float *depth, const dm_beam_grid *grid,
+                                          uint32_t x, uint32_t y) {
+    depth_tile_info info = {INFINITY, -INFINITY, 0};
     for (uint32_t j = y; j < y + BEAM_TILE; ++j) {
         for (uint32_t i = x; i < x + BEAM_TILE; ++i) {
             const float d = depth[i + (size_t)grid->width * j];
             if (d == -INFINITY) continue;
-            ++covered;
-            nearest = fminf(nearest, d);
-            farthest = fmaxf(farthest, d);
+            ++info.covered;
+            info.nearest = fminf(info.nearest, d);
+            info.farthest = fmaxf(info.farthest, d);
         }
     }
+    return info;
+}
 
-    if (!covered) return 1;
-    if (covered != BEAM_TILE * BEAM_TILE ||
-        farthest - nearest > grid->step.z * 0.5f) return -1;
+static int depth_tile(depth_tile_info info, const dm_beam_grid *grid, uint32_t z) {
+    if (!info.covered) return 1;
+    if (info.covered != BEAM_TILE * BEAM_TILE ||
+        info.farthest - info.nearest > grid->step.z * 0.5f) return -1;
 
     const float point = grid->origin.z + (z + 0.5f) * grid->step.z;
     const float guard = fmaxf(0.002f, grid->step.z * 0.01f);
-    if (nearest - point > guard) return 0;
-    if (farthest - point < -guard) return 1;
+    if (info.nearest - point > guard) return 0;
+    if (info.farthest - point < -guard) return 1;
     return -1;
 }
 
@@ -192,24 +200,36 @@ static bool emit(dm_beam_grid *grid, uint32_t x, uint32_t y, uint32_t z, uint32_
     return true;
 }
 
-static bool compress(dm_beam_grid *grid, const unsigned char *samples,
+static bool compress(dm_beam_grid *grid, const uint32_t *prefix,
                      uint32_t x, uint32_t y, uint32_t z, uint32_t side) {
-
-    uint32_t visible = 0;
-    for (uint32_t j = y; j < y + side; ++j) {
-        for (uint32_t i = x; i < x + side; ++i) {
-            visible += samples[i + (size_t)grid->width * (j + (size_t)grid->height * z)];
-        }
-    }
+    const size_t stride = (size_t)grid->width + 1u;
+    const uint32_t visible = prefix[(y + side) * stride + x + side] -
+                             prefix[y * stride + x + side] -
+                             prefix[(y + side) * stride + x] + prefix[y * stride + x];
 
     if (!visible) return true;
     if (visible == side * side) return emit(grid, x, y, z, side);
 
     const uint32_t half = side / 2u;
-    return half && compress(grid, samples, x, y, z, half) &&
-           compress(grid, samples, x + half, y, z, half) &&
-           compress(grid, samples, x, y + half, z, half) &&
-           compress(grid, samples, x + half, y + half, z, half);
+    return half && compress(grid, prefix, x, y, z, half) &&
+           compress(grid, prefix, x + half, y, z, half) &&
+           compress(grid, prefix, x, y + half, z, half) &&
+           compress(grid, prefix, x + half, y + half, z, half);
+}
+
+static void prefix_slice(uint32_t *prefix, const unsigned char *samples,
+                         uint32_t width, uint32_t height) {
+    const size_t stride = (size_t)width + 1u;
+    memset(prefix, 0, stride * sizeof(*prefix));
+    for (uint32_t y = 0; y < height; ++y) {
+        prefix[(size_t)(y + 1u) * stride] = 0;
+        uint32_t row = 0;
+        for (uint32_t x = 0; x < width; ++x) {
+            row += samples[x + (size_t)width * y];
+            prefix[(size_t)(y + 1u) * stride + x + 1u] =
+                prefix[(size_t)y * stride + x + 1u] + row;
+        }
+    }
 }
 
 void dm_beam_free(dm_beam_grid *grid) {
@@ -256,9 +276,13 @@ bool dm_beam_build(dm_beam_grid *grid, const mesh *scene, const bvh *tree,
     const size_t depth_count = (size_t)grid->width * grid->height;
     unsigned char *samples = calloc(sample_count, 1);
     float *depth = malloc(depth_count * sizeof(*depth));
-    if (!samples || !depth) {
+    depth_tile_info *tiles = malloc(depth_count / (BEAM_TILE * BEAM_TILE) * sizeof(*tiles));
+    uint32_t *prefix = malloc((grid->width + 1u) * (grid->height + 1u) * sizeof(*prefix));
+    if (!samples || !depth || !tiles || !prefix) {
         free(samples);
         free(depth);
+        free(tiles);
+        free(prefix);
         return false;
     }
 
@@ -266,12 +290,18 @@ bool dm_beam_build(dm_beam_grid *grid, const mesh *scene, const bvh *tree,
             grid->width, grid->height, grid->depth, grid->step.z);
 
     raster_depth(depth, grid, tree, u, v, sun);
+    for (uint32_t y = 0; y < grid->height; y += BEAM_TILE)
+        for (uint32_t x = 0; x < grid->width; x += BEAM_TILE)
+            tiles[x / BEAM_TILE + (size_t)(grid->width / BEAM_TILE) * (y / BEAM_TILE)] =
+                measure_depth_tile(depth, grid, x, y);
     uint32_t traced = 0;
 
     for (uint32_t z = 0; z < grid->depth; ++z) {
         for (uint32_t y = 0; y < grid->height; y += BEAM_TILE) {
             for (uint32_t x = 0; x < grid->width; x += BEAM_TILE) {
-                const int coarse = depth_tile(depth, grid, x, y, z);
+                const depth_tile_info info = tiles[x / BEAM_TILE +
+                    (size_t)(grid->width / BEAM_TILE) * (y / BEAM_TILE)];
+                const int coarse = depth_tile(info, grid, z);
                 for (uint32_t j = y; j < y + BEAM_TILE; ++j) {
                     for (uint32_t i = x; i < x + BEAM_TILE; ++i) {
                         unsigned char visible;
@@ -283,7 +313,13 @@ bool dm_beam_build(dm_beam_grid *grid, const mesh *scene, const bvh *tree,
                                               min.z + (z + 0.5f) * grid->step.z);
                             const vec3 p = v3_add(v3_add(v3_scale(u, q.x), v3_scale(v, q.y)),
                                                   v3_scale(sun, q.z));
-                            visible = !shaded(tree, p, sun);
+                            const dm_trace_ray ray = {
+                                .origin = p,
+                                .tmin = 0.001f,
+                                .direction = sun,
+                                .tmax = 1.0e20f
+                            };
+                            visible = !dm_trace_any(tree, ray);
                             ++traced;
                         }
                         samples[i + (size_t)grid->width * (j + (size_t)grid->height * z)] = visible;
@@ -297,10 +333,14 @@ bool dm_beam_build(dm_beam_grid *grid, const mesh *scene, const bvh *tree,
 
     bool good = true;
     for (uint32_t z = 0; z < grid->depth && good; ++z) {
-        good = compress(grid, samples, 0, 0, z, grid->width);
+        prefix_slice(prefix, samples + (size_t)grid->width * grid->height * z,
+                     grid->width, grid->height);
+        good = compress(grid, prefix, 0, 0, z, grid->width);
     }
 
     free(samples);
+    free(tiles);
+    free(prefix);
     if (good) grid->shadow_depth = depth;
     else {
         free(depth);
