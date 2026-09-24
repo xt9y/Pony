@@ -364,7 +364,6 @@ typedef struct renderer {
     float bake_epsilon;
     bool has_bake;
     const char *bake_stage;
-    dm_probe_grid object_probes;
     dm_probe_grid volume_probes;
     SDL_GPUBuffer *volume_probe_buffer;
     SDL_GPUBuffer *beam_buffer;
@@ -388,10 +387,12 @@ typedef struct renderer {
 bool r_init(renderer *r, const char *title, int width, int height);
 bool r_build_scene(renderer *r, const mesh *m, const gltf_scene *visual, const lightmap *lm);
 bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash,
-                            uint64_t layout_hash, const lightmap *lm);
+                            uint64_t layout_hash, uint64_t volume_hash,
+                            uint64_t beam_hash, const lightmap *lm);
 bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual,
                             const lightmap *lm,
-                            const char *path, uint64_t scene_hash, uint64_t layout_hash);
+                            const char *path, uint64_t scene_hash, uint64_t layout_hash,
+                            uint64_t volume_hash, uint64_t beam_hash);
 void r_event(renderer *r, const SDL_Event *event);
 bool r_draw(renderer *r);
 void r_deinit(renderer *r);

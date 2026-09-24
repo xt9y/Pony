@@ -7,7 +7,7 @@
 #include <string.h>
 
 #define DM_CACHE_MAGIC 0x4b424d44u
-#define DM_CACHE_VERSION 7u
+#define DM_CACHE_VERSION 8u
 #define DM_CACHE_MAX_DIMENSION 16384u
 #define DM_CACHE_BEAM_WIDTH 64u
 #define DM_CACHE_BEAM_HEIGHT 64u
@@ -33,6 +33,8 @@ typedef struct dm_cache_header {
     float beam_step[3];
     uint32_t beam_dims[3];
     uint32_t beam_count;
+    uint64_t volume_hash;
+    uint64_t beam_hash;
 } dm_cache_header;
 
 uint64_t dm_hash_bytes(uint64_t seed, const void *bytes, size_t size) {
@@ -87,8 +89,8 @@ static void unpack_grid(dm_probe_grid *grid, const uint32_t dims[3],
     grid->count_z = dims[2];
 }
 
-bool dm_cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash,
-                   dm_cached_lightmap *out) {
+bool dm_cache_read_partial(const char *path, uint64_t scene_hash,
+                           dm_cached_lightmap *out) {
 
     if (!path || !out) return false;
     memset(out, 0, sizeof(*out));
@@ -99,8 +101,9 @@ bool dm_cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash,
     dm_cache_header header = {0};
     uint64_t expected = 0;
     bool good = fread(&header, sizeof(header), 1, file) == 1 &&
-                header.magic == DM_CACHE_MAGIC && header.version == DM_CACHE_VERSION &&
-                header.scene_hash == scene_hash && header.layout_hash == layout_hash &&
+                header.magic == DM_CACHE_MAGIC &&
+                header.version == DM_CACHE_VERSION &&
+                header.scene_hash == scene_hash &&
                 valid_dimensions(header.width, header.height, &expected) &&
                 expected == header.bytes;
 
@@ -111,9 +114,9 @@ bool dm_cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash,
         unpack_grid(&out->volume_probes, header.volume_dims,
                     header.volume_origin, header.volume_spacing);
 
-        good = header.object_dims[0] && header.object_dims[0] <= 16384u &&
-               header.object_dims[1] && header.object_dims[1] <= 16384u &&
-               header.object_dims[2] && header.object_dims[2] <= 16384u &&
+        good = header.object_dims[0] <= 16384u &&
+               header.object_dims[1] <= 16384u &&
+               header.object_dims[2] <= 16384u &&
                header.volume_dims[0] && header.volume_dims[0] <= 16384u &&
                header.volume_dims[1] && header.volume_dims[1] <= 16384u &&
                header.volume_dims[2] && header.volume_dims[2] <= 16384u;
@@ -126,10 +129,11 @@ bool dm_cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash,
             header.beam_dims[1] * header.beam_dims[2] : 0;
 
         good = good && object_count <= 16384u && volume_count <= 16384u &&
-               header.object_spacing > 0.0f && header.volume_spacing > 0.0f &&
-               isfinite(header.object_spacing) && isfinite(header.volume_spacing) &&
-               isfinite(header.object_origin[0]) && isfinite(header.object_origin[1]) &&
-               isfinite(header.object_origin[2]) && isfinite(header.volume_origin[0]) &&
+               (!object_count || (header.object_spacing > 0.0f &&
+                isfinite(header.object_spacing) && isfinite(header.object_origin[0]) &&
+                isfinite(header.object_origin[1]) && isfinite(header.object_origin[2]))) &&
+               header.volume_spacing > 0.0f && isfinite(header.volume_spacing) &&
+               isfinite(header.volume_origin[0]) &&
                isfinite(header.volume_origin[1]) && isfinite(header.volume_origin[2]) &&
                header.beam_dims[0] == DM_CACHE_BEAM_WIDTH &&
                header.beam_dims[1] == DM_CACHE_BEAM_HEIGHT &&
@@ -143,9 +147,9 @@ bool dm_cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash,
         }
 
         if (good) {
-            out->object_probes.probes = malloc((size_t)object_count * sizeof(dm_probe));
+            if (object_count) out->object_probes.probes = malloc((size_t)object_count * sizeof(dm_probe));
             out->volume_probes.probes = malloc((size_t)volume_count * sizeof(dm_probe));
-            good = out->object_probes.probes && out->volume_probes.probes;
+            good = (!object_count || out->object_probes.probes) && out->volume_probes.probes;
 
             out->beams.origin = v3(header.beam_origin[0], header.beam_origin[1], header.beam_origin[2]);
             out->beams.step = v3(header.beam_step[0], header.beam_step[1], header.beam_step[2]);
@@ -180,7 +184,7 @@ bool dm_cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash,
         const size_t depth_bytes = depth_count * sizeof(float);
 
         good = out->pixels && fread(out->pixels, (size_t)expected, 1, file) == 1 &&
-               fread(out->object_probes.probes, object_bytes, 1, file) == 1 &&
+               (!object_bytes || fread(out->object_probes.probes, object_bytes, 1, file) == 1) &&
                fread(out->volume_probes.probes, volume_bytes, 1, file) == 1 &&
                (!beam_bytes || fread(out->beams.cells, beam_bytes, 1, file) == 1) &&
                fread(out->beams.shadow_depth, depth_bytes, 1, file) == 1 &&
@@ -188,7 +192,7 @@ bool dm_cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash,
 
         if (good) {
             uint64_t hash = dm_hash_bytes(0, out->pixels, (size_t)expected);
-            hash = dm_hash_bytes(hash, out->object_probes.probes, object_bytes);
+            if (object_bytes) hash = dm_hash_bytes(hash, out->object_probes.probes, object_bytes);
             hash = dm_hash_bytes(hash, out->volume_probes.probes, volume_bytes);
             if (beam_bytes) hash = dm_hash_bytes(hash, out->beams.cells, beam_bytes);
             hash = dm_hash_bytes(hash, out->beams.shadow_depth, depth_bytes);
@@ -214,10 +218,24 @@ bool dm_cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash,
 
     out->width = header.width;
     out->height = header.height;
+    out->layout_hash = header.layout_hash;
+    out->volume_hash = header.volume_hash;
+    out->beam_hash = header.beam_hash;
     return true;
 }
 
+bool dm_cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash,
+                   uint64_t volume_hash, uint64_t beam_hash,
+                   dm_cached_lightmap *out) {
+    if (!dm_cache_read_partial(path, scene_hash, out)) return false;
+    if (out->layout_hash == layout_hash && out->volume_hash == volume_hash &&
+        out->beam_hash == beam_hash) return true;
+    dm_cache_free(out);
+    return false;
+}
+
 bool dm_cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash,
+                    uint64_t volume_hash, uint64_t beam_hash,
                     const dm_cached_lightmap *data) {
 
     uint64_t bytes = 0;
@@ -226,7 +244,7 @@ bool dm_cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash,
 
     const uint64_t object_count = grid_count(&data->object_probes);
     const uint64_t volume_count = grid_count(&data->volume_probes);
-    if (!object_count || !volume_count) return false;
+    if (!volume_count) return false;
 
     const dm_beam_grid *beams = &data->beams;
     const uint64_t beam_capacity = (uint64_t)beams->width * beams->height * beams->depth;
@@ -250,7 +268,7 @@ bool dm_cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash,
     const size_t volume_bytes = (size_t)volume_count * sizeof(dm_probe);
     const size_t beam_bytes = (size_t)beams->count * sizeof(dm_beam_cell);
     uint64_t payload_hash = dm_hash_bytes(0, data->pixels, (size_t)bytes);
-    payload_hash = dm_hash_bytes(payload_hash, data->object_probes.probes, object_bytes);
+    if (object_bytes) payload_hash = dm_hash_bytes(payload_hash, data->object_probes.probes, object_bytes);
     payload_hash = dm_hash_bytes(payload_hash, data->volume_probes.probes, volume_bytes);
     if (beam_bytes) payload_hash = dm_hash_bytes(payload_hash, beams->cells, beam_bytes);
     payload_hash = dm_hash_bytes(payload_hash, beams->shadow_depth, depth_bytes);
@@ -273,6 +291,7 @@ bool dm_cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash,
     const dm_cache_header header = {
         .magic = DM_CACHE_MAGIC, .version = DM_CACHE_VERSION,
         .scene_hash = scene_hash, .layout_hash = layout_hash,
+        .volume_hash = volume_hash, .beam_hash = beam_hash,
         .width = data->width, .height = data->height, .bytes = bytes,
         .payload_hash = payload_hash,
         .object_dims = {data->object_probes.count_x, data->object_probes.count_y,
@@ -293,7 +312,7 @@ bool dm_cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash,
 
     bool good = fwrite(&header, sizeof(header), 1, file) == 1 &&
                 fwrite(data->pixels, (size_t)bytes, 1, file) == 1 &&
-                fwrite(data->object_probes.probes, object_bytes, 1, file) == 1 &&
+                (!object_bytes || fwrite(data->object_probes.probes, object_bytes, 1, file) == 1) &&
                 fwrite(data->volume_probes.probes, volume_bytes, 1, file) == 1 &&
                 (!beam_bytes || fwrite(beams->cells, beam_bytes, 1, file) == 1) &&
                 fwrite(beams->shadow_depth, depth_bytes, 1, file) == 1 &&

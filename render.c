@@ -760,7 +760,7 @@ static bool bake_lightmap_once(renderer *r) {
 
         Uint32 count = r->bake_target_samples - first;
         if (count > BAKE_BATCH_SAMPLES) count = BAKE_BATCH_SAMPLES;
-        if (!submit_trace_batch(r, first, count) || !SDL_WaitForGPUIdle(r->device)) return false;
+        if (!submit_trace_batch(r, first, count)) return false;
 
         bake_progress(r, "surface lightmap", first + count, r->bake_target_samples);
     }
@@ -785,7 +785,8 @@ static bool bake_lightmap_once(renderer *r) {
         swap_lightmaps(r);
     }
 
-    if (!SDL_SubmitGPUCommandBuffer(post) || !SDL_WaitForGPUIdle(r->device)) return false;
+    // The lightmap download fence waits for all previously submitted bake work.
+    if (!SDL_SubmitGPUCommandBuffer(post)) return false;
 
     if (r->lightmap_scratch) {
         SDL_ReleaseGPUTexture(r->device, r->lightmap_scratch);
@@ -1042,10 +1043,12 @@ static bool bake_probe_grid(renderer *r, dm_probe_grid *grid, Uint32 samples) {
 }
 
 bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash,
-                            uint64_t layout_hash, const lightmap *lm) {
+                            uint64_t layout_hash, uint64_t volume_hash,
+                            uint64_t beam_hash, const lightmap *lm) {
     if (!r || !r->device || !lm) return false;
     dm_cached_lightmap cached = {0};
-    if (!dm_cache_read(path, scene_hash, layout_hash, &cached)) return false;
+    if (!dm_cache_read(path, scene_hash, layout_hash, volume_hash, beam_hash,
+                       &cached)) return false;
     SDL_GPUTexture *replacement = NULL;
     bool good = cached.width == lm->width && cached.height == lm->height &&
                 upload_cached_texture(r, &cached, &replacement);
@@ -1071,15 +1074,12 @@ bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash,
         r->beam_buffer = beam_buffer;
         r->lightmap_width = cached.width;
         r->lightmap_height = cached.height;
-        free_probe_grid(&r->object_probes);
         free_probe_grid(&r->volume_probes);
-        r->object_probes = cached.object_probes;
         r->volume_probes = cached.volume_probes;
         dm_beam_free(&r->beams);
         r->beams = cached.beams;
         cached.beams.cells = NULL;
         cached.beams.shadow_depth = NULL;
-        cached.object_probes.probes = NULL;
         cached.volume_probes.probes = NULL;
         r->has_bake = true;
         SDL_ReleaseGPUTexture(r->device, old);
@@ -1097,15 +1097,30 @@ bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash,
 
 bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual,
                             const lightmap *lm,
-                            const char *path, uint64_t scene_hash, uint64_t layout_hash) {
+                            const char *path, uint64_t scene_hash, uint64_t layout_hash,
+                            uint64_t volume_hash, uint64_t beam_hash) {
 
     if (!r || !m || !lm || !r->device) return false;
+
+    dm_cached_lightmap previous = {0};
+    bool reuse = dm_cache_read_partial(path, scene_hash, &previous);
+    if (reuse && previous.layout_hash == layout_hash &&
+        previous.volume_hash == volume_hash && previous.beam_hash == beam_hash)
+        reuse = false; // B with an unchanged cache explicitly rebakes everything.
+    if (!reuse) dm_cache_free(&previous);
+    bool reuse_lightmap = reuse && previous.layout_hash == layout_hash &&
+        previous.width == lm->width && previous.height == lm->height;
+    bool reuse_volume = reuse && previous.volume_hash == volume_hash;
+    bool reuse_beams = reuse && previous.beam_hash == beam_hash;
 
     bake_progress(r, "scene geometry", 0u, 0u);
 
     Uint64 started = SDL_GetPerformanceCounter();
     bvh tree = {0};
-    if (!bvh_build(&tree, m, visual)) return false;
+    if (!bvh_build(&tree, m, visual)) {
+        dm_cache_free(&previous);
+        return false;
+    }
     // SDL_Log("probe grid %ux%ux%u spacing=%.2f", grid->count_x, grid->count_y, grid->count_z, grid->spacing);
     
     bake_timing("scene geometry", started);
@@ -1116,29 +1131,47 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
     Uint32 old_width = r->lightmap_width, old_height = r->lightmap_height;
     bool had_bake = r->has_bake;
     r->lightmap_texture = NULL;
-    r->bake_pipeline = compile_compute_pipeline(r, "shaders/compute.hlsl",
-                                                  "lightmap_cs", "BUILD_LIGHTMAP_CS");
     started = SDL_GetPerformanceCounter();
-    bool good = r->bake_pipeline && setup_lightmap(r, &tree, lm);
+    bool good;
+    if (reuse_lightmap) {
+        good = upload_cached_texture(r, &previous, &r->lightmap_texture);
+        if (good) {
+            r->lightmap_width = previous.width;
+            r->lightmap_height = previous.height;
+            r->bvh_node_buffer = upload_buffer(r, SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
+                tree.nodes, (size_t)tree.node_count * sizeof(*tree.nodes));
+            r->bvh_triangle_buffer = upload_buffer(r, SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
+                tree.triangles, (size_t)tree.triangle_count * sizeof(*tree.triangles));
+            good = r->bvh_node_buffer && r->bvh_triangle_buffer;
+            SDL_Log("B: reused cached surface lightmap");
+        }
+    } else {
+        r->bake_pipeline = compile_compute_pipeline(r, "shaders/compute.hlsl",
+                                                      "lightmap_cs", "BUILD_LIGHTMAP_CS");
+        good = r->bake_pipeline && setup_lightmap(r, &tree, lm);
+    }
     if (good) bake_timing("surface lightmap", started);
-    dm_probe_grid object_candidate = {0}, volume_candidate = {0};
+    dm_probe_grid volume_candidate = {0};
     dm_beam_grid beam_candidate = {0};
-
-    if (good) bake_progress(r, "object probes", 0u, 0u);
-    started = SDL_GetPerformanceCounter();
-    if (good) good = make_probe_grid(m, 2.0f, &object_candidate) &&
-                     bake_probe_grid(r, &object_candidate, 1024u);
-    if (good) bake_timing("object probes", started);
 
     if (good) bake_progress(r, "volume probes", 0u, 0u);
     started = SDL_GetPerformanceCounter();
-    if (good) good = make_probe_grid(m, 4.0f, &volume_candidate) &&
-                     bake_probe_grid(r, &volume_candidate, 1024u);
+    if (good && reuse_volume) {
+        volume_candidate = previous.volume_probes;
+        previous.volume_probes.probes = NULL;
+        SDL_Log("B: reused cached volume probes");
+    } else if (good) good = make_probe_grid(m, 4.0f, &volume_candidate) &&
+                          bake_probe_grid(r, &volume_candidate, 1024u);
     if (good) bake_timing("volume probes", started);
 
     if (good) bake_progress(r, "sun visibility", 0u, 0u);
     started = SDL_GetPerformanceCounter();
-    if (good) good = dm_beam_build(&beam_candidate, m, &tree, scene_sun_direction());
+    if (good && reuse_beams) {
+        beam_candidate = previous.beams;
+        previous.beams.cells = NULL;
+        previous.beams.shadow_depth = NULL;
+        SDL_Log("B: reused cached sun beams");
+    } else if (good) good = dm_beam_build(&beam_candidate, m, &tree, scene_sun_direction());
     if (good) bake_timing("sun visibility", started);
     if (good) SDL_Log("B: compressed sun beams into %u cells", beam_candidate.count);
 
@@ -1160,18 +1193,23 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
         bake_progress(r, "saving cache", 0u, 0u);
         started = SDL_GetPerformanceCounter();
 
-        candidate.object_probes = object_candidate;
         candidate.volume_probes = volume_candidate;
         candidate.beams = beam_candidate;
-        good = download_current_lightmap(r, &candidate) &&
-               dm_cache_write(path, scene_hash, layout_hash, &candidate);
-        candidate.object_probes.probes = NULL;
+        if (reuse_lightmap) {
+            candidate.pixels = previous.pixels;
+            candidate.width = previous.width;
+            candidate.height = previous.height;
+            previous.pixels = NULL;
+        } else good = download_current_lightmap(r, &candidate);
+        if (good) good = dm_cache_write(path, scene_hash, layout_hash,
+                                        volume_hash, beam_hash, &candidate);
         candidate.volume_probes.probes = NULL;
         candidate.beams.cells = NULL;
         candidate.beams.shadow_depth = NULL;
         if (good) bake_timing("saving cache", started);
     }
     dm_cache_free(&candidate);
+    dm_cache_free(&previous);
     release_bake_buffers(r);
     if (r->lightmap_scratch) SDL_ReleaseGPUTexture(r->device, r->lightmap_scratch);
     r->lightmap_scratch = NULL;
@@ -1183,9 +1221,7 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
         SDL_GPUBuffer *old_beam = r->beam_buffer;
         r->volume_probe_buffer = volume_buffer;
         r->beam_buffer = beam_buffer;
-        free_probe_grid(&r->object_probes);
         free_probe_grid(&r->volume_probes);
-        r->object_probes = object_candidate;
         r->volume_probes = volume_candidate;
         dm_beam_free(&r->beams);
         r->beams = beam_candidate;
@@ -1197,7 +1233,6 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
         if (volume_buffer) SDL_ReleaseGPUBuffer(r->device, volume_buffer);
         if (beam_buffer) SDL_ReleaseGPUBuffer(r->device, beam_buffer);
         dm_beam_free(&beam_candidate);
-        free_probe_grid(&object_candidate);
         free_probe_grid(&volume_candidate);
         if (r->lightmap_texture) SDL_ReleaseGPUTexture(r->device, r->lightmap_texture);
         r->lightmap_texture = old;
@@ -1546,7 +1581,6 @@ void r_deinit(renderer *r) {
     free(r->vertices);
     free(r->materials);
     free(r->draws);
-    free_probe_grid(&r->object_probes);
     free_probe_grid(&r->volume_probes);
     dm_beam_free(&r->beams);
     if (r->device) {

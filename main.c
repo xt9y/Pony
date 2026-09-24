@@ -95,8 +95,7 @@ int main(int argc, char **argv) {
                                 scene.faces.count * 3u * sizeof(*lm.uvs));
 
     const uint32_t bake_settings[] = {
-        LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE, 128u, 3u,
-        1024u, 2u, 4u, 64u, 16u, 5u
+        LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE, 128u, 3u
     };
     layout_hash = dm_hash_bytes(layout_hash, bake_settings, sizeof(bake_settings));
 
@@ -106,7 +105,15 @@ int main(int argc, char **argv) {
     };
     layout_hash = dm_hash_bytes(layout_hash, lighting_settings, sizeof(lighting_settings));
 
-    const bool cached = r_load_cached_lightmap(&r, bake_path, scene_hash, layout_hash, &lm);
+    const uint32_t volume_settings[] = {1024u, 4u, 3u};
+    uint64_t volume_hash = dm_hash_bytes(scene_hash, volume_settings, sizeof(volume_settings));
+    volume_hash = dm_hash_bytes(volume_hash, lighting_settings, sizeof(lighting_settings));
+    const uint32_t beam_settings[] = {64u, 16u, 5u};
+    uint64_t beam_hash = dm_hash_bytes(scene_hash, beam_settings, sizeof(beam_settings));
+    beam_hash = dm_hash_bytes(beam_hash, lighting_settings, 3u * sizeof(float));
+
+    const bool cached = r_load_cached_lightmap(&r, bake_path, scene_hash, layout_hash,
+                                                volume_hash, beam_hash, &lm);
     SDL_SetWindowTitle(r.window, cached ? "Dustmite - baked lighting loaded (B to rebake)" :
                        "Dustmite - unbaked scene (press B to bake)");
 
@@ -145,7 +152,9 @@ int main(int argc, char **argv) {
                     SDL_Log("B: rebaking current scene (this may take a while)");
 
                     const Uint64 begin = SDL_GetPerformanceCounter();
-                    const bool good = r_rebake_current_scene(&r, &scene, &visual, &lm, bake_path, scene_hash, layout_hash);
+                    const bool good = r_rebake_current_scene(&r, &scene, &visual, &lm,
+                                                               bake_path, scene_hash, layout_hash,
+                                                               volume_hash, beam_hash);
 
                     SDL_Log("B: %s after %.2f ms%s%s%s%s",
                             good ? "bake saved" : "bake failed; previous lighting retained",
