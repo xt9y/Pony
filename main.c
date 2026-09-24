@@ -95,7 +95,8 @@ int main(int argc, char **argv) {
                                 scene.faces.count * 3u * sizeof(*lm.uvs));
 
     const uint32_t bake_settings[] = {
-        LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE, 128u, 3u
+        LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE, 128u, 3u,
+        2u /* conservative texel coverage; invalidate center-only lightmaps */
     };
     layout_hash = dm_hash_bytes(layout_hash, bake_settings, sizeof(bake_settings));
 

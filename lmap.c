@@ -218,14 +218,50 @@ static bool pack_charts(chart *charts, uint32_t chart_count, float density, uint
 static bool barycentric(float px, float py, lmap_uv a, lmap_uv b, lmap_uv c, float *w0, float *w1, float *w2) {
 
     const float den = (b.v - c.v) * (a.u - c.u) + (c.u - b.u) * (a.v - c.v);
-    if (fabsf(den) < 1.0e-8f) return false;
+    const lmap_uv corners[3] = {a, b, c};
 
-    *w0 = ((b.v - c.v) * (px - c.u) + (c.u - b.u) * (py - c.v)) / den;
-    *w1 = ((c.v - a.v) * (px - c.u) + (a.u - c.u) * (py - c.v)) / den;
-    *w2 = 1.0f - *w0 - *w1;
+    /* Cover every texel square touched by a triangle. Center-only coverage
+     * drops entire subpixel charts on dense meshes. */
+    for (uint32_t i = 0; i < 3u; ++i) {
+        const lmap_uv p = corners[i], q = corners[(i + 1u) % 3u];
+        const lmap_uv opposite = corners[(i + 2u) % 3u];
+        const float ex = q.u - p.u, ey = q.v - p.v;
+        const float side = ex * (opposite.v - p.v) - ey * (opposite.u - p.u);
+        const float center = ex * (py - p.v) - ey * (px - p.u);
+        const float radius = 0.5f * (fabsf(ex) + fabsf(ey));
+        if (side >= 0.0f ? center < -radius : center > radius) return false;
+    }
 
-    const float eps = -1.0e-4f;
-    return *w0 >= eps && *w1 >= eps && *w2 >= eps;
+    if (fabsf(den) >= 1.0e-8f) {
+        *w0 = ((b.v - c.v) * (px - c.u) + (c.u - b.u) * (py - c.v)) / den;
+        *w1 = ((c.v - a.v) * (px - c.u) + (a.u - c.u) * (py - c.v)) / den;
+        *w2 = 1.0f - *w0 - *w1;
+        if (*w0 >= 0.0f && *w1 >= 0.0f && *w2 >= 0.0f) return true;
+    }
+
+    /* For a conservatively covered pixel outside the triangle, sample the
+     * closest point on its surface instead of extrapolating world position. */
+    float closest = INFINITY;
+    for (uint32_t i = 0; i < 3u; ++i) {
+        const lmap_uv p = corners[i], q = corners[(i + 1u) % 3u];
+        const float dx = q.u - p.u, dy = q.v - p.v;
+        const float length_sq = dx * dx + dy * dy;
+        const float t = length_sq > 1.0e-12f
+            ? fminf(fmaxf(((px - p.u) * dx + (py - p.v) * dy) / length_sq, 0.0f), 1.0f)
+            : 0.0f;
+        const float offset_x = px - p.u - dx * t, offset_y = py - p.v - dy * t;
+        const float distance_sq = offset_x * offset_x + offset_y * offset_y;
+        if (distance_sq < closest) {
+            closest = distance_sq;
+            float weights[3] = {0.0f, 0.0f, 0.0f};
+            weights[i] = 1.0f - t;
+            weights[(i + 1u) % 3u] = t;
+            *w0 = weights[0];
+            *w1 = weights[1];
+            *w2 = weights[2];
+        }
+    }
+    return true;
 }
 
 static void vertex_normals(const mesh *m, vec3 *normals) {
