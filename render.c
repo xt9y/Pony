@@ -244,11 +244,12 @@ static SDL_GPUComputePipeline *compile_compute_pipeline(renderer *r, const char 
 static SDL_GPUGraphicsPipeline *make_surface_pipeline(renderer *r, SDL_GPUShader *vs, SDL_GPUShader *ps) {
     
     const SDL_GPUVertexBufferDescription vb = {.slot = 0, .pitch = (Uint32)sizeof(render_vertex), .input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX};
-    const SDL_GPUVertexAttribute attrs[4] = {
+    const SDL_GPUVertexAttribute attrs[5] = {
         {.location = 0, .buffer_slot = 0, .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, .offset = (Uint32)offsetof(render_vertex, x)},
         {.location = 1, .buffer_slot = 0, .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, .offset = (Uint32)offsetof(render_vertex, nx)},
         {.location = 2, .buffer_slot = 0, .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, .offset = (Uint32)offsetof(render_vertex, u)},
-        {.location = 3, .buffer_slot = 0, .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, .offset = (Uint32)offsetof(render_vertex, lu)}
+        {.location = 3, .buffer_slot = 0, .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, .offset = (Uint32)offsetof(render_vertex, lu)},
+        {.location = 4, .buffer_slot = 0, .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, .offset = (Uint32)offsetof(render_vertex, back_lu)}
     };
     const SDL_GPUColorTargetDescription targets[2] = {{.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT}, {.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT}};
     return SDL_CreateGPUGraphicsPipeline(r->device, &(SDL_GPUGraphicsPipelineCreateInfo){
@@ -258,7 +259,7 @@ static SDL_GPUGraphicsPipeline *make_surface_pipeline(renderer *r, SDL_GPUShader
             .vertex_buffer_descriptions = &vb, 
             .num_vertex_buffers = 1, 
             .vertex_attributes = attrs, 
-            .num_vertex_attributes = 4
+            .num_vertex_attributes = 5
         },
        .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
        .rasterizer_state = {
@@ -512,7 +513,7 @@ static bool reserve_vertices(renderer *r, uint32_t needed) {
     return true;
 }
 
-static bool push_surface(renderer *r, const gltf_vertex *v, lmap_uv uv) {
+static bool push_surface(renderer *r, const gltf_vertex *v, lmap_uv uv, lmap_uv back_uv) {
 
     if (!reserve_vertices(r, r->vertex_count + 1u)) return false;
     r->vertices[r->vertex_count++] = (render_vertex){
@@ -526,6 +527,8 @@ static bool push_surface(renderer *r, const gltf_vertex *v, lmap_uv uv) {
         .v = v->v,
         .lu = uv.u,
         .lv = uv.v,
+        .back_lu = back_uv.u,
+        .back_lv = back_uv.v,
         .r = 1,
         .g = 1,
         .b = 1,
@@ -1340,9 +1343,11 @@ bool r_build_scene(renderer *r, const mesh *m, const gltf_scene *visual, const l
 
             const gltf_vertex *v = &visual->vertices[triangle * 3u];
             if (v[0].material != material) continue;
-            const lmap_uv *uv = &lm->uvs[triangle * 3u];
+            const lmap_uv *uv = &lm->uvs[triangle * 6u];
 
-            if (!push_surface(r, &v[0], uv[0]) || !push_surface(r, &v[1], uv[1]) || !push_surface(r, &v[2], uv[2])) return false;
+            if (!push_surface(r, &v[0], uv[0], uv[3]) ||
+                !push_surface(r, &v[1], uv[1], uv[4]) ||
+                !push_surface(r, &v[2], uv[2], uv[5])) return false;
         
         }
 

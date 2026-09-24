@@ -32,6 +32,7 @@ struct SurfaceInput
     float2 lightmap_uv : TEXCOORD3;
     float3 view_normal : TEXCOORD4;
     float view_depth : TEXCOORD5;
+    float2 back_lightmap_uv : TEXCOORD6;
 };
 
 struct SurfaceOutput
@@ -89,7 +90,7 @@ float3 mapped_normal(SurfaceInput input, float scale)
     return normalize(t * sample_normal.x + b * sample_normal.y + n * sample_normal.z);
 }
 
-SurfaceOutput surface_fs(SurfaceInput input)
+SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace)
 {
     SurfaceOutput output;
 
@@ -160,6 +161,7 @@ SurfaceOutput surface_fs(SurfaceInput input)
     // return output;
     
     float3 n = mapped_normal(input, roughness_normal_ao_sun.y);
+    if (!front_face) n = -n;
     // output.hdr = float4(n * 0.5f + 0.5f, 1.0f);
     // output.normal_depth = float4(
     //      normalize(input.view_normal) * 0.5f + 0.5f, 
@@ -182,11 +184,12 @@ SurfaceOutput surface_fs(SurfaceInput input)
     float3 specular = d * g * f / max(4.0f * n_dot_v * max(n_dot_l, 0.001f), 1.0e-4f);
 
     float3 baked = camera_position.w > 0.5f
-        ? max(Lightmap.Sample(LightmapSampler, input.lightmap_uv).rgb, 0.0f)
+        ? max(Lightmap.Sample(LightmapSampler,
+                              front_face ? input.lightmap_uv : input.back_lightmap_uv).rgb, 0.0f)
         : float3(0.12f, 0.12f, 0.12f);
     if (camera_position.w > 1.5f) {
         output.hdr=float4(baked,1.0f);
-        output.normal_depth=float4(normalize(input.view_normal)*0.5f+0.5f,
+        output.normal_depth=float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f,
                                     max(input.view_depth, 0.0f));
         return output;
     }
@@ -221,7 +224,7 @@ SurfaceOutput surface_fs(SurfaceInput input)
     // output.normal_depth = float4(input.world_position - camera_position.xyz,
     //                              input.view_depth);
 
-    output.normal_depth = float4(normalize(input.view_normal) * 0.5f + 0.5f,
+    output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f,
                                  max(input.view_depth, 0.0f));
 
 

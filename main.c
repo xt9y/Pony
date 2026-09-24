@@ -92,11 +92,11 @@ int main(int argc, char **argv) {
     uint64_t layout_hash = dm_hash_bytes(0, &lm.width, sizeof(lm.width));
     layout_hash = dm_hash_bytes(layout_hash, &lm.height, sizeof(lm.height));
     layout_hash = dm_hash_bytes(layout_hash, lm.uvs,
-                                scene.faces.count * 3u * sizeof(*lm.uvs));
+                                scene.faces.count * 6u * sizeof(*lm.uvs));
 
     const uint32_t bake_settings[] = {
         LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE, 128u, 3u,
-        3u /* conservative coverage and near-planar charts */
+        4u /* separate front and back irradiance */
     };
     layout_hash = dm_hash_bytes(layout_hash, bake_settings, sizeof(bake_settings));
 
