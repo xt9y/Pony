@@ -6,7 +6,10 @@
 
 #define LMAP_PADDING 3u
 #define LMAP_MIN_DENSITY 1.0f
-#define LMAP_CHART_DOT 0.984807753f
+/* Face-to-face joining is transitive: a loose normal threshold lets a folded
+ * surface merge into one chart and project different locations onto the same
+ * texel. Keep connected charts effectively planar. */
+#define LMAP_CHART_DOT 0.99999f
 
 
 typedef struct edge_ref {
