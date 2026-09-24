@@ -18,10 +18,15 @@ void build(C_Build *b) {
     c_standard(app, C_STANDARD_C11);
     c_warnings_strict(app);
 
+    /* NRI is kept as a normal external checkout at deps/NRI. */
+    c_include(app, "deps/NRI/Include");
+    c_link_flag(app, "-Ldeps/NRI/_Bin");
+
 #if defined(__APPLE__)
     c_include(app, "/opt/homebrew/include");
     c_link_flag(app, "-L/opt/homebrew/lib");
     c_link_flag(app, "-Wl,-rpath,/opt/homebrew/lib");
+    c_link_flag(app, "-Wl,-rpath,@loader_path/../../deps/NRI/_Bin");
 #endif
 
     c_include(app, "/usr/local/include");
@@ -30,6 +35,7 @@ void build(C_Build *b) {
     c_link_flag(app, "-Wl,-rpath,/usr/local/lib");
 #endif
 
+    c_link_system(app, "NRI");
     c_link_system(app, "SDL3_image");
     c_link_system(app, "SDL3_shadercross");
     c_link_system(app, "SDL3");
