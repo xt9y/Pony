@@ -122,25 +122,349 @@ static SDL_ShaderCross_ShaderStage get_shadercross_stage(NriStageBits stage) {
 }
 
 
-bool bind_bake_resources() {
+static bool bind_bake_resources(renderer *r,
+                                NriCommandBuffer *cmd,
+                                TEXTURE *source,
+                                TEXTURE *destination,
+                                BUFFER *bvh_node_buffer,
+                                BUFFER *bvh_triangle_buffer,
+                                BUFFER *lightmap_sample_buffer,
+                                bake_uniforms *uniforms,
+                                size_t uniforms_size) {
+    NriDescriptor *source_view = NULL;
+    NriDescriptor *destination_view = NULL;
+    NriDescriptor *node_view = NULL;
+    NriDescriptor *triangle_view = NULL;
+    NriDescriptor *sample_view = NULL;
 
+    const NriTextureViewDesc source_desc = {
+        .texture = source,
+        .type = NriTextureView_TEXTURE,
+        .format = NriFormat_RGBA16_SFLOAT
+    };
+
+    const NriTextureViewDesc destination_desc = {
+        .texture = destination,
+        .type = NriTextureView_STORAGE_TEXTURE,
+        .format = NriFormat_RGBA16_SFLOAT
+    };
+
+    const NriBufferViewDesc node_desc = {
+        .buffer = bvh_node_buffer,
+        .type = NriBufferView_STRUCTURED_BUFFER,
+        .offset = 0,
+        .size = 0,
+        .structureStride = sizeof(bvh_node)
+    };
+
+    const NriBufferViewDesc triangle_desc = {
+        .buffer = bvh_triangle_buffer,
+        .type = NriBufferView_STRUCTURED_BUFFER,
+        .offset = 0,
+        .size = 0,
+        .structureStride = sizeof(bvh_triangle)
+    };
+
+    const NriBufferViewDesc sample_desc = {
+        .buffer = lightmap_sample_buffer,
+        .type = NriBufferView_STRUCTURED_BUFFER,
+        .offset = 0,
+        .size = 0,
+        .structureStride = sizeof(lightmap_sample)
+    };
+
+    if (r->core.CreateTextureView(&source_desc, &source_view) !=  NriResult_SUCCESS ||
+        r->core.CreateTextureView(&destination_desc, &destination_view) !=  NriResult_SUCCESS ||
+        r->core.CreateBufferView(&node_desc, &node_view) != NriResult_SUCCESS ||
+        r->core.CreateBufferView(&triangle_desc, &triangle_view) != NriResult_SUCCESS ||
+        r->core.CreateBufferView(&sample_desc, &sample_view) != NriResult_SUCCESS) {
+        return false;
+    }
+
+    NriDescriptorSet *set0 = NULL;
+    NriDescriptorSet *set1 = NULL;
+
+    if (r->core.AllocateDescriptorSets(
+            r->descriptor_pool,
+            r->bake_layout, 0, &set0, 1, 0
+        ) != NriResult_SUCCESS) {
+        return false;
+    }
+
+    if (r->core.AllocateDescriptorSets(
+            r->descriptor_pool,
+            r->bake_layout, 1, &set1, 1, 0
+        ) != NriResult_SUCCESS) {
+        return false;
+    }
+
+    NriDescriptor *textures[] = {
+        source_view
+    };
+
+    NriDescriptor *samplers[] = {
+        r->lightmap_sampler
+    };
+
+    NriDescriptor *buffers[] = {
+        node_view,
+        triangle_view,
+        sample_view
+    };
+
+    NriDescriptor *storage[] = {destination_view};
+
+    const NriUpdateDescriptorRangeDesc updates[] = {
+        {
+            .descriptorSet = set0,
+            .rangeIndex = 0,
+            .baseDescriptor = 0,
+            .descriptors = textures,
+            .descriptorNum = 1
+        },
+        {
+            .descriptorSet = set0,
+            .rangeIndex = 1,
+            .baseDescriptor = 0,
+            .descriptors = samplers,
+            .descriptorNum = 1
+        },
+        {
+            .descriptorSet = set0,
+            .rangeIndex = 2,
+            .baseDescriptor = 0,
+            .descriptors = buffers,
+            .descriptorNum = 3
+        },
+        {
+            .descriptorSet = set1,
+            .rangeIndex = 0,
+            .baseDescriptor = 0,
+            .descriptors = storage,
+            .descriptorNum = 1
+        }
+    };
+
+    r->core.UpdateDescriptorRanges(
+        updates, sizeof(updates) / sizeof(updates[0])
+    );
+
+    r->core.CmdSetPipelineLayout(
+        cmd,
+        NriBindPoint_COMPUTE,
+        r->bake_layout
+    );
+
+    r->core.CmdSetDescriptorSet(
+        cmd,
+        &(NriSetDescriptorSetDesc){
+            .setIndex = 0,
+            .descriptorSet = set0,
+            .bindPoint = NriBindPoint_COMPUTE
+        }
+    );
+
+    r->core.CmdSetDescriptorSet(
+        cmd,
+        &(NriSetDescriptorSetDesc){
+            .setIndex = 1,
+            .descriptorSet = set1,
+            .bindPoint = NriBindPoint_COMPUTE
+        }
+    );
+
+    r->core.CmdSetRootConstants(
+        cmd,
+        &(NriSetRootConstantsDesc){
+            .rootConstantIndex = 0,
+            .data = uniforms,
+            .size = (uint32_t)uniforms_size,
+            .offset = 0,
+            .bindPoint = NriBindPoint_COMPUTE
+        }
+    );
+
+    return true;
 }
 
-bool bind_probe_resources() {
 
+static bool bind_probe_resources(renderer *r,
+                                 NriCommandBuffer *cmd,
+                                 BUFFER *input,
+                                 BUFFER *bvh_node_buffer,
+                                 BUFFER *bvh_triangle_buffer,
+                                 BUFFER *output,
+                                 bake_uniforms *u,
+                                 size_t u_size) {
+    
+    NriDescriptor *input_view = NULL;
+    NriDescriptor *node_view = NULL;
+    NriDescriptor *triangle_view = NULL;
+    NriDescriptor *output_view = NULL;
+
+    const NriBufferViewDesc input_desc = {
+        .buffer = input,
+        .type = NriBufferView_STRUCTURED_BUFFER,
+        .offset = 0,
+        .size = 0,
+        .structureStride = sizeof(float[4])
+    };
+
+    const NriBufferViewDesc node_desc = {
+        .buffer = bvh_node_buffer,
+        .type = NriBufferView_STRUCTURED_BUFFER,
+        .offset = 0,
+        .size = 0,
+        .structureStride = sizeof(bvh_node)
+    };
+
+    const NriBufferViewDesc triangle_desc = {
+        .buffer = bvh_triangle_buffer,
+        .type = NriBufferView_STRUCTURED_BUFFER,
+        .offset = 0,
+        .size = 0,
+        .structureStride = sizeof(bvh_triangle)
+    };
+
+    const NriBufferViewDesc output_desc = {
+        .buffer = output,
+        .type = NriBufferView_STORAGE_STRUCTURED_BUFFER,
+        .offset = 0,
+        .size = 0,
+        .structureStride = sizeof(float[4])
+    };
+
+    if (r->core.CreateBufferView(&input_desc, &input_view) != NriResult_SUCCESS ||
+        r->core.CreateBufferView(&node_desc, &node_view) != NriResult_SUCCESS ||
+        r->core.CreateBufferView(&triangle_desc, &triangle_view) != NriResult_SUCCESS ||
+        r->core.CreateBufferView(&output_desc, &output_view) != NriResult_SUCCESS) {
+        return false;
+    }
+
+    NriDescriptorSet *set0;
+    NriDescriptorSet *set1;
+
+    if (r->core.AllocateDescriptorSets(
+            r->descriptor_pool,
+            r->probe_layout, 0, &set0, 1, 0
+        ) != NriResult_SUCCESS) {
+        return false;
+    }
+
+    if (r->core.AllocateDescriptorSets(
+            r->descriptor_pool,
+            r->probe_layout, 1, &set1, 1, 0
+        ) != NriResult_SUCCESS) {
+        return false;
+    }
+
+    NriDescriptor *input_d[] = {
+        input_view,
+        node_view,
+        triangle_view
+    };
+
+    NriDescriptor *output_d[] = {
+        output_view
+    };
+
+    const NriUpdateDescriptorRangeDesc updates[] = {
+        {
+            .descriptorSet = set0,
+            .rangeIndex = 0,
+            .baseDescriptor = 0,
+            .descriptors = input_d,
+            .descriptorNum = 3
+        },
+        {
+            .descriptorSet = set1,
+            .rangeIndex = 0,
+            .baseDescriptor = 0,
+            .descriptors = output_d,
+            .descriptorNum = 1
+        }
+    };
+
+    r->core.UpdateDescriptorRanges(
+        updates, sizeof(updates) / sizeof(updates[0])
+    );
+
+    r->core.CmdSetPipelineLayout(
+        cmd,
+        NriBindPoint_COMPUTE,
+        r->bake_layout
+    );
+
+    r->core.CmdSetDescriptorSet(
+        cmd,
+        &(NriSetDescriptorSetDesc){
+            .setIndex = 0,
+            .descriptorSet = set0,
+            .bindPoint = NriBindPoint_COMPUTE
+        }
+    );
+
+    r->core.CmdSetDescriptorSet(
+        cmd,
+        &(NriSetDescriptorSetDesc){
+            .setIndex = 1,
+            .descriptorSet = set1,
+            .bindPoint = NriBindPoint_COMPUTE
+        }
+    );
+
+    r->core.CmdSetRootConstants(
+        cmd,
+        &(NriSetRootConstantsDesc){
+            .rootConstantIndex = 0,
+            .data = u,
+            .size = (uint32_t)u_size,
+            .offset = 0,
+            .bindPoint = NriBindPoint_COMPUTE
+        }
+    );
+
+    return true;
 }
 
-bool read_buffers() {
 
-}
+static bool read_buffer(renderer *r,
+                        BUFFER *output,
+                        dm_probe_grid *grid,
+                        DriBufferDesc output_buffer,
+                        Uint64_t count) {
 
-bool bind_fx_resources() {
+    NriDescriptor *output;
 
-}
-
-bool bind_volume_resources() {
-
-}
+    return true;
+} 
+// bind_fx_resources
+// bind_volume_resources
+// bind_volume_compose_resources
+// begin_compose_rendering
+//
+// create_surface_layout
+// create_line_layout
+// create_sky_layout
+// create_bake_layout
+// create_probe_layout
+// create_ssao_layout
+// create_bloom_layout
+// create_grade_layout
+// create_volume_layout
+// create_volume_compose_layout
+// create_compose_layout
+//
+// create_descriptor_pool
+// create_swapchain
+// destroy_swapchain
+// acquire_swapchain_texture
+// submit_frame
+// begin_scene_rendering
+// bind_sky_resources
+// bind_camera_resources
+// bind_surface_resources
+// bind_line_resources
 
 
 static Uint8 *compile_spirv(const char *path, 
@@ -1937,8 +2261,8 @@ static bool fx_volume(fx_state *fx, NriCommandBuffer *cmd,
     r->core.CmdDispatch(
         cmd,
         &(NriDispatchDesc){
-            .workGroupNumX = (width + 7u) / 8u,
-            .workGroupNumY = (height + 7u) / 8u,
+            .workGroupNumX = (ao_width + 7u) / 8u,
+            .workGroupNumY = (ao_height + 7u) / 8u,
             .workGroupNumZ = 1
         }
     );
@@ -2004,8 +2328,8 @@ static bool run_vision_only(fx_state *fx, NriCommandBuffer *cmd) {
     r->core.CmdDispatch(
         cmd,
         &(NriDispatchDesc){
-            .workGroupNumX = groups_x,
-            .workGroupNumY = groups_y,
+            .workGroupNumX = (fx->width + 7u) / 8u,
+            .workGroupNumY = (fx->height + 7u) / 8u,
             .workGroupNumZ = 1
         }
     );
@@ -2086,7 +2410,17 @@ static bool fx_apply_base(fx_state *fx, NriCommandBuffer *cmd,
         return false;
 
     r->core.CmdSetPipeline(cmd, fx->compose_pipeline);
-    r->core.CmdDraw(cmd, 3, 1, 0, 0);
+    // r->core.CmdDraw(cmd, 3, 1, 0, 0);
+    r->core.CmdDraw(
+        cmd,
+        &(NriDrawDesc){
+            .vertexNum = 3,
+            .instanceNum = 1,
+            .baseVertex = 0,
+            .baseInstance = 0
+        }
+    );
+
     r->core.CmdEndRendering(cmd);
     return true;
 }
@@ -2432,8 +2766,18 @@ bool draw_frame(renderer *r, const render_frame *frame) {
                 sizeof(material)))
             return false;
 
+        // r->core.CmdDraw(
+        //     cmd, draw->count, 1, draw->first, 0);
+
         r->core.CmdDraw(
-            cmd, draw->count, 1, draw->first, 0);
+            cmd,
+            &(NriDrawDesc){
+                .vertexNum = draw->count,
+                .instanceNum = 1,
+                .baseVertex = draw->first,
+                .baseInstance = 0
+            }
+        );
     }
 
     if (r->show_debug && r->debug_vertex_count) {
@@ -2442,12 +2786,22 @@ bool draw_frame(renderer *r, const render_frame *frame) {
                 r, cmd, camera.mvp, sizeof(camera.mvp)))
             return false;
 
+        // r->core.CmdDraw(
+        //     cmd,
+        //     r->debug_vertex_count,
+        //     1,
+        //     r->debug_vertex_start,
+        //     0);
+
         r->core.CmdDraw(
             cmd,
-            r->debug_vertex_count,
-            1,
-            r->debug_vertex_start,
-            0);
+            &(NriDrawDesc){
+                .vertexNum = r->debug_vertex_count,
+                .instanceNum = 1,
+                .baseVertex = r->debug_vertex_start,
+                .baseInstance = 0
+            }
+        );
     }
 
     r->core.CmdEndRendering(cmd);
