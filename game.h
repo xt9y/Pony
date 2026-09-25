@@ -174,7 +174,16 @@ typedef enum LIGHT_TYPE { LIGHT_DIRECTIONAL, LIGHT_POINT, LIGHT_SPOT } LIGHT_TYP
 
 typedef struct DIRECTIONAL_LIGHT {
     VEC3 direction;
+    VEC3 color;
+    float intensity;
+    float angular_radius;
 } DIRECTIONAL_LIGHT;
+
+typedef struct SKY {
+    VEC3 zenith;
+    VEC3 horizon;
+    float intensity;
+} SKY;
 
 typedef struct POINT_LIGHT {
     VEC3 position;
@@ -331,14 +340,14 @@ void cache_free(CACHED_LIGHTMAP *data);
 bool r_init(RENDERER *r, const char *title, int width, int height);
 bool r_build_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm);
 bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, const LIGHTMAP *lm);
-bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm, const struct LIGHT *light, const char *path, uint64_t scene_hash, uint64_t layout_hash,
+bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm, const struct LIGHT *light, const SKY *sky, const char *path, uint64_t scene_hash, uint64_t layout_hash,
                             uint64_t volume_hash, uint64_t beam_hash);
 void r_event(RENDERER *r, const SDL_Event *event);
-bool r_draw(RENDERER *r, const struct LIGHT *light);
+bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky);
 void r_deinit(RENDERER *r);
 
 void bake_progress(RENDERER *r, const char *stage, Uint32 done, Uint32 total);
-bool bake_start(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual, const LIGHTMAP *layout, const struct LIGHT *light, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
+bool bake_start(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual, const LIGHTMAP *layout, const struct LIGHT *light, const SKY *sky, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
                 uint64_t beam_hash);
 void bake_update(RENDERER *r);
 void bake_cancel(RENDERER *r);

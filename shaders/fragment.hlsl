@@ -258,7 +258,7 @@ float3 sky_radiance(float3 direction)
 {
     float t = saturate(direction.y * 0.5f + 0.5f);
     t = pow(t, 0.35f);
-    float3 sky = lerp(sky_horizon.rgb, sky_zenith.rgb, t);
+    float3 sky = lerp(sky_horizon.rgb, sky_zenith.rgb, t) * sky_zenith.w;
 
     float3 sun_dir = normalize(sun_direction_intensity.xyz);
     float sun_cos = cos(sun_color_radius.w);
