@@ -14,7 +14,7 @@
 #define DM_CACHE_MIN_BEAM_DEPTH 16u
 #define DM_CACHE_MAX_BEAM_DEPTH 128u
 
-typedef struct cache_header {
+typedef struct CACHE_HEADER {
     uint32_t magic;
     uint32_t version;
     uint64_t scene_hash;
@@ -35,7 +35,7 @@ typedef struct cache_header {
     uint32_t beam_count;
     uint64_t volume_hash;
     uint64_t beam_hash;
-} cache_header;
+} CACHE_HEADER;
 
 uint64_t hash_bytes(uint64_t seed, const void *bytes, size_t size) {
 
@@ -58,7 +58,7 @@ static bool valid_dimensions(uint32_t width, uint32_t height, uint64_t *bytes) {
     return *bytes <= SIZE_MAX;
 }
 
-void cache_free(cached_lightmap *data) {
+void cache_free(CACHED_LIGHTMAP *data) {
 
     if (!data) return;
 
@@ -69,7 +69,7 @@ void cache_free(cached_lightmap *data) {
     memset(data, 0, sizeof(*data));
 }
 
-static uint64_t grid_count(const probe_grid *grid) {
+static uint64_t grid_count(const PROBE_GRID *grid) {
 
     if (!grid->count_x || !grid->count_y || !grid->count_z || grid->count_x > 16384u || grid->count_y > 16384u || grid->count_z > 16384u || !grid->probes ||
         !(grid->spacing > 0.0f))
@@ -80,9 +80,9 @@ static uint64_t grid_count(const probe_grid *grid) {
     return count <= 16384u ? count : 0;
 }
 
-static void unpack_grid(probe_grid *grid, const uint32_t dims[3], const float origin[3], float spacing) {
+static void unpack_grid(PROBE_GRID *grid, const uint32_t dims[3], const float origin[3], float spacing) {
 
-    grid->origin = (vec3){origin[0], origin[1], origin[2]};
+    grid->origin = (VEC3){origin[0], origin[1], origin[2]};
     grid->spacing = spacing;
     grid->count_x = dims[0];
     grid->count_y = dims[1];
@@ -108,7 +108,7 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, cached_lightmap *
 
     if (!file) return false;
 
-    cache_header header = {0};
+    CACHE_HEADER header = {0};
     uint64_t expected = 0;
     bool good = fread(&header, sizeof(header), 1, file) == 1 && header.magic == DM_CACHE_MAGIC && header.version == DM_CACHE_VERSION && header.scene_hash == scene_hash &&
                 valid_dimensions(header.width, header.height, &expected) && expected == header.bytes;
@@ -139,8 +139,8 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, cached_lightmap *
         }
 
         if (good) {
-            if (object_count) out->object_probes.probes = malloc((size_t)object_count * sizeof(probe));
-            out->volume_probes.probes = malloc((size_t)volume_count * sizeof(probe));
+            if (object_count) out->object_probes.probes = malloc((size_t)object_count * sizeof(PROBE));
+            out->volume_probes.probes = malloc((size_t)volume_count * sizeof(PROBE));
 
             good = (!object_count || out->object_probes.probes) && out->volume_probes.probes;
 
@@ -152,7 +152,7 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, cached_lightmap *
             out->beams.count = header.beam_count;
 
             if (good && header.beam_count) {
-                out->beams.cells = malloc((size_t)header.beam_count * sizeof(beam_cell));
+                out->beams.cells = malloc((size_t)header.beam_count * sizeof(BEAM_CELL));
 
                 good = out->beams.cells != NULL;
             }
@@ -175,9 +175,9 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, cached_lightmap *
 
         const uint64_t volume_count = (uint64_t)header.volume_dims[0] * header.volume_dims[1] * header.volume_dims[2];
 
-        const size_t object_bytes = (size_t)object_count * sizeof(probe);
-        const size_t volume_bytes = (size_t)volume_count * sizeof(probe);
-        const size_t beam_bytes = (size_t)header.beam_count * sizeof(beam_cell);
+        const size_t object_bytes = (size_t)object_count * sizeof(PROBE);
+        const size_t volume_bytes = (size_t)volume_count * sizeof(PROBE);
+        const size_t beam_bytes = (size_t)header.beam_count * sizeof(BEAM_CELL);
         const size_t depth_count = (size_t)header.beam_dims[0] * header.beam_dims[1];
 
         const size_t depth_bytes = depth_count * sizeof(float);
@@ -229,7 +229,7 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, cached_lightmap *
     return true;
 }
 
-bool cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, cached_lightmap *out) {
+bool cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, CACHED_LIGHTMAP *out) {
     if (!cache_read_partial(path, scene_hash, out)) return false;
 
     if (out->layout_hash == layout_hash && out->volume_hash == volume_hash && out->beam_hash == beam_hash) return true;
@@ -238,7 +238,7 @@ bool cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash, uin
     return false;
 }
 
-bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, const cached_lightmap *data) {
+bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, const CACHED_LIGHTMAP *data) {
 
     uint64_t bytes = 0;
 
@@ -249,7 +249,7 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
 
     if (!volume_count) return false;
 
-    const beam_grid *beams = &data->beams;
+    const BEAM_GRID *beams = &data->beams;
     const uint64_t beam_capacity = (uint64_t)beams->width * beams->height * beams->depth;
 
     if (beams->width != DM_CACHE_BEAM_WIDTH || beams->height != DM_CACHE_BEAM_HEIGHT || beams->depth < DM_CACHE_MIN_BEAM_DEPTH || beams->depth > DM_CACHE_MAX_BEAM_DEPTH ||
@@ -270,9 +270,9 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
     if (!expanded) return false;
     free(expanded);
 
-    const size_t object_bytes = (size_t)object_count * sizeof(probe);
-    const size_t volume_bytes = (size_t)volume_count * sizeof(probe);
-    const size_t beam_bytes = (size_t)beams->count * sizeof(beam_cell);
+    const size_t object_bytes = (size_t)object_count * sizeof(PROBE);
+    const size_t volume_bytes = (size_t)volume_count * sizeof(PROBE);
+    const size_t beam_bytes = (size_t)beams->count * sizeof(BEAM_CELL);
     const Uint64 hash_started = SDL_GetPerformanceCounter();
     uint64_t payload_hash = hash_bytes(0, data->pixels, (size_t)bytes);
 
@@ -305,7 +305,7 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
         return false;
     }
 
-    const cache_header header = {.magic = DM_CACHE_MAGIC,
+    const CACHE_HEADER header = {.magic = DM_CACHE_MAGIC,
                                  .version = DM_CACHE_VERSION,
                                  .scene_hash = scene_hash,
                                  .layout_hash = layout_hash,

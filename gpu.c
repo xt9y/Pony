@@ -27,12 +27,12 @@
 #define PHASE_COMBINE 5u
 #define PHASE_RECONSTRUCT 6u
 
-typedef struct camera_uniforms {
+typedef struct CAMERA_UNIFORMS {
     float mvp[16];
     float view[16];
-} camera_uniforms;
+} CAMERA_UNIFORMS;
 
-typedef struct bake_uniforms {
+typedef struct BAKE_UNIFORMS {
     Uint32 item_count;
     Uint32 lightmap_width;
     Uint32 lightmap_height;
@@ -48,9 +48,9 @@ typedef struct bake_uniforms {
     float bake_params[4];
     float probe_origin_spacing[4];
     Uint32 probe_dims_mode[4];
-} bake_uniforms;
+} BAKE_UNIFORMS;
 
-typedef struct sky_uniforms {
+typedef struct SKY_UNIFORMS {
     float camera_right[4];
     float camera_up[4];
     float camera_forward[4];
@@ -58,44 +58,44 @@ typedef struct sky_uniforms {
     float sky_horizon[4];
     float sun_direction_intensity[4];
     float sun_color_radius[4];
-} sky_uniforms;
+} SKY_UNIFORMS;
 
-typedef struct material_uniforms {
+typedef struct MATERIAL_UNIFORMS {
     float base_color_factor[4];
     float emissive_metallic[4];
     float roughness_normal_ao_sun[4];
     float sun_direction[4];
     float sun_color[4];
     float camera_position[4];
-} material_uniforms;
+} MATERIAL_UNIFORMS;
 
-typedef struct ssao_uniforms {
+typedef struct SSAO_UNIFORMS {
     Uint32 width, height, ao_width, ao_height;
     float tan_half_fov, aspect, radius, bias;
-} ssao_uniforms;
+} SSAO_UNIFORMS;
 
-typedef struct bloom_uniforms {
+typedef struct BLOOM_UNIFORMS {
     Uint32 src_width, src_height, dst_width, dst_height;
     Uint32 phase, _pad0, _pad1, _pad2;
     float threshold, knee, strength, _pad3;
-} bloom_uniforms;
+} BLOOM_UNIFORMS;
 
-typedef struct compose_uniforms {
+typedef struct COMPOSE_UNIFORMS {
     float exposure;
     float ao_strength;
     float bloom_strength;
     float _pad;
-} compose_uniforms;
+} COMPOSE_UNIFORMS;
 
-typedef struct volume_uniforms {
+typedef struct VOLUME_UNIFORMS {
     float eye_density[4], right_tan[4], up_tan[4], forward_g[4];
     float sun_intensity[4], grid_origin_spacing[4];
     Uint32 grid_dims_width[4], height_debug[4];
     float beam_origin[4], beam_step[4];
-} volume_uniforms;
+} VOLUME_UNIFORMS;
 
-struct render_material {
-    gltf_material data;
+struct RENDER_MATERIAL {
+    GLTF_MATERIAL data;
     NriTexture *base_color;
     NriTexture *metallic_roughness;
     NriTexture *normal;
@@ -103,14 +103,14 @@ struct render_material {
     NriTexture *emissive;
 };
 
-struct swapchain_texture {
+struct SWAPCHAIN_TEXTURE {
     NriTexture *texture;
     NriDescriptor *color_attachment;
     NriFence *acquire;
     NriFence *release;
 };
 
-struct frame_context {
+struct FRAME_CONTEXT {
     NriCommandAllocator *allocator;
     NriCommandBuffer *command_buffer;
     NriDescriptorPool *descriptor_pool;
@@ -125,21 +125,21 @@ struct frame_context {
     uint64_t fence_value;
 };
 
-typedef struct upload_slot {
+typedef struct UPLOAD_SLOT {
     NriBuffer *staging;
     NriCommandAllocator *allocator;
     NriCommandBuffer *command_buffer;
     uint64_t fence_value;
-} upload_slot;
+} UPLOAD_SLOT;
 
-struct upload_context {
+struct UPLOAD_CONTEXT {
     NriFence *fence;
-    upload_slot slots[UPLOAD_RING_SIZE];
+    UPLOAD_SLOT slots[UPLOAD_RING_SIZE];
     uint64_t next_fence_value;
     uint32_t next_slot;
 };
 
-struct texture_state {
+struct TEXTURE_STATE {
     NriTexture *texture;
     NriAccessLayoutStage state;
 };
@@ -156,11 +156,11 @@ static Uint8 *load_spirv(const char *define, size_t *size) {
     return spirv;
 }
 
-static vec3 sun_direction(void) {
+static VEC3 sun_direction(void) {
     return v3_normalize(v3(0.38f, 0.30f, 0.32f));
 }
 
-static void free_probe_grid(probe_grid *grid) {
+static void free_probe_grid(PROBE_GRID *grid) {
     if (!grid) return;
     free(grid->probes);
     memset(grid, 0, sizeof(*grid));
@@ -331,28 +331,28 @@ static NriPipeline *compile_compute(renderer *r, NriPipelineLayout *layout, cons
     return pipeline;
 }
 
-static NriPipeline *make_surface_pipeline(renderer *r, NriCoreInterface *core, NriPipelineLayout *layout, const NriShaderDesc *vs, const NriShaderDesc *ps) {
+static NriPipeline *make_surface_pipeline(RENDERER *r, NriCoreInterface *core, NriPipelineLayout *layout, const NriShaderDesc *vs, const NriShaderDesc *ps) {
 
-    const NriVertexStreamDesc vb = {.bindingSlot = 0, .stepRate = NriVertexStreamStepRate_PER_VERTEX, .stride = (uint16_t)sizeof(render_vertex)};
+    const NriVertexStreamDesc vb = {.bindingSlot = 0, .stepRate = NriVertexStreamStepRate_PER_VERTEX, .stride = (uint16_t)sizeof(RENDER_VERTEX)};
 
     const NriVertexAttributeDesc attrs[4] = {{.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 0},
                                               .vk = {.location = 0},
-                                              .offset = (uint32_t)offsetof(render_vertex, x),
+                                              .offset = (uint32_t)offsetof(RENDER_VERTEX, x),
                                               .format = NriFormat_RGB32_SFLOAT,
                                               .streamIndex = 0},
                                              {.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 1},
                                               .vk = {.location = 1},
-                                              .offset = (uint32_t)offsetof(render_vertex, nx),
+                                              .offset = (uint32_t)offsetof(RENDER_VERTEX, nx),
                                               .format = NriFormat_RGB32_SFLOAT,
                                               .streamIndex = 0},
                                              {.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 2},
                                               .vk = {.location = 2},
-                                              .offset = (uint32_t)offsetof(render_vertex, u),
+                                              .offset = (uint32_t)offsetof(RENDER_VERTEX, u),
                                               .format = NriFormat_RG32_SFLOAT,
                                               .streamIndex = 0},
                                              {.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 3},
                                               .vk = {.location = 3},
-                                              .offset = (uint32_t)offsetof(render_vertex, lu),
+                                              .offset = (uint32_t)offsetof(RENDER_VERTEX, lu),
                                               .format = NriFormat_RG32_SFLOAT,
                                               .streamIndex = 0}};
 
@@ -418,7 +418,7 @@ static void abort_commands(renderer *r, NriCommandAllocator *allocator, NriComma
 }
 
 /* Descriptor sets match the HLSL register spaces in shaders/. */
-static bool create_pipeline_layout(renderer *r, NriPipelineLayout **out, const NriDescriptorType *types[4], const uint8_t counts[4], NriStageBits stages) {
+static bool create_pipeline_layout(RENDERER *r, NriPipelineLayout **out, const NriDescriptorType *types[4], const uint8_t counts[4], NriStageBits stages) {
     NriDescriptorRangeDesc ranges[4][16] = {0};
     NriDescriptorSetDesc sets[4] = {0};
 
@@ -451,9 +451,9 @@ static bool create_pipeline_layout(renderer *r, NriPipelineLayout **out, const N
     return r->core.CreatePipelineLayout(r->device, &desc, out) == NriResult_SUCCESS;
 }
 
-static bool create_pipeline_layouts(renderer *r);
+static bool create_pipeline_layouts(RENDERER *r);
 
-static bool create_surface_layout(renderer *r) {
+static bool create_surface_layout(RENDERER *r) {
     static const NriDescriptorType camera[] = {NriDescriptorType_CONSTANT_BUFFER};
     static const NriDescriptorType material[] = {NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
                                                  NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER,
@@ -467,7 +467,7 @@ static bool create_surface_layout(renderer *r) {
     return create_pipeline_layout(r, &r->surface_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
 
-static bool create_line_layout(renderer *r) {
+static bool create_line_layout(RENDERER *r) {
     static const NriDescriptorType camera[] = {NriDescriptorType_CONSTANT_BUFFER};
     const NriDescriptorType *sets[4] = {NULL, camera, NULL, NULL};
     const uint8_t counts[4] = {0, 1, 0, 0};
@@ -475,7 +475,7 @@ static bool create_line_layout(renderer *r) {
     return create_pipeline_layout(r, &r->line_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
 
-static bool create_sky_layout(renderer *r) {
+static bool create_sky_layout(RENDERER *r) {
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
 
     const NriDescriptorType *sets[4] = {NULL, NULL, NULL, uniform};
@@ -484,7 +484,7 @@ static bool create_sky_layout(renderer *r) {
     return create_pipeline_layout(r, &r->sky_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
 
-static bool create_compute_layout(renderer *r, NriPipelineLayout **out, const NriDescriptorType *sources, uint8_t source_num, NriDescriptorType output_type, bool has_uniform) {
+static bool create_compute_layout(RENDERER *r, NriPipelineLayout **out, const NriDescriptorType *sources, uint8_t source_num, NriDescriptorType output_type, bool has_uniform) {
     static const NriDescriptorType output_texture[] = {NriDescriptorType_STORAGE_TEXTURE};
 
     static const NriDescriptorType output_buffer[] = {NriDescriptorType_STORAGE_STRUCTURED_BUFFER};
@@ -498,7 +498,7 @@ static bool create_compute_layout(renderer *r, NriPipelineLayout **out, const Nr
     return create_pipeline_layout(r, out, sets, counts, NriStageBits_COMPUTE_SHADER);
 }
 
-static bool create_bake_layout(renderer *r) {
+static bool create_bake_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE,           NriDescriptorType_SAMPLER,           NriDescriptorType_TEXTURE,
                                             NriDescriptorType_SAMPLER,           NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
                                             NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
@@ -526,42 +526,42 @@ static bool create_lightmap_queue_layouts(renderer *r) {
            create_pipeline_layout(r, &r->lightmap_queue_args_layout, args_sets, args_counts, NriStageBits_COMPUTE_SHADER);
 }
 
-static bool create_probe_layout(renderer *r) {
+static bool create_probe_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER};
 
     return create_compute_layout(r, &r->probe_layout, src, 3, NriDescriptorType_STORAGE_STRUCTURED_BUFFER, true);
 }
 
-static bool create_ssao_layout(renderer *r) {
+static bool create_ssao_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER};
 
     return create_compute_layout(r, &r->ssao_layout, src, 2, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
-static bool create_bloom_layout(renderer *r) {
+static bool create_bloom_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER};
 
     return create_compute_layout(r, &r->bloom_layout, src, 2, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
-static bool create_grade_layout(renderer *r) {
+static bool create_grade_layout(RENDERER *r) {
     return create_compute_layout(r, &r->grade_layout, NULL, 0, NriDescriptorType_STORAGE_TEXTURE, false);
 }
 
-static bool create_volume_layout(renderer *r) {
+static bool create_volume_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER};
 
     return create_compute_layout(r, &r->volume_layout, src, 4, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
-static bool create_volume_compose_layout(renderer *r) {
+static bool create_volume_compose_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
                                             NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
     return create_compute_layout(r, &r->volume_compose_layout, src, 6, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
-static bool create_compose_layout(renderer *r) {
+static bool create_compose_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
                                             NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
@@ -573,7 +573,7 @@ static bool create_compose_layout(renderer *r) {
     return create_pipeline_layout(r, &r->compose_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
 
-static bool create_descriptor_pool_object(renderer *r, NriDescriptorPool **pool) {
+static bool create_descriptor_pool_object(RENDERER *r, NriDescriptorPool **pool) {
     const NriDescriptorPoolDesc desc = {.descriptorSetMaxNum = 8192,
                                         .samplerMaxNum = 8192,
                                         .textureMaxNum = 8192,
@@ -585,11 +585,11 @@ static bool create_descriptor_pool_object(renderer *r, NriDescriptorPool **pool)
     return r->core.CreateDescriptorPool(r->device, &desc, pool) == NriResult_SUCCESS;
 }
 
-static bool create_descriptor_pool(renderer *r) {
+static bool create_descriptor_pool(RENDERER *r) {
     return create_descriptor_pool_object(r, &r->descriptor_pool);
 }
 
-static bool track_descriptor_array(renderer *r, NriDescriptor ***items, uint32_t *count, uint32_t *capacity, NriDescriptor *descriptor) {
+static bool track_descriptor_array(RENDERER *r, NriDescriptor ***items, uint32_t *count, uint32_t *capacity, NriDescriptor *descriptor) {
     if (!descriptor) return false;
 
     if (*count == *capacity) {
@@ -610,7 +610,7 @@ static bool track_descriptor_array(renderer *r, NriDescriptor ***items, uint32_t
     return true;
 }
 
-static bool track_buffer_array(renderer *r, NriBuffer ***items, uint32_t *count, uint32_t *capacity, NriBuffer *buffer) {
+static bool track_buffer_array(RENDERER *r, NriBuffer ***items, uint32_t *count, uint32_t *capacity, NriBuffer *buffer) {
     if (!buffer) return false;
 
     if (*count == *capacity) {
@@ -631,9 +631,9 @@ static bool track_buffer_array(renderer *r, NriBuffer ***items, uint32_t *count,
     return true;
 }
 
-static bool track_descriptor(renderer *r, NriDescriptor *descriptor) {
+static bool track_descriptor(RENDERER *r, NriDescriptor *descriptor) {
     if (r->active_frame) {
-        frame_context *frame = r->active_frame;
+        FRAME_CONTEXT *frame = r->active_frame;
 
         return track_descriptor_array(r, &frame->temporary_descriptors, &frame->temporary_descriptor_num, &frame->temporary_descriptor_cap, descriptor);
     }
@@ -641,9 +641,9 @@ static bool track_descriptor(renderer *r, NriDescriptor *descriptor) {
     return track_descriptor_array(r, &r->temporary_descriptors, &r->temporary_descriptor_num, &r->temporary_descriptor_cap, descriptor);
 }
 
-static bool track_buffer(renderer *r, NriBuffer *buffer) {
+static bool track_buffer(RENDERER *r, NriBuffer *buffer) {
     if (r->active_frame) {
-        frame_context *frame = r->active_frame;
+        FRAME_CONTEXT *frame = r->active_frame;
 
         return track_buffer_array(r, &frame->temporary_buffers, &frame->temporary_buffer_num, &frame->temporary_buffer_cap, buffer);
     }
@@ -651,7 +651,7 @@ static bool track_buffer(renderer *r, NriBuffer *buffer) {
     return track_buffer_array(r, &r->temporary_buffers, &r->temporary_buffer_num, &r->temporary_buffer_cap, buffer);
 }
 
-static void clear_temporary(renderer *r) {
+static void clear_temporary(RENDERER *r) {
     for (uint32_t i = 0; i < r->temporary_descriptor_num; ++i)
         r->core.DestroyDescriptor(r->temporary_descriptors[i]);
 
@@ -662,7 +662,7 @@ static void clear_temporary(renderer *r) {
     if (r->descriptor_pool) r->core.ResetDescriptorPool(r->descriptor_pool);
 }
 
-static void clear_frame_temporary(renderer *r, frame_context *frame) {
+static void clear_frame_temporary(RENDERER *r, FRAME_CONTEXT *frame) {
     if (!frame) return;
 
     for (uint32_t i = 0; i < frame->temporary_descriptor_num; ++i)
@@ -839,7 +839,7 @@ static bool create_frame_contexts(renderer *r) {
     if (r->core.CreateFence(r->device, 0, &r->frame_fence) != NriResult_SUCCESS) return false;
 
     for (uint32_t i = 0; i < FRAME_QUEUE_DEPTH; ++i) {
-        frame_context *frame = &r->frame_contexts[i];
+        FRAME_CONTEXT *frame = &r->frame_contexts[i];
 
         if (!create_descriptor_pool_object(r, &frame->descriptor_pool) || !create_uniform_ring(r, frame) ||
             r->core.CreateCommandAllocator(r->graphics_queue, &frame->allocator) != NriResult_SUCCESS ||
@@ -850,10 +850,10 @@ static bool create_frame_contexts(renderer *r) {
     return true;
 }
 
-static void destroy_frame_contexts(renderer *r) {
+static void destroy_frame_contexts(RENDERER *r) {
     if (r->frame_contexts) {
         for (uint32_t i = 0; i < FRAME_QUEUE_DEPTH; ++i) {
-            frame_context *frame = &r->frame_contexts[i];
+            FRAME_CONTEXT *frame = &r->frame_contexts[i];
             clear_frame_temporary(r, frame);
 
             if (frame->command_buffer) r->core.DestroyCommandBuffer(frame->command_buffer);
@@ -877,14 +877,14 @@ static void destroy_frame_contexts(renderer *r) {
     r->frame_fence = NULL;
 }
 
-static bool begin_frame_commands(renderer *r, frame_context **out_frame, NriCommandBuffer **out_command_buffer) {
+static bool begin_frame_commands(RENDERER *r, FRAME_CONTEXT **out_frame, NriCommandBuffer **out_command_buffer) {
     if (!r || !r->frame_contexts || !r->frame_fence || !out_frame || !out_command_buffer) return false;
 
     const uint64_t wait_value = r->frame_index >= FRAME_QUEUE_DEPTH ? 1u + r->frame_index - FRAME_QUEUE_DEPTH : 0u;
 
     r->core.Wait(r->frame_fence, wait_value);
 
-    frame_context *frame = &r->frame_contexts[r->frame_index % FRAME_QUEUE_DEPTH];
+    FRAME_CONTEXT *frame = &r->frame_contexts[r->frame_index % FRAME_QUEUE_DEPTH];
     clear_frame_temporary(r, frame);
     r->core.ResetCommandAllocator(frame->allocator);
     r->current_graphics_layout = r->current_compute_layout = NULL;
@@ -901,7 +901,7 @@ static bool begin_frame_commands(renderer *r, frame_context **out_frame, NriComm
     return true;
 }
 
-static void abort_frame_commands(renderer *r, frame_context *frame) {
+static void abort_frame_commands(RENDERER *r, FRAME_CONTEXT *frame) {
     if (!r || !frame) return;
 
     if (frame->command_buffer) r->core.DestroyCommandBuffer(frame->command_buffer);
@@ -915,7 +915,7 @@ static void abort_frame_commands(renderer *r, frame_context *frame) {
     if (r->core.CreateCommandAllocator(r->graphics_queue, &frame->allocator) == NriResult_SUCCESS) r->core.CreateCommandBuffer(frame->allocator, &frame->command_buffer);
 }
 
-static NriDescriptor *create_texture_view(renderer *r, NriTexture *texture, NriTextureView type) {
+static NriDescriptor *create_texture_view(RENDERER *r, NriTexture *texture, NriTextureView type) {
     if (!texture) return NULL;
 
     NriDescriptor *view = NULL;
@@ -926,7 +926,7 @@ static NriDescriptor *create_texture_view(renderer *r, NriTexture *texture, NriT
     return track_descriptor(r, view) ? view : NULL;
 }
 
-static NriDescriptor *create_buffer_view(renderer *r, NriBuffer *buffer, NriBufferView type, uint32_t stride) {
+static NriDescriptor *create_buffer_view(RENDERER *r, NriBuffer *buffer, NriBufferView type, uint32_t stride) {
     if (!buffer) return NULL;
 
     NriDescriptor *view = NULL;
@@ -988,7 +988,7 @@ static NriDescriptor *uniform_view(renderer *r, const void *data, size_t size) {
     return create_buffer_view(r, buffer, NriBufferView_CONSTANT_BUFFER, 0);
 }
 
-static bool bind_descriptor_set(renderer *r, NriCommandBuffer *cmd, NriPipelineLayout *layout, NriBindPoint point, uint32_t set_index, NriDescriptor *const *descriptors,
+static bool bind_descriptor_set(RENDERER *r, NriCommandBuffer *cmd, NriPipelineLayout *layout, NriBindPoint point, uint32_t set_index, NriDescriptor *const *descriptors,
                                 uint32_t count) {
     NriDescriptorSet *set = NULL;
     NriDescriptorPool *pool = r->active_frame ? r->active_frame->descriptor_pool : r->descriptor_pool;
@@ -1016,13 +1016,13 @@ static bool bind_descriptor_set(renderer *r, NriCommandBuffer *cmd, NriPipelineL
     return true;
 }
 
-static bool bind_uniform_data(renderer *r, NriCommandBuffer *cmd, NriPipelineLayout *layout, NriBindPoint point, uint32_t set, const void *data, size_t size) {
+static bool bind_uniform_data(RENDERER *r, NriCommandBuffer *cmd, NriPipelineLayout *layout, NriBindPoint point, uint32_t set, const void *data, size_t size) {
     NriDescriptor *view = uniform_view(r, data, size);
 
     return view && bind_descriptor_set(r, cmd, layout, point, set, &view, 1);
 }
 
-static bool transition_texture(renderer *r, NriCommandBuffer *cmd, NriTexture *texture, NriAccessBits access, NriLayout layout, NriStageBits stages);
+static bool transition_texture(RENDERER *r, NriCommandBuffer *cmd, NriTexture *texture, NriAccessBits access, NriLayout layout, NriStageBits stages);
 
 static bool bind_bake_resources_ex(renderer *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, NriBuffer *active_in, NriBuffer *active_count,
                                    NriBuffer *active_out, NriBuffer *active_out_count, const bake_uniforms *uniforms, size_t size) {
@@ -1045,10 +1045,10 @@ static bool bind_bake_resources_ex(renderer *r, NriCommandBuffer *cmd, NriTextur
                             r->lightmap_sampler,
                             create_texture_view(r, direct, NriTextureView_TEXTURE),
                             r->lightmap_sampler,
-                            create_buffer_view(r, r->bvh_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(bvh_node)),
-                            create_buffer_view(r, r->bvh_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(bvh_triangle)),
-                            create_buffer_view(r, r->lightmap_sample_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(lmap_sample)),
-                            create_buffer_view(r, r->lightmap_probe_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(probe)),
+                            create_buffer_view(r, r->bvh_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
+                            create_buffer_view(r, r->bvh_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
+                            create_buffer_view(r, r->lightmap_sample_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(LMAP_SAMPLE)),
+                            create_buffer_view(r, r->lightmap_probe_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
                             create_buffer_view(r, patch_map, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32)),
                             create_buffer_view(r, patch_anchors, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32[4])),
                             create_buffer_view(r, active_in, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32)),
@@ -1073,8 +1073,8 @@ static bool bind_probe_resources(renderer *r, NriCommandBuffer *cmd, NriBuffer *
     r->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
 
     NriDescriptor *src[] = {create_buffer_view(r, input, NriBufferView_STRUCTURED_BUFFER, sizeof(float[4])),
-                            create_buffer_view(r, nodes, NriBufferView_STRUCTURED_BUFFER, sizeof(bvh_node)),
-                            create_buffer_view(r, triangles, NriBufferView_STRUCTURED_BUFFER, sizeof(bvh_triangle))};
+                            create_buffer_view(r, nodes, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
+                            create_buffer_view(r, triangles, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE))};
 
     NriDescriptor *dst = create_buffer_view(r, output, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(float[4]));
 
@@ -1082,7 +1082,7 @@ static bool bind_probe_resources(renderer *r, NriCommandBuffer *cmd, NriBuffer *
            bind_uniform_data(r, cmd, r->probe_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
 }
 
-static bool read_buffer(renderer *r, NriBuffer *output, probe_grid *grid, uint32_t bytes, uint32_t count) {
+static bool read_buffer(RENDERER *r, NriBuffer *output, PROBE_GRID *grid, uint32_t bytes, uint32_t count) {
     const NriBufferDesc desc = {.size = bytes};
     NriBuffer *staging = NULL;
 
@@ -1123,7 +1123,7 @@ static bool read_buffer(renderer *r, NriBuffer *output, probe_grid *grid, uint32
     return good;
 }
 
-static bool bind_fx_resources(renderer *r, NriCommandBuffer *cmd, NriPipeline *pipeline, NriTexture *source, NriTexture *destination, NriDescriptor *sampler_desc,
+static bool bind_fx_resources(RENDERER *r, NriCommandBuffer *cmd, NriPipeline *pipeline, NriTexture *source, NriTexture *destination, NriDescriptor *sampler_desc,
                               const void *uniforms, uint32_t size) {
     if ((source && !transition_texture(r, cmd, source, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER)) ||
         !transition_texture(r, cmd, destination, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER))
@@ -1142,13 +1142,13 @@ static bool bind_fx_resources(renderer *r, NriCommandBuffer *cmd, NriPipeline *p
     return bind_descriptor_set(r, cmd, layout, NriBindPoint_COMPUTE, 1, &dst, 1) && (!size || bind_uniform_data(r, cmd, layout, NriBindPoint_COMPUTE, 2, uniforms, size));
 }
 
-static bool bind_volume_resources(renderer *r, NriCommandBuffer *cmd, NriTexture *normal, NriDescriptor *sampler_desc, NriBuffer *probes, NriBuffer *beams, NriTexture *output,
+static bool bind_volume_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *normal, NriDescriptor *sampler_desc, NriBuffer *probes, NriBuffer *beams, NriTexture *output,
                                   const void *uniforms, uint32_t size) {
     if (!transition_texture(r, cmd, normal, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
         !transition_texture(r, cmd, output, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER))
         return false;
 
-    NriDescriptor *src[] = {create_texture_view(r, normal, NriTextureView_TEXTURE), sampler_desc, create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(probe)),
+    NriDescriptor *src[] = {create_texture_view(r, normal, NriTextureView_TEXTURE), sampler_desc, create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
                             create_buffer_view(r, beams, NriBufferView_STRUCTURED_BUFFER, sizeof(float))};
 
     NriDescriptor *dst = create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
@@ -1157,7 +1157,7 @@ static bool bind_volume_resources(renderer *r, NriCommandBuffer *cmd, NriTexture
            bind_uniform_data(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
 }
 
-static bool bind_volume_compose_resources(renderer *r, NriCommandBuffer *cmd, NriTexture *hdr, NriTexture *volume, NriTexture *normal, NriDescriptor *sampler_desc,
+static bool bind_volume_compose_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *hdr, NriTexture *volume, NriTexture *normal, NriDescriptor *sampler_desc,
                                           NriDescriptor *depth_sampler, NriTexture *output, const void *uniforms, uint32_t size) {
     NriTexture *sources[] = {hdr, volume, normal};
 
@@ -1180,15 +1180,15 @@ static bool bind_volume_compose_resources(renderer *r, NriCommandBuffer *cmd, Nr
            bind_uniform_data(r, cmd, r->volume_compose_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
 }
 
-static bool bind_sky_resources(renderer *r, NriCommandBuffer *cmd, const void *data, size_t size) {
+static bool bind_sky_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
     return bind_uniform_data(r, cmd, r->sky_layout, NriBindPoint_GRAPHICS, 3, data, size);
 }
 
-static bool bind_camera_resources(renderer *r, NriCommandBuffer *cmd, const void *data, size_t size) {
+static bool bind_camera_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
     return bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 1, data, size);
 }
 
-static bool bind_surface_resources(renderer *r, NriCommandBuffer *cmd, const render_material *material, NriTexture *lightmap, NriDescriptor *material_sampler,
+static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const RENDER_MATERIAL *material, NriTexture *lightmap, NriDescriptor *material_sampler,
                                    NriDescriptor *lightmap_sampler, const void *uniforms, size_t size) {
     NriDescriptor *src[] = {create_texture_view(r, material->base_color, NriTextureView_TEXTURE),
                             create_texture_view(r, material->metallic_roughness, NriTextureView_TEXTURE),
@@ -1207,7 +1207,7 @@ static bool bind_surface_resources(renderer *r, NriCommandBuffer *cmd, const ren
            bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
 }
 
-static bool bind_line_resources(renderer *r, NriCommandBuffer *cmd, const void *data, size_t size) {
+static bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
     return bind_uniform_data(r, cmd, r->line_layout, NriBindPoint_GRAPHICS, 1, data, size);
 }
 
@@ -1217,8 +1217,8 @@ static void free_shader(NriShaderDesc *shader) {
     if (shader) *shader = (NriShaderDesc){0};
 }
 
-static texture_state *find_texture_state(renderer *r, NriTexture *texture);
-static bool create_swapchain(renderer *r, uint32_t width, uint32_t height) {
+static TEXTURE_STATE *find_texture_state(RENDERER *r, NriTexture *texture);
+static bool create_swapchain(RENDERER *r, uint32_t width, uint32_t height) {
     if (!r->window || !width || !height) return false;
 
     NriWindow window = {0};
@@ -1272,12 +1272,12 @@ static bool create_swapchain(renderer *r, uint32_t width, uint32_t height) {
     for (uint32_t i = 0; i < count; ++i) {
         r->swapchain_textures[i] = textures[i];
 
-        texture_state *state = find_texture_state(r, textures[i]);
+        TEXTURE_STATE *state = find_texture_state(r, textures[i]);
 
         if (!state) return false;
         state->state = (NriAccessLayoutStage){.layout = NriLayout_UNDEFINED, .stages = NriStageBits_NONE};
 
-        swapchain_texture *frame = &r->swapchain_frames[i];
+        SWAPCHAIN_TEXTURE *frame = &r->swapchain_frames[i];
         frame->texture = textures[i];
 
         const NriTextureViewDesc view = {.texture = textures[i], .type = NriTextureView_COLOR_ATTACHMENT, .format = r->swapchain_format, .mipNum = 1, .layerNum = 1, .sliceNum = 1};
@@ -1291,7 +1291,7 @@ static bool create_swapchain(renderer *r, uint32_t width, uint32_t height) {
     return true;
 }
 
-static void destroy_swapchain(renderer *r) {
+static void destroy_swapchain(RENDERER *r) {
     for (uint32_t i = 0; i < r->swapchain_texture_count; ++i) {
         for (uint32_t j = 0; j < r->texture_state_num; ++j)
             if (r->texture_states[j].texture == r->swapchain_textures[i]) {
@@ -1300,7 +1300,7 @@ static void destroy_swapchain(renderer *r) {
                 break;
             }
 
-        swapchain_texture *frame = &r->swapchain_frames[i];
+        SWAPCHAIN_TEXTURE *frame = &r->swapchain_frames[i];
 
         if (frame->color_attachment) r->core.DestroyDescriptor(frame->color_attachment);
 
@@ -1319,7 +1319,7 @@ static void destroy_swapchain(renderer *r) {
     r->swapchain = NULL;
 }
 
-static bool acquire_swapchain_texture(renderer *r, uint32_t *index) {
+static bool acquire_swapchain_texture(RENDERER *r, uint32_t *index) {
     NriFence *acquire = r->swapchain_frames[r->frame_index % r->swapchain_texture_count].acquire;
 
     NriResult result = r->swapchain_api.AcquireNextTexture(r->swapchain, acquire, index);
@@ -1327,26 +1327,26 @@ static bool acquire_swapchain_texture(renderer *r, uint32_t *index) {
     return result == NriResult_SUCCESS && *index < r->swapchain_texture_count;
 }
 
-static texture_state *find_texture_state(renderer *r, NriTexture *texture) {
+static TEXTURE_STATE *find_texture_state(RENDERER *r, NriTexture *texture) {
     for (uint32_t i = 0; i < r->texture_state_num; ++i)
         if (r->texture_states[i].texture == texture) return &r->texture_states[i];
 
     if (r->texture_state_num == r->texture_state_cap) {
         uint32_t cap = r->texture_state_cap ? r->texture_state_cap * 2 : 32;
-        texture_state *items = realloc(r->texture_states, cap * sizeof(*items));
+        TEXTURE_STATE *items = realloc(r->texture_states, cap * sizeof(*items));
 
         if (!items) return NULL;
         r->texture_states = items;
         r->texture_state_cap = cap;
     }
 
-    texture_state *item = &r->texture_states[r->texture_state_num++];
-    *item = (texture_state){.texture = texture};
+    TEXTURE_STATE *item = &r->texture_states[r->texture_state_num++];
+    *item = (TEXTURE_STATE){.texture = texture};
     return item;
 }
 
-static bool texture_barrier(renderer *r, NriCommandBuffer *cmd, NriTexture *texture, NriAccessLayoutStage before, NriAccessLayoutStage after) {
-    texture_state *item = find_texture_state(r, texture);
+static bool texture_barrier(RENDERER *r, NriCommandBuffer *cmd, NriTexture *texture, NriAccessLayoutStage before, NriAccessLayoutStage after) {
+    TEXTURE_STATE *item = find_texture_state(r, texture);
 
     if (!item) return false;
 
@@ -1359,13 +1359,13 @@ static bool texture_barrier(renderer *r, NriCommandBuffer *cmd, NriTexture *text
     return true;
 }
 
-static bool transition_texture(renderer *r, NriCommandBuffer *cmd, NriTexture *texture, NriAccessBits access, NriLayout layout, NriStageBits stages) {
+static bool transition_texture(RENDERER *r, NriCommandBuffer *cmd, NriTexture *texture, NriAccessBits access, NriLayout layout, NriStageBits stages) {
     if (!texture) return false;
 
     return texture_barrier(r, cmd, texture, (NriAccessLayoutStage){0}, (NriAccessLayoutStage){.access = access, .layout = layout, .stages = stages});
 }
 
-static bool begin_scene_rendering(renderer *r, NriCommandBuffer *cmd, NriTexture *hdr, NriTexture *normal, NriTexture *depth, uint32_t width, uint32_t height) {
+static bool begin_scene_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTexture *hdr, NriTexture *normal, NriTexture *depth, uint32_t width, uint32_t height) {
     NriDescriptor *hdr_view = create_texture_view(r, hdr, NriTextureView_COLOR_ATTACHMENT);
 
     NriDescriptor *normal_view = create_texture_view(r, normal, NriTextureView_COLOR_ATTACHMENT);
@@ -1395,7 +1395,7 @@ static bool begin_scene_rendering(renderer *r, NriCommandBuffer *cmd, NriTexture
     return true;
 }
 
-static bool begin_compose_rendering(renderer *r, NriCommandBuffer *cmd, NriTexture *swap, NriTexture *hdr, NriTexture *ao, NriTexture *bloom, NriTexture *lut,
+static bool begin_compose_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTexture *swap, NriTexture *hdr, NriTexture *ao, NriTexture *bloom, NriTexture *lut,
                                     NriDescriptor *sampler_desc, const void *uniforms, size_t size) {
     NriTexture *sources[] = {hdr, ao, bloom, lut};
 
@@ -1428,7 +1428,7 @@ static bool begin_compose_rendering(renderer *r, NriCommandBuffer *cmd, NriTextu
     return true;
 }
 
-static bool submit_frame(renderer *r, frame_context *frame, NriCommandBuffer *cmd, uint32_t index) {
+static bool submit_frame(RENDERER *r, FRAME_CONTEXT *frame, NriCommandBuffer *cmd, uint32_t index) {
     bool good =
         frame && texture_barrier(r, cmd, r->swapchain_textures[index],
                                  (NriAccessLayoutStage){.access = NriAccessBits_COLOR_ATTACHMENT, .layout = NriLayout_COLOR_ATTACHMENT, .stages = NriStageBits_COLOR_ATTACHMENT},
@@ -1470,7 +1470,7 @@ static bool submit_frame(renderer *r, frame_context *frame, NriCommandBuffer *cm
     return good;
 }
 
-static NriDescriptor *sampler(renderer *r, NriFilter min_filter, NriFilter mag_filter, NriAddressMode address) {
+static NriDescriptor *sampler(RENDERER *r, NriFilter min_filter, NriFilter mag_filter, NriAddressMode address) {
     const NriSamplerDesc desc = {
         .filters = {.min = min_filter, .mag = mag_filter, .mip = NriFilter_NEAREST}, .addressModes = {address, address, address}, .mipMin = 0.0f, .mipMax = 16.0f};
 
@@ -1481,17 +1481,17 @@ static NriDescriptor *sampler(renderer *r, NriFilter min_filter, NriFilter mag_f
     return result;
 }
 
-static NriPipeline *make_line_pipeline(renderer *r, NriPipelineLayout *layout, const NriShaderDesc *vs, const NriShaderDesc *ps) {
-    const NriVertexStreamDesc vb = {.bindingSlot = 0, .stepRate = NriVertexStreamStepRate_PER_VERTEX, .stride = (uint16_t)sizeof(render_vertex)};
+static NriPipeline *make_line_pipeline(RENDERER *r, NriPipelineLayout *layout, const NriShaderDesc *vs, const NriShaderDesc *ps) {
+    const NriVertexStreamDesc vb = {.bindingSlot = 0, .stepRate = NriVertexStreamStepRate_PER_VERTEX, .stride = (uint16_t)sizeof(RENDER_VERTEX)};
 
     const NriVertexAttributeDesc attrs[2] = {{.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 0},
                                               .vk = {.location = 0},
-                                              .offset = (uint32_t)offsetof(render_vertex, x),
+                                              .offset = (uint32_t)offsetof(RENDER_VERTEX, x),
                                               .format = NriFormat_RGB32_SFLOAT,
                                               .streamIndex = 0},
                                              {.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 1},
                                               .vk = {.location = 1},
-                                              .offset = (uint32_t)offsetof(render_vertex, r),
+                                              .offset = (uint32_t)offsetof(RENDER_VERTEX, r),
                                               .format = NriFormat_RGBA32_SFLOAT,
                                               .streamIndex = 0}};
 
@@ -1521,7 +1521,7 @@ static NriPipeline *make_line_pipeline(renderer *r, NriPipelineLayout *layout, c
     return pipeline;
 }
 
-static NriPipeline *make_sky_pipeline(renderer *r, NriPipelineLayout *layout, const NriShaderDesc *vs, const NriShaderDesc *ps) {
+static NriPipeline *make_sky_pipeline(RENDERER *r, NriPipelineLayout *layout, const NriShaderDesc *vs, const NriShaderDesc *ps) {
     const NriColorAttachmentDesc targets[2] = {{.format = NriFormat_RGBA16_SFLOAT, .colorWriteMask = NriColorWriteBits_RGBA},
                                                {.format = NriFormat_RGBA16_SFLOAT, .colorWriteMask = NriColorWriteBits_RGBA}};
 
@@ -1544,7 +1544,7 @@ static NriPipeline *make_sky_pipeline(renderer *r, NriPipelineLayout *layout, co
     return pipeline;
 }
 
-static NriTexture *create_texture(renderer *r, NriFormat format, NriTextureUsageBits usage, Uint32 width, Uint32 height) {
+static NriTexture *create_texture(RENDERER *r, NriFormat format, NriTextureUsageBits usage, Uint32 width, Uint32 height) {
     if (!r || !r->device || !width || !height) return NULL;
 
     const NriTextureDesc desc = {.type = NriTextureType_TEXTURE_2D,
@@ -1576,13 +1576,13 @@ static uint64_t upload_align(uint64_t value, uint64_t alignment) {
     return (value + alignment - 1u) / alignment * alignment;
 }
 
-static void destroy_upload_context(renderer *r) {
+static void destroy_upload_context(RENDERER *r) {
     if (!r || !r->upload) return;
 
-    upload_context *upload = r->upload;
+    UPLOAD_CONTEXT *upload = r->upload;
 
     for (uint32_t i = 0; i < UPLOAD_RING_SIZE; ++i) {
-        upload_slot *slot = &upload->slots[i];
+        UPLOAD_SLOT *slot = &upload->slots[i];
 
         if (slot->command_buffer) r->core.DestroyCommandBuffer(slot->command_buffer);
 
@@ -1597,12 +1597,12 @@ static void destroy_upload_context(renderer *r) {
     r->upload = NULL;
 }
 
-static bool create_upload_context(renderer *r) {
+static bool create_upload_context(RENDERER *r) {
     if (!r || !r->device || !r->graphics_queue) return false;
 
     if (r->upload) return true;
 
-    upload_context *upload = calloc(1, sizeof(*upload));
+    UPLOAD_CONTEXT *upload = calloc(1, sizeof(*upload));
 
     if (!upload) return false;
     r->upload = upload;
@@ -1612,7 +1612,7 @@ static bool create_upload_context(renderer *r) {
     const NriBufferDesc staging_desc = {.size = UPLOAD_CHUNK_BYTES, .usage = NriBufferUsageBits_NONE};
 
     for (uint32_t i = 0; i < UPLOAD_RING_SIZE; ++i) {
-        upload_slot *slot = &upload->slots[i];
+        UPLOAD_SLOT *slot = &upload->slots[i];
 
         if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_UPLOAD, 0.0f, &staging_desc, &slot->staging) != NriResult_SUCCESS ||
             r->core.CreateCommandAllocator(r->graphics_queue, &slot->allocator) != NriResult_SUCCESS ||
@@ -1630,7 +1630,7 @@ fail:
     return false;
 }
 
-static bool upload_wait_slot(renderer *r, upload_slot *slot) {
+static bool upload_wait_slot(RENDERER *r, UPLOAD_SLOT *slot) {
     if (!r || !r->upload || !slot || !slot->fence_value) return true;
 
     const Uint64 started = SDL_GetTicks();
@@ -1652,11 +1652,11 @@ static bool upload_wait_slot(renderer *r, upload_slot *slot) {
     return true;
 }
 
-static bool upload_begin_slot(renderer *r, upload_slot **out) {
+static bool upload_begin_slot(RENDERER *r, UPLOAD_SLOT **out) {
     if (!out || !create_upload_context(r)) return false;
 
-    upload_context *upload = r->upload;
-    upload_slot *slot = &upload->slots[upload->next_slot];
+    UPLOAD_CONTEXT *upload = r->upload;
+    UPLOAD_SLOT *slot = &upload->slots[upload->next_slot];
     upload->next_slot = (upload->next_slot + 1u) % UPLOAD_RING_SIZE;
 
     if (!upload_wait_slot(r, slot)) return false;
@@ -1668,7 +1668,7 @@ static bool upload_begin_slot(renderer *r, upload_slot **out) {
     return true;
 }
 
-static bool upload_submit_slot(renderer *r, upload_slot *slot) {
+static bool upload_submit_slot(RENDERER *r, UPLOAD_SLOT *slot) {
     if (!r || !r->upload || !slot) return false;
 
     if (r->core.EndCommandBuffer(slot->command_buffer) != NriResult_SUCCESS) return false;
@@ -1685,7 +1685,7 @@ static bool upload_submit_slot(renderer *r, upload_slot *slot) {
     return true;
 }
 
-static bool upload_drain(renderer *r) {
+static bool upload_drain(RENDERER *r) {
     if (!r || !r->upload) return true;
 
     for (uint32_t i = 0; i < UPLOAD_RING_SIZE; ++i)
@@ -1710,7 +1710,7 @@ static NriAccessStage uploaded_buffer_state(NriBufferUsageBits usage) {
     return state;
 }
 
-static NriBuffer *upload_buffer(renderer *r, NriBufferUsageBits usage, const void *data, size_t bytes, uint32_t stride) {
+static NriBuffer *upload_buffer(RENDERER *r, NriBufferUsageBits usage, const void *data, size_t bytes, uint32_t stride) {
     if (!r || !r->device || !r->graphics_queue || !data || !bytes) return NULL;
 
     const NriBufferDesc desc = {.size = bytes, .structureStride = stride, .usage = usage};
@@ -1729,7 +1729,7 @@ static NriBuffer *upload_buffer(renderer *r, NriBufferUsageBits usage, const voi
     while (offset < bytes) {
         const size_t chunk = bytes - offset > UPLOAD_CHUNK_BYTES ? UPLOAD_CHUNK_BYTES : bytes - offset;
 
-        upload_slot *slot = NULL;
+        UPLOAD_SLOT *slot = NULL;
 
         if (!upload_begin_slot(r, &slot)) goto fail;
 
@@ -1769,7 +1769,7 @@ fail:
     return NULL;
 }
 
-static bool upload_texture_data(renderer *r, NriTexture *texture, const void *data, uint32_t row_pitch, uint32_t slice_pitch, NriAccessBits access, NriLayout layout,
+static bool upload_texture_data(RENDERER *r, NriTexture *texture, const void *data, uint32_t row_pitch, uint32_t slice_pitch, NriAccessBits access, NriLayout layout,
                                 NriStageBits stages) {
     if (!r || !texture || !data || !row_pitch || !slice_pitch || slice_pitch % row_pitch) return false;
 
@@ -1809,7 +1809,7 @@ static bool upload_texture_data(renderer *r, NriTexture *texture, const void *da
 
         if (staging_bytes > UPLOAD_CHUNK_BYTES) return false;
 
-        upload_slot *slot = NULL;
+        UPLOAD_SLOT *slot = NULL;
 
         if (!upload_begin_slot(r, &slot)) goto fail;
 
@@ -1847,7 +1847,7 @@ fail:
     return false;
 }
 
-static NriTexture *pixel_texture(renderer *r, Uint8 red, Uint8 green, Uint8 blue, Uint8 alpha) {
+static NriTexture *pixel_texture(RENDERER *r, Uint8 red, Uint8 green, Uint8 blue, Uint8 alpha) {
     const Uint8 pixels[4] = {red, green, blue, alpha};
 
     NriTexture *result = create_texture(r, NriFormat_RGBA8_UNORM, NriTextureUsageBits_SHADER_RESOURCE, 1, 1);
@@ -1863,7 +1863,7 @@ static NriTexture *pixel_texture(renderer *r, Uint8 red, Uint8 green, Uint8 blue
     return result;
 }
 
-void release_texture(renderer *r, NriTexture *value) {
+void release_texture(RENDERER *r, NriTexture *value) {
     if (!r || !value) return;
 
     for (uint32_t i = 0; i < r->texture_state_num; ++i) {
@@ -1877,11 +1877,11 @@ void release_texture(renderer *r, NriTexture *value) {
     r->core.DestroyTexture(value);
 }
 
-void release_buffer(renderer *r, NriBuffer *value) {
+void release_buffer(RENDERER *r, NriBuffer *value) {
     if (r && value) r->core.DestroyBuffer(value);
 }
 
-static bool ensure_depth_texture(renderer *r, Uint32 width, Uint32 height) {
+static bool ensure_depth_texture(RENDERER *r, Uint32 width, Uint32 height) {
     if (r->depth_texture && r->depth_width == width && r->depth_height == height) return true;
 
     release_texture(r, r->depth_texture);
@@ -1909,7 +1909,7 @@ static const char *image_type(const char *mime) {
     return NULL;
 }
 
-static NriTexture *load_image(renderer *r, const gltf_image *image) {
+static NriTexture *load_image(RENDERER *r, const GLTF_IMAGE *image) {
     if (!image || !image->bytes.data || !image->bytes.size) return NULL;
 
     SDL_IOStream *io = SDL_IOFromConstMem(image->bytes.data, image->bytes.size);
@@ -1940,7 +1940,7 @@ static NriTexture *load_image(renderer *r, const gltf_image *image) {
     return result;
 }
 
-static bool load_images(renderer *r, const gltf_scene *visual) {
+static bool load_images(RENDERER *r, const GLTF_SCENE *visual) {
     r->image_texture_count = visual->image_count;
 
     if (!visual->image_count) return true;
@@ -1950,7 +1950,7 @@ static bool load_images(renderer *r, const gltf_scene *visual) {
     if (!r->image_textures) return false;
 
     for (uint32_t i = 0; i < visual->image_count; ++i) {
-        const gltf_image *image = &visual->images[i];
+        const GLTF_IMAGE *image = &visual->images[i];
 
         if (!image->bytes.data || !image->bytes.size) continue;
 
@@ -1964,7 +1964,7 @@ static bool load_images(renderer *r, const gltf_scene *visual) {
     return true;
 }
 
-static NriTexture *resolve_texture(renderer *r, const gltf_scene *visual, int32_t texture_index, NriTexture *fallback) {
+static NriTexture *resolve_texture(RENDERER *r, const GLTF_SCENE *visual, int32_t texture_index, NriTexture *fallback) {
     if (texture_index < 0 || (uint32_t)texture_index >= visual->texture_count) return fallback;
 
     const int32_t image = visual->textures[texture_index].image;
@@ -1974,7 +1974,7 @@ static NriTexture *resolve_texture(renderer *r, const gltf_scene *visual, int32_
     return r->image_textures[image];
 }
 
-static void release_scene_resources(renderer *r) {
+static void release_scene_resources(RENDERER *r) {
     if (!r || !r->device) return;
 
     if (r->image_textures) {
@@ -2007,7 +2007,7 @@ static void release_scene_resources(renderer *r) {
     r->lightmap_sampler = NULL;
 }
 
-bool upload_scene(renderer *r, const gltf_scene *visual) {
+bool upload_scene(RENDERER *r, const GLTF_SCENE *visual) {
     if (!r || !r->device || !visual || !r->vertices || !r->vertex_count) return false;
 
     release_scene_resources(r);
@@ -2036,7 +2036,7 @@ bool upload_scene(renderer *r, const gltf_scene *visual) {
     if (!r->materials) return false;
 
     for (uint32_t i = 0; i < r->material_count; ++i) {
-        render_material *m = &r->materials[i];
+        RENDER_MATERIAL *m = &r->materials[i];
         m->data = visual->materials[i];
         m->base_color = resolve_texture(r, visual, m->data.base_color_texture, r->default_white);
         m->metallic_roughness = resolve_texture(r, visual, m->data.metallic_roughness_texture, r->default_white);
@@ -2051,7 +2051,7 @@ bool upload_scene(renderer *r, const gltf_scene *visual) {
     return r->lightmap_sampler && r->lightmap_texture;
 }
 
-static NriTexture *create_lightmap_texture(renderer *r, Uint32 width, Uint32 height) {
+static NriTexture *create_lightmap_texture(RENDERER *r, Uint32 width, Uint32 height) {
     return create_texture(r, NriFormat_RGBA16_SFLOAT, NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE, width, height);
 }
 
@@ -2063,7 +2063,7 @@ static bool transfer_size(uint32_t width, uint32_t height, Uint32 *out) {
     return true;
 }
 
-NriTexture *upload_lightmap(renderer *r, const cached_lightmap *cached) {
+NriTexture *upload_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached) {
     if (!r || !r->device || !cached || !cached->pixels) return NULL;
 
     Uint32 bytes = 0;
@@ -2083,7 +2083,7 @@ NriTexture *upload_lightmap(renderer *r, const cached_lightmap *cached) {
     return result;
 }
 
-static bool read_rgba16f_texture(renderer *r, NriTexture *texture, Uint32 width, Uint32 height, Uint8 **pixels) {
+static bool read_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width, Uint32 height, Uint8 **pixels) {
     if (!r || !r->device || !texture || !width || !height || !pixels) return false;
     *pixels = NULL;
 
@@ -2158,7 +2158,7 @@ static bool read_rgba16f_texture(renderer *r, NriTexture *texture, Uint32 width,
     return data != NULL;
 }
 
-bool download_lightmap(renderer *r, cached_lightmap *out) {
+bool download_lightmap(RENDERER *r, CACHED_LIGHTMAP *out) {
     if (!r || !out) return false;
 
     Uint8 *pixels = NULL;
@@ -2171,7 +2171,7 @@ bool download_lightmap(renderer *r, cached_lightmap *out) {
     return true;
 }
 
-bool upload_bvh(renderer *r, const bvh *tree) {
+bool upload_bvh(RENDERER *r, const BVH *tree) {
     if (!r || !tree || !tree->nodes || !tree->node_count || !tree->triangles || !tree->triangle_count) return false;
 
     release_buffer(r, r->bvh_node_buffer);
@@ -2179,24 +2179,24 @@ bool upload_bvh(renderer *r, const bvh *tree) {
     r->bvh_node_buffer = NULL;
     r->bvh_triangle_buffer = NULL;
 
-    r->bvh_node_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, tree->nodes, (size_t)tree->node_count * sizeof(*tree->nodes), sizeof(bvh_node));
+    r->bvh_node_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, tree->nodes, (size_t)tree->node_count * sizeof(*tree->nodes), sizeof(BVH_NODE));
 
-    r->bvh_triangle_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, tree->triangles, (size_t)tree->triangle_count * sizeof(*tree->triangles), sizeof(bvh_triangle));
+    r->bvh_triangle_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, tree->triangles, (size_t)tree->triangle_count * sizeof(*tree->triangles), sizeof(BVH_TRIANGLE));
 
     return r->bvh_node_buffer && r->bvh_triangle_buffer;
 }
 
-NriBuffer *upload_probes(renderer *r, const probe_grid *grid) {
+NriBuffer *upload_probes(RENDERER *r, const PROBE_GRID *grid) {
     if (!grid || !grid->probes) return NULL;
 
     const size_t count = (size_t)grid->count_x * grid->count_y * grid->count_z;
 
     if (!count) return NULL;
 
-    return upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, grid->probes, count * sizeof(probe), sizeof(probe));
+    return upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, grid->probes, count * sizeof(PROBE), sizeof(PROBE));
 }
 
-NriBuffer *upload_beams(renderer *r, const beam_grid *grid) {
+NriBuffer *upload_beams(RENDERER *r, const BEAM_GRID *grid) {
     if (!grid) return NULL;
 
     float *visibility = beam_expand(grid);
@@ -2358,10 +2358,10 @@ static void dispatch_shape(Uint32 items, Uint32 *groups_x, Uint32 *groups_y, Uin
     *dispatch_width = width;
 }
 
-static bake_uniforms bake_data(renderer *r, Uint32 phase, Uint32 iteration, Uint32 item_count, Uint32 dispatch_width, Uint32 batch_count) {
-    const vec3 sun = sun_direction();
+static BAKE_UNIFORMS bake_data(RENDERER *r, Uint32 phase, Uint32 iteration, Uint32 item_count, Uint32 dispatch_width, Uint32 batch_count) {
+    const VEC3 sun = sun_direction();
 
-    return (bake_uniforms){.item_count = item_count,
+    return (BAKE_UNIFORMS){.item_count = item_count,
                            .lightmap_width = r->lightmap_width,
                            .lightmap_height = r->lightmap_height,
                            .dispatch_width = dispatch_width,
@@ -2378,12 +2378,12 @@ static bake_uniforms bake_data(renderer *r, Uint32 phase, Uint32 iteration, Uint
                            .probe_dims_mode = {r->lightmap_probe_count_x, r->lightmap_probe_count_y, r->lightmap_probe_count_z, 0u}};
 }
 
-static bool record_bake_pass(renderer *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, Uint32 phase, Uint32 iteration, Uint32 item_count,
+static bool record_bake_pass(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, Uint32 phase, Uint32 iteration, Uint32 item_count,
                              Uint32 batch_count) {
     Uint32 groups_x, groups_y, dispatch_width;
     dispatch_shape(item_count, &groups_x, &groups_y, &dispatch_width);
 
-    const bake_uniforms uniforms = bake_data(r, phase, iteration, item_count, dispatch_width, batch_count);
+    const BAKE_UNIFORMS uniforms = bake_data(r, phase, iteration, item_count, dispatch_width, batch_count);
 
     if (!bind_bake_resources(r, cmd, source, destination, &uniforms, sizeof(uniforms))) return false;
 
@@ -2393,7 +2393,7 @@ static bool record_bake_pass(renderer *r, NriCommandBuffer *cmd, NriTexture *sou
     return true;
 }
 
-static void swap_lightmaps(renderer *r) {
+static void swap_lightmaps(RENDERER *r) {
     NriTexture *tmp = r->lightmap_texture;
 
     r->lightmap_texture = r->lightmap_scratch;
@@ -2453,7 +2453,7 @@ static float direct_luma(const Uint8 *pixels, Uint32 pixel) {
     return decode_half(channels[0]) * 0.2126f + decode_half(channels[1]) * 0.7152f + decode_half(channels[2]) * 0.0722f;
 }
 
-static bool build_lightmap_patches(renderer *r, const lightmap *lm) {
+static bool build_lightmap_patches(RENDERER *r, const LIGHTMAP *lm) {
     Uint8 *pixels = NULL;
 
     if (!read_rgba16f_texture(r, r->lightmap_direct, lm->width, lm->height, &pixels)) return false;
@@ -2494,7 +2494,7 @@ static bool build_lightmap_patches(renderer *r, const lightmap *lm) {
 
             if (base_index == UINT32_MAX) continue;
 
-            const lmap_sample *base = &lm->samples[base_index];
+            const LMAP_SAMPLE *base = &lm->samples[base_index];
 
             for (Uint32 dy = 0; dy < 4u && smooth; ++dy) {
                 for (Uint32 dx = 0; dx < 4u; ++dx) {
@@ -2507,7 +2507,7 @@ static bool build_lightmap_patches(renderer *r, const lightmap *lm) {
                         break;
                     }
 
-                    const lmap_sample *sample = &lm->samples[index];
+                    const LMAP_SAMPLE *sample = &lm->samples[index];
                     float dot = base->normal[0] * sample->normal[0] + base->normal[1] * sample->normal[1] + base->normal[2] * sample->normal[2];
 
                     float plane = (sample->position[0] - base->position[0]) * base->normal[0] + (sample->position[1] - base->position[1]) * base->normal[1] +
@@ -2552,7 +2552,7 @@ static bool build_lightmap_patches(renderer *r, const lightmap *lm) {
 
     if (reduced) {
         Uint32 count = lm->sample_count - reduced;
-        lmap_sample *sparse = malloc((size_t)count * sizeof(*sparse));
+        LMAP_SAMPLE *sparse = malloc((size_t)count * sizeof(*sparse));
         NriBuffer *sample_buffer = NULL;
         NriBuffer *map_buffer = NULL;
         NriBuffer *anchor_buffer = NULL;
@@ -2563,7 +2563,7 @@ static bool build_lightmap_patches(renderer *r, const lightmap *lm) {
             for (Uint32 i = 0; i < lm->sample_count; ++i)
                 if (keep[i]) sparse[next++] = lm->samples[i];
 
-            sample_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, sparse, (size_t)count * sizeof(*sparse), sizeof(lmap_sample));
+            sample_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, sparse, (size_t)count * sizeof(*sparse), sizeof(LMAP_SAMPLE));
             map_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, mapping, (size_t)lm->sample_count * sizeof(*mapping), sizeof(Uint32));
             anchor_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, anchors, tile_count * sizeof(*anchors), sizeof(Uint32[4]));
         }
@@ -2596,7 +2596,7 @@ cleanup:
     return ok;
 }
 
-static bool bake_lightmap_once(renderer *r, const lightmap *lm) {
+static bool bake_lightmap_once(RENDERER *r, const LIGHTMAP *lm) {
     const Uint32 pixels = r->lightmap_width * r->lightmap_height;
 
     SDL_Log("B: lightmap trace samples per pass: %u", BAKE_BATCH_SAMPLES);
@@ -2710,7 +2710,7 @@ static bool bake_lightmap_once(renderer *r, const lightmap *lm) {
     return true;
 }
 
-bool bake_lightmap(renderer *r, const bvh *tree, const lightmap *lm, const probe_grid *probes) {
+bool bake_lightmap(RENDERER *r, const BVH *tree, const LIGHTMAP *lm, const PROBE_GRID *probes) {
     if (!r || !r->device || !tree || !tree->node_count || !lm || !lm->width || !lm->height || !lm->samples || !lm->sample_count || !r->lightmap_sampler || !probes ||
         !probes->probes || !probes->spacing || !probes->count_x || !probes->count_y || !probes->count_z)
         return false;
@@ -2732,7 +2732,7 @@ bool bake_lightmap(renderer *r, const bvh *tree, const lightmap *lm, const probe
 
     if (!r->lightmap_probe_buffer) return false;
 
-    const bvh_node *root = &tree->nodes[0];
+    const BVH_NODE *root = &tree->nodes[0];
     const float sx = root->max[0] - root->min[0];
     const float sy = root->max[1] - root->min[1];
     const float sz = root->max[2] - root->min[2];
@@ -2749,7 +2749,7 @@ bool bake_lightmap(renderer *r, const bvh *tree, const lightmap *lm, const probe
     if (!r->lightmap_texture || !r->lightmap_scratch || !r->lightmap_direct) return false;
 
     if (!upload_bvh(r, tree)) return false;
-    r->lightmap_sample_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, lm->samples, (size_t)lm->sample_count * sizeof(*lm->samples), sizeof(lmap_sample));
+    r->lightmap_sample_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, lm->samples, (size_t)lm->sample_count * sizeof(*lm->samples), sizeof(LMAP_SAMPLE));
 
     if (!r->lightmap_sample_buffer) return false;
 
@@ -2778,7 +2778,7 @@ bool bake_lightmap(renderer *r, const bvh *tree, const lightmap *lm, const probe
 #define PROBE_ACCUM_BYTES 32u
 #define PROBE_OUTPUT_STRIDE_BYTES (9u * 16u)
 
-typedef struct probe_wavefront_uniforms {
+typedef struct PROBE_WAVEFRONT_UNIFORMS {
     Uint32 probe_count;
     Uint32 sample_offset;
     Uint32 samples_per_block;
@@ -2798,9 +2798,9 @@ typedef struct probe_wavefront_uniforms {
     float bake_params[4];
     float beam_origin[4];
     float beam_step[4];
-} probe_wavefront_uniforms;
+} PROBE_WAVEFRONT_UNIFORMS;
 
-typedef struct probe_wavefront_buffer {
+typedef struct PROBE_WAVEFRONT_BUFFER {
     NriBuffer *buffer;
     uint32_t stride;
     NriAccessBits access;
@@ -2809,12 +2809,12 @@ typedef struct probe_wavefront_buffer {
     uint64_t capacity;
 } probe_wavefront_buffer;
 
-typedef struct probe_wavefront_stage {
+typedef struct PROBE_WAVEFRONT_STAGE {
     NriPipelineLayout *layout;
     NriPipeline *pipeline;
     uint8_t read_count;
     uint8_t write_count;
-} probe_wavefront_stage;
+} PROBE_WAVEFRONT_STAGE;
 
 typedef struct probe_wavefront_pipelines {
     probe_wavefront_stage prepare;
@@ -2860,8 +2860,8 @@ static probe_wavefront_buffer probe_wavefront_uploaded(renderer *r, const void *
     return result;
 }
 
-static probe_wavefront_buffer probe_wavefront_storage(renderer *r, uint64_t bytes, uint32_t stride) {
-    probe_wavefront_buffer result = {0};
+static PROBE_WAVEFRONT_BUFFER probe_wavefront_storage(RENDERER *r, uint64_t bytes, uint32_t stride) {
+    PROBE_WAVEFRONT_BUFFER result = {0};
 
     if (!r || !r->device || !bytes) return result;
 
@@ -2891,10 +2891,10 @@ static probe_wavefront_buffer probe_wavefront_argument(renderer *r) {
     return result;
 }
 
-static void probe_wavefront_release_buffer(renderer *r, probe_wavefront_buffer *buffer) {
+static void probe_wavefront_release_buffer(RENDERER *r, PROBE_WAVEFRONT_BUFFER *buffer) {
     if (!buffer) return;
     release_buffer(r, buffer->buffer);
-    *buffer = (probe_wavefront_buffer){0};
+    *buffer = (PROBE_WAVEFRONT_BUFFER){0};
 }
 
 static bool probe_wavefront_reserve(renderer *r, probe_wavefront_buffer *buffer, uint64_t bytes, uint32_t stride, NriBufferUsageBits usage) {
@@ -2951,7 +2951,7 @@ static bool probe_wavefront_layout(renderer *r, NriPipelineLayout **layout, uint
     return create_pipeline_layout(r, layout, sets, counts, NriStageBits_COMPUTE_SHADER);
 }
 
-static bool probe_wavefront_stage_init(renderer *r, probe_wavefront_stage *stage, const char *entrypoint, const char *define, uint8_t reads, uint8_t writes) {
+static bool probe_wavefront_stage_init(RENDERER *r, PROBE_WAVEFRONT_STAGE *stage, const char *entrypoint, const char *define, uint8_t reads, uint8_t writes) {
     if (!probe_wavefront_layout(r, &stage->layout, reads, writes)) return false;
     stage->pipeline = compile_compute(r, stage->layout, "shaders/probe_wavefront.hlsl", entrypoint, define);
     stage->read_count = reads;
@@ -2960,16 +2960,16 @@ static bool probe_wavefront_stage_init(renderer *r, probe_wavefront_stage *stage
     return stage->pipeline != NULL;
 }
 
-static void probe_wavefront_stage_deinit(renderer *r, probe_wavefront_stage *stage) {
+static void probe_wavefront_stage_deinit(RENDERER *r, PROBE_WAVEFRONT_STAGE *stage) {
     if (!stage) return;
 
     if (stage->pipeline) r->core.DestroyPipeline(stage->pipeline);
 
     if (stage->layout) r->core.DestroyPipelineLayout(stage->layout);
-    *stage = (probe_wavefront_stage){0};
+    *stage = (PROBE_WAVEFRONT_STAGE){0};
 }
 
-static bool probe_wavefront_pipelines_init(renderer *r, probe_wavefront_pipelines *p) {
+static bool probe_wavefront_pipelines_init(RENDERER *r, PROBE_WAVEFRONT_PIPELINES *p) {
     memset(p, 0, sizeof(*p));
 
     const NriDeviceDesc *device = r->core.GetDeviceDesc(r->device);
@@ -2986,7 +2986,7 @@ static bool probe_wavefront_pipelines_init(renderer *r, probe_wavefront_pipeline
            probe_wavefront_stage_init(r, &p->reduce, "probe_reduce_cs", "BUILD_PROBE_REDUCE_CS", 1, 3);
 }
 
-static void probe_wavefront_pipelines_deinit(renderer *r, probe_wavefront_pipelines *p) {
+static void probe_wavefront_pipelines_deinit(RENDERER *r, PROBE_WAVEFRONT_PIPELINES *p) {
     probe_wavefront_stage_deinit(r, &p->reduce);
     probe_wavefront_stage_deinit(r, &p->bounce);
     probe_wavefront_stage_deinit(r, &p->args);
@@ -3064,7 +3064,7 @@ static bool probe_wavefront_transition(renderer *r, NriCommandBuffer *cmd, probe
     uint32_t count = 0;
 
     for (uint8_t i = 0; i < read_count; ++i) {
-        probe_wavefront_buffer *buffer = reads[i];
+        PROBE_WAVEFRONT_BUFFER *buffer = reads[i];
 
         if (!buffer || !buffer->buffer) return false;
 
@@ -3076,7 +3076,7 @@ static bool probe_wavefront_transition(renderer *r, NriCommandBuffer *cmd, probe
     }
 
     for (uint8_t i = 0; i < write_count; ++i) {
-        probe_wavefront_buffer *buffer = writes[i];
+        PROBE_WAVEFRONT_BUFFER *buffer = writes[i];
 
         if (!buffer || !buffer->buffer) return false;
 
@@ -3092,8 +3092,8 @@ static bool probe_wavefront_transition(renderer *r, NriCommandBuffer *cmd, probe
     return true;
 }
 
-static bool probe_wavefront_dispatch(renderer *r, NriCommandBuffer *cmd, const probe_wavefront_stage *stage, probe_wavefront_buffer *const *reads,
-                                     probe_wavefront_buffer *const *writes, const probe_wavefront_uniforms *uniforms, uint32_t groups_x) {
+static bool probe_wavefront_dispatch(RENDERER *r, NriCommandBuffer *cmd, const PROBE_WAVEFRONT_STAGE *stage, PROBE_WAVEFRONT_BUFFER *const *reads,
+                                     PROBE_WAVEFRONT_BUFFER *const *writes, const PROBE_WAVEFRONT_UNIFORMS *uniforms, uint32_t groups_x) {
     if (!r || !cmd || !stage || !stage->pipeline || !stage->layout || !uniforms || !groups_x) return false;
 
     if (!probe_wavefront_transition(r, cmd, reads, stage->read_count, writes, stage->write_count)) return false;
@@ -3169,17 +3169,17 @@ static uint32_t probe_wavefront_groups64(uint64_t threads) {
     return groups && groups <= UINT32_MAX ? (uint32_t)groups : 0u;
 }
 
-static probe_wavefront_uniforms probe_wavefront_data(const bvh *tree, const beam_grid *beams, uint32_t probe_count, uint32_t sample_offset, uint32_t block_samples,
+static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(const BVH *tree, const BEAM_GRID *beams, uint32_t probe_count, uint32_t sample_offset, uint32_t block_samples,
                                                      uint32_t bounce_index) {
-    const vec3 sun = v3_normalize(v3(0.38f, 0.30f, 0.32f));
-    const bvh_node *root = &tree->nodes[0];
+    const VEC3 sun = v3_normalize(v3(0.38f, 0.30f, 0.32f));
+    const BVH_NODE *root = &tree->nodes[0];
     float scene_scale = fmaxf(root->max[0] - root->min[0], fmaxf(root->max[1] - root->min[1], root->max[2] - root->min[2]));
 
     if (scene_scale < 1.0f) scene_scale = 1.0f;
 
     const float epsilon = scene_scale * 2.0e-5f;
 
-    return (probe_wavefront_uniforms){.probe_count = probe_count,
+    return (PROBE_WAVEFRONT_UNIFORMS){.probe_count = probe_count,
                                       .sample_offset = sample_offset,
                                       .samples_per_block = block_samples,
                                       .total_samples = PROBE_MAX_SAMPLES,
@@ -3197,7 +3197,7 @@ static probe_wavefront_uniforms probe_wavefront_data(const bvh *tree, const beam
                                       .beam_step = {beams->step.x, beams->step.y, beams->step.z, 0.0f}};
 }
 
-static NriBuffer *probe_wavefront_readback_buffer(renderer *r, uint64_t bytes) {
+static NriBuffer *probe_wavefront_readback_buffer(RENDERER *r, uint64_t bytes) {
     const NriBufferDesc desc = {.size = bytes};
     NriBuffer *buffer = NULL;
 
@@ -3206,7 +3206,7 @@ static NriBuffer *probe_wavefront_readback_buffer(renderer *r, uint64_t bytes) {
     return buffer;
 }
 
-static bool probe_wavefront_copy_to_readback(renderer *r, NriCommandBuffer *cmd, probe_wavefront_buffer *source, NriBuffer *destination, uint64_t bytes) {
+static bool probe_wavefront_copy_to_readback(RENDERER *r, NriCommandBuffer *cmd, PROBE_WAVEFRONT_BUFFER *source, NriBuffer *destination, uint64_t bytes) {
     if (!source || !source->buffer || !destination) return false;
 
     const NriBufferBarrierDesc barrier = {
@@ -3219,7 +3219,7 @@ static bool probe_wavefront_copy_to_readback(renderer *r, NriCommandBuffer *cmd,
     return true;
 }
 
-bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const beam_grid *beams, probe_bake_progress_fn progress) {
+bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const BEAM_GRID *beams, PROBE_BAKE_PROGRESS_FN progress) {
     if (!r || !r->device || !grid || !grid->probes || !tree || !tree->node_count || !tree->triangle_count || !beams || !beams->shadow_depth) return false;
 
     const uint64_t probe_count64 = (uint64_t)grid->count_x * grid->count_y * grid->count_z;
@@ -3264,10 +3264,10 @@ bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const 
 
     memcpy(beam_data + beam_count, beams->shadow_depth, depth_count * sizeof(float));
 
-    probe_wavefront_buffer position_buffer = probe_wavefront_uploaded(r, positions, probe_count64 * sizeof(float[4]), sizeof(float[4]));
-    probe_wavefront_buffer source_nodes = probe_wavefront_uploaded(r, tree->nodes, (uint64_t)tree->node_count * sizeof(*tree->nodes), sizeof(bvh_node));
-    probe_wavefront_buffer source_triangles = probe_wavefront_uploaded(r, tree->triangles, (uint64_t)tree->triangle_count * sizeof(*tree->triangles), sizeof(bvh_triangle));
-    probe_wavefront_buffer sun_beams = probe_wavefront_uploaded(r, beam_data, (beam_count + depth_count) * sizeof(float), sizeof(float));
+    PROBE_WAVEFRONT_BUFFER position_buffer = probe_wavefront_uploaded(r, positions, probe_count64 * sizeof(float[4]), sizeof(float[4]));
+    PROBE_WAVEFRONT_BUFFER source_nodes = probe_wavefront_uploaded(r, tree->nodes, (uint64_t)tree->node_count * sizeof(*tree->nodes), sizeof(BVH_NODE));
+    PROBE_WAVEFRONT_BUFFER source_triangles = probe_wavefront_uploaded(r, tree->triangles, (uint64_t)tree->triangle_count * sizeof(*tree->triangles), sizeof(BVH_TRIANGLE));
+    PROBE_WAVEFRONT_BUFFER sun_beams = probe_wavefront_uploaded(r, beam_data, (beam_count + depth_count) * sizeof(float), sizeof(float));
 
     free(positions);
     free(beam_data);
@@ -3306,13 +3306,13 @@ bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const 
             good = gpu_timestamp_begin(r, cmd, 0u);
             probe_wavefront_buffer *prepare_reads[] = {&source_nodes, &source_triangles};
 
-            probe_wavefront_buffer *prepare_writes[] = {&packed_nodes, &packed_triangles};
+            PROBE_WAVEFRONT_BUFFER *prepare_writes[] = {&packed_nodes, &packed_triangles};
 
-            probe_wavefront_buffer *reset_writes[] = {&counters, &accums, &coefficients};
+            PROBE_WAVEFRONT_BUFFER *reset_writes[] = {&counters, &accums, &coefficients};
 
-            probe_wavefront_buffer *validate_reads[] = {&position_buffer, &packed_nodes, &packed_triangles};
+            PROBE_WAVEFRONT_BUFFER *validate_reads[] = {&position_buffer, &packed_nodes, &packed_triangles};
 
-            probe_wavefront_buffer *validate_writes[] = {&accums};
+            PROBE_WAVEFRONT_BUFFER *validate_writes[] = {&accums};
             good = probe_wavefront_dispatch(r, cmd, &pipelines.prepare, prepare_reads, prepare_writes, &uniforms, prep_groups) &&
                    probe_wavefront_dispatch(r, cmd, &pipelines.reset, NULL, reset_writes, &uniforms, probe_groups) &&
                    probe_wavefront_dispatch(r, cmd, &pipelines.validate, validate_reads, validate_writes, &uniforms, probe_groups);
@@ -3345,14 +3345,14 @@ bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const 
         good = gpu_timestamp_begin(r, cmd, 2u);
 
         if (completed) {
-            probe_wavefront_buffer *reset_writes[] = {&counters, &accums, &coefficients};
+            PROBE_WAVEFRONT_BUFFER *reset_writes[] = {&counters, &accums, &coefficients};
 
             good = probe_wavefront_dispatch(r, cmd, &pipelines.reset, NULL, reset_writes, &uniforms, probe_groups);
         }
 
-        probe_wavefront_buffer *primary_reads[] = {&position_buffer, &accums, &packed_nodes, &packed_triangles};
+        PROBE_WAVEFRONT_BUFFER *primary_reads[] = {&position_buffer, &accums, &packed_nodes, &packed_triangles};
 
-        probe_wavefront_buffer *primary_writes[] = {&results, &states_a, &counters};
+        PROBE_WAVEFRONT_BUFFER *primary_writes[] = {&results, &states_a, &counters};
 
         if (good) good = probe_wavefront_dispatch(r, cmd, &pipelines.primary, primary_reads, primary_writes, &uniforms, probe_wavefront_groups64((uint64_t)probe_count * block));
 
@@ -3373,8 +3373,8 @@ bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const 
 
         uniforms.bounce_index = 0u;
 
-        probe_wavefront_buffer *reduce_reads[] = {&results};
-        probe_wavefront_buffer *reduce_writes[] = {&accums, &coefficients, &counters};
+        PROBE_WAVEFRONT_BUFFER *reduce_reads[] = {&results};
+        PROBE_WAVEFRONT_BUFFER *reduce_writes[] = {&accums, &coefficients, &counters};
 
         if (good) good = probe_wavefront_dispatch(r, cmd, &pipelines.reduce, reduce_reads, reduce_writes, &uniforms, probe_count);
 
@@ -3456,7 +3456,7 @@ bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const 
     return good;
 }
 
-bool bake_probe_grid(renderer *r, probe_grid *grid, Uint32 samples) {
+bool bake_probe_grid(RENDERER *r, PROBE_GRID *grid, Uint32 samples) {
     if (!r || !grid || !grid->probes) return false;
 
     const uint64_t count = (uint64_t)grid->count_x * grid->count_y * grid->count_z;
@@ -3498,7 +3498,7 @@ bool bake_probe_grid(renderer *r, probe_grid *grid, Uint32 samples) {
         good = begin_commands(r, &allocator, &cmd) == NriResult_SUCCESS;
 
         if (good) {
-            const bake_uniforms u = bake_data(r, 0u, 0u, samples, 0u, 0u);
+            const BAKE_UNIFORMS u = bake_data(r, 0u, 0u, samples, 0u, 0u);
 
             good = bind_probe_resources(r, cmd, input, r->bvh_node_buffer, r->bvh_triangle_buffer, output, &u, sizeof(u));
 
@@ -3523,7 +3523,7 @@ bool bake_probe_grid(renderer *r, probe_grid *grid, Uint32 samples) {
     return good;
 }
 
-void release_bake_resources(renderer *r) {
+void release_bake_resources(RENDERER *r) {
     if (!r || !r->device) return;
 
     release_buffer(r, r->bvh_node_buffer);
@@ -3573,11 +3573,11 @@ void release_bake_resources(renderer *r) {
     r->lightmap_queue_args_pipeline = NULL;
 }
 
-static bool dispatch_one(fx_state *fx, NriCommandBuffer *cmd, NriPipeline *pipeline, NriTexture *source, NriTexture *destination, const void *uniforms, Uint32 uniform_size,
+static bool dispatch_one(FX_STATE *fx, NriCommandBuffer *cmd, NriPipeline *pipeline, NriTexture *source, NriTexture *destination, const void *uniforms, Uint32 uniform_size,
                          Uint32 width, Uint32 height) {
     if (!fx || !fx->owner || !cmd || !pipeline || !destination) return false;
 
-    renderer *r = fx->owner;
+    RENDERER *r = fx->owner;
 
     if (!bind_fx_resources(r, cmd, pipeline, source, destination, fx->sampler, uniforms, uniform_size)) return false;
 
@@ -3587,10 +3587,10 @@ static bool dispatch_one(fx_state *fx, NriCommandBuffer *cmd, NriPipeline *pipel
     return true;
 }
 
-static void release_frame_textures(fx_state *fx) {
+static void release_frame_textures(FX_STATE *fx) {
     if (!fx || !fx->owner) return;
 
-    renderer *r = fx->owner;
+    RENDERER *r = fx->owner;
 
     release_texture(r, fx->hdr);
     release_texture(r, fx->normal_depth);
@@ -3611,10 +3611,10 @@ static void release_frame_textures(fx_state *fx) {
     fx->volume_ready = false;
 }
 
-static void fx_deinit(fx_state *fx) {
+static void fx_deinit(FX_STATE *fx) {
     if (!fx || !fx->owner) return;
 
-    renderer *r = fx->owner;
+    RENDERER *r = fx->owner;
 
     release_frame_textures(fx);
 
@@ -3639,7 +3639,7 @@ static void fx_deinit(fx_state *fx) {
     memset(fx, 0, sizeof(*fx));
 }
 
-static bool make_compose_pipeline(renderer *r, NriShaderDesc *vs, NriShaderDesc *ps, NriFormat swap_format, NriPipeline **out) {
+static bool make_compose_pipeline(RENDERER *r, NriShaderDesc *vs, NriShaderDesc *ps, NriFormat swap_format, NriPipeline **out) {
     const NriColorAttachmentDesc target = {.format = swap_format, .colorWriteMask = NriColorWriteBits_RGBA};
 
     const NriShaderDesc shaders[2] = {*vs, *ps};
@@ -3654,7 +3654,7 @@ static bool make_compose_pipeline(renderer *r, NriShaderDesc *vs, NriShaderDesc 
     return r->core.CreateGraphicsPipeline(r->device, &desc, out) == NriResult_SUCCESS;
 }
 
-static bool fx_init(fx_state *fx, renderer *r) {
+static bool fx_init(FX_STATE *fx, RENDERER *r) {
     if (!fx || !r || !r->device) return false;
 
     NriShaderDesc vs = {0};
@@ -3715,12 +3715,12 @@ fail:
     return false;
 }
 
-static bool fx_ensure(fx_state *fx, Uint32 width, Uint32 height) {
+static bool fx_ensure(FX_STATE *fx, Uint32 width, Uint32 height) {
     if (!fx || !fx->owner || !width || !height) return false;
 
     if (fx->hdr && fx->width == width && fx->height == height) return true;
 
-    renderer *r = fx->owner;
+    RENDERER *r = fx->owner;
 
     release_frame_textures(fx);
     fx->width = width;
@@ -3749,12 +3749,12 @@ static bool fx_ensure(fx_state *fx, Uint32 width, Uint32 height) {
     return true;
 }
 
-static bool fx_volume(fx_state *fx, NriCommandBuffer *cmd, NriBuffer *probes, NriBuffer *beams, const probe_grid *grid, const beam_grid *beam_grid, const render_frame *frame) {
+static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, NriBuffer *beams, const PROBE_GRID *grid, const BEAM_GRID *beam_grid, const RENDER_FRAME *frame) {
     if (!fx || !fx->owner || !cmd || !probes || !beams || !grid || !beam_grid || !grid->probes || !fx->volume) return false;
 
-    renderer *r = fx->owner;
+    RENDERER *r = fx->owner;
 
-    const volume_uniforms u = {.eye_density = {frame->eye.x, frame->eye.y, frame->eye.z, 0.045f},
+    const VOLUME_UNIFORMS u = {.eye_density = {frame->eye.x, frame->eye.y, frame->eye.z, 0.045f},
                                .right_tan = {frame->right.x * frame->tan_half_fov * frame->aspect, frame->right.y * frame->tan_half_fov * frame->aspect,
                                              frame->right.z * frame->tan_half_fov * frame->aspect, 0},
                                .up_tan = {frame->up.x * frame->tan_half_fov, frame->up.y * frame->tan_half_fov, frame->up.z * frame->tan_half_fov, 0},
@@ -3785,10 +3785,10 @@ static bool fx_volume(fx_state *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
     return true;
 }
 
-static bool run_vision_only(fx_state *fx, NriCommandBuffer *cmd) {
+static bool run_vision_only(FX_STATE *fx, NriCommandBuffer *cmd) {
     if (!fx || !fx->owner || !cmd) return false;
 
-    renderer *r = fx->owner;
+    RENDERER *r = fx->owner;
     const Uint32 dimensions[4] = {fx->width, fx->height, fx->debug_view, 1u};
 
     if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, dimensions, sizeof(dimensions))) return false;
@@ -3800,8 +3800,8 @@ static bool run_vision_only(fx_state *fx, NriCommandBuffer *cmd) {
     return true;
 }
 
-static bool bloom_pass(fx_state *fx, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, Uint32 src_width, Uint32 src_height, Uint32 phase) {
-    const bloom_uniforms u = {.src_width = src_width,
+static bool bloom_pass(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, Uint32 src_width, Uint32 src_height, Uint32 phase) {
+    const BLOOM_UNIFORMS u = {.src_width = src_width,
                               .src_height = src_height,
                               .dst_width = fx->ao_width,
                               .dst_height = fx->ao_height,
@@ -3813,12 +3813,12 @@ static bool bloom_pass(fx_state *fx, NriCommandBuffer *cmd, NriTexture *source, 
     return dispatch_one(fx, cmd, fx->bloom_pipeline, source, destination, &u, sizeof(u), fx->ao_width, fx->ao_height);
 }
 
-static bool fx_apply_base(fx_state *fx, NriCommandBuffer *cmd, NriTexture *swap, float tan_half_fov, float aspect) {
+static bool fx_apply_base(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *swap, float tan_half_fov, float aspect) {
     if (!fx || !fx->owner || !cmd || !swap || !fx->hdr || !fx->normal_depth) return false;
 
-    renderer *r = fx->owner;
+    RENDERER *r = fx->owner;
 
-    const ssao_uniforms ao = {.width = fx->width,
+    const SSAO_UNIFORMS ao = {.width = fx->width,
                               .height = fx->height,
                               .ao_width = fx->ao_width,
                               .ao_height = fx->ao_height,
@@ -3834,7 +3834,7 @@ static bool fx_apply_base(fx_state *fx, NriCommandBuffer *cmd, NriTexture *swap,
         !bloom_pass(fx, cmd, fx->bloom_b, fx->bloom_a, fx->ao_width, fx->ao_height, 2u))
         return false;
 
-    const compose_uniforms u = {.exposure = 1.0f, .ao_strength = fx->debug_view >= 3u ? 0.0f : 0.62f, .bloom_strength = fx->debug_view >= 3u ? 0.0f : 0.22f};
+    const COMPOSE_UNIFORMS u = {.exposure = 1.0f, .ao_strength = fx->debug_view >= 3u ? 0.0f : 0.62f, .bloom_strength = fx->debug_view >= 3u ? 0.0f : 0.22f};
 
     if (!begin_compose_rendering(r, cmd, swap, hdr, fx->ao, fx->bloom_a, fx->lut, fx->sampler, &u, sizeof(u))) return false;
 
@@ -3846,7 +3846,7 @@ static bool fx_apply_base(fx_state *fx, NriCommandBuffer *cmd, NriTexture *swap,
     return true;
 }
 
-static bool fx_apply(fx_state *fx, NriCommandBuffer *cmd, NriTexture *swap, float tan_half_fov, float aspect) {
+static bool fx_apply(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *swap, float tan_half_fov, float aspect) {
     if (!fx || !cmd || !swap) return false;
 
     const bool had_volume = fx->volume_ready;
@@ -3876,7 +3876,7 @@ static bool create_pipeline_layouts(renderer *r) {
            create_ssao_layout(r) && create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) && create_volume_compose_layout(r) && create_compose_layout(r);
 }
 
-static void destroy_pipeline_layouts(renderer *r) {
+static void destroy_pipeline_layouts(RENDERER *r) {
     if (!r) return;
 
     NriPipelineLayout **layouts[] = {&r->surface_layout,
@@ -3901,7 +3901,7 @@ static void destroy_pipeline_layouts(renderer *r) {
     }
 }
 
-bool r_init(renderer *r, const char *title, int width, int height) {
+bool r_init(RENDERER *r, const char *title, int width, int height) {
     if (!r) return false;
 
     memset(r, 0, sizeof(*r));
@@ -4015,7 +4015,7 @@ bool r_init(renderer *r, const char *title, int width, int height) {
     return true;
 }
 
-bool draw_frame(renderer *r, const render_frame *frame) {
+bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     if (!r || !frame || !r->device || !r->solid_pipeline || !r->sky_pipeline || !r->vertex_buffer || !r->lightmap_texture || !r->lightmap_sampler) return false;
 
     uint32_t width = 0;
@@ -4046,17 +4046,17 @@ bool draw_frame(renderer *r, const render_frame *frame) {
 
     NriTexture *swap = r->swapchain_textures[swap_index];
 
-    frame_context *queued_frame = NULL;
+    FRAME_CONTEXT *queued_frame = NULL;
     NriCommandBuffer *cmd = NULL;
 
     if (!begin_frame_commands(r, &queued_frame, &cmd)) goto failed_frame;
 
-    camera_uniforms camera = {0};
+    CAMERA_UNIFORMS camera = {0};
 
     memcpy(camera.mvp, frame->mvp, sizeof(camera.mvp));
     memcpy(camera.view, frame->view, sizeof(camera.view));
 
-    const sky_uniforms sky = {.camera_right = {frame->right.x * frame->tan_half_fov * frame->aspect, frame->right.y * frame->tan_half_fov * frame->aspect,
+    const SKY_UNIFORMS sky = {.camera_right = {frame->right.x * frame->tan_half_fov * frame->aspect, frame->right.y * frame->tan_half_fov * frame->aspect,
                                                frame->right.z * frame->tan_half_fov * frame->aspect, 0},
                               .camera_up = {frame->up.x * frame->tan_half_fov, frame->up.y * frame->tan_half_fov, frame->up.z * frame->tan_half_fov, 0},
                               .camera_forward = {frame->forward.x, frame->forward.y, frame->forward.z, 0},
@@ -4072,7 +4072,7 @@ bool draw_frame(renderer *r, const render_frame *frame) {
 
     r->core.CmdDraw(cmd, &(NriDrawDesc){.vertexNum = 3, .instanceNum = 1, .baseVertex = 0, .baseInstance = 0});
 
-    const NriVertexBufferDesc vertex = {.buffer = r->vertex_buffer, .offset = 0, .stride = sizeof(render_vertex)};
+    const NriVertexBufferDesc vertex = {.buffer = r->vertex_buffer, .offset = 0, .stride = sizeof(RENDER_VERTEX)};
 
     r->core.CmdSetVertexBuffers(cmd, 0, &vertex, 1);
     r->core.CmdSetPipeline(cmd, r->solid_pipeline);
@@ -4080,10 +4080,10 @@ bool draw_frame(renderer *r, const render_frame *frame) {
     if (!bind_camera_resources(r, cmd, &camera, sizeof(camera))) goto failed_frame;
 
     for (uint32_t i = 0; i < r->draw_count; ++i) {
-        const draw_range *draw = &r->draws[i];
-        const render_material *m = &r->materials[draw->material];
+        const DRAW_RANGE *draw = &r->draws[i];
+        const RENDER_MATERIAL *m = &r->materials[draw->material];
 
-        const material_uniforms material = {.base_color_factor = {m->data.base_color[0], m->data.base_color[1], m->data.base_color[2], m->data.base_color[3]},
+        const MATERIAL_UNIFORMS material = {.base_color_factor = {m->data.base_color[0], m->data.base_color[1], m->data.base_color[2], m->data.base_color[3]},
                                             .emissive_metallic = {m->data.emissive[0], m->data.emissive[1], m->data.emissive[2], m->data.metallic},
                                             .roughness_normal_ao_sun = {m->data.roughness, m->data.normal_scale, m->data.occlusion_strength, 2.4f},
                                             .sun_direction = {frame->sun.x, frame->sun.y, frame->sun.z, 0},
@@ -4133,7 +4133,7 @@ failed_frame:
     return false;
 }
 
-bool bake_worker_init(renderer *r) {
+bool bake_worker_init(RENDERER *r) {
     if (!r) return false;
     memset(r, 0, sizeof(*r));
 
@@ -4170,7 +4170,7 @@ bool bake_worker_init(renderer *r) {
     return true;
 }
 
-void bake_worker_deinit(renderer *r) {
+void bake_worker_deinit(RENDERER *r) {
     if (!r) return;
 
     free_probe_grid(&r->volume_probes);
@@ -4207,7 +4207,7 @@ void bake_worker_deinit(renderer *r) {
     memset(r, 0, sizeof(*r));
 }
 
-void r_deinit(renderer *r) {
+void r_deinit(RENDERER *r) {
     if (!r) return;
 
     free(r->vertices);
