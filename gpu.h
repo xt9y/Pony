@@ -1,8 +1,8 @@
 #ifndef GPU_H
 #define GPU_H
 
-/* Uncomment to compile the SDL_GPU backend. */
-/* #define DUSTMITE_GPU_SDL */
+// Uncomment to compile the SDL_GPU backend.
+// #define DUSTMITE_GPU_SDL
 
 #include "dustmite.h"
 
