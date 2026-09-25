@@ -46,6 +46,7 @@ typedef struct BAKE_UNIFORMS {
     float bake_params[4];
     float probe_origin_spacing[4];
     Uint32 probe_dims_mode[4];
+    float emissive_data[4];
 } BAKE_UNIFORMS;
 
 typedef struct SKY_UNIFORMS {
@@ -1900,7 +1901,11 @@ bool upload_bvh(RENDERER *r, const BVH *tree) {
 
     r->bvh_triangle_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, tree->triangles, (size_t)tree->triangle_count * sizeof(*tree->triangles), sizeof(BVH_TRIANGLE));
 
-    return r->bvh_node_buffer && r->bvh_triangle_buffer;
+    const bool good = r->bvh_node_buffer && r->bvh_triangle_buffer;
+    r->bvh_triangle_count = good ? tree->triangle_count : 0u;
+    r->bvh_emissive_weight = good ? tree->emissive_weight : 0.0f;
+
+    return good;
 }
 
 NriBuffer *upload_probes(RENDERER *r, const PROBE_GRID *grid) {
@@ -1976,7 +1981,8 @@ static BAKE_UNIFORMS bake_data(RENDERER *r, Uint32 phase, Uint32 iteration, Uint
                            .sky_horizon = {0.68f, 0.76f, 0.88f, 1.0f},
                            .bake_params = {r->bake_epsilon, 0.72f, 1.0f, (float)r->lightmap_min_samples},
                            .probe_origin_spacing = {r->lightmap_probe_origin.x, r->lightmap_probe_origin.y, r->lightmap_probe_origin.z, r->lightmap_probe_spacing},
-                           .probe_dims_mode = {r->lightmap_probe_count_x, r->lightmap_probe_count_y, r->lightmap_probe_count_z, 0u}};
+                           .probe_dims_mode = {r->lightmap_probe_count_x, r->lightmap_probe_count_y, r->lightmap_probe_count_z, 0u},
+                           .emissive_data = {r->bvh_emissive_weight, (float)r->bvh_triangle_count, 0.0f, 0.0f}};
 }
 
 static bool record_bake_pass(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, Uint32 phase, Uint32 iteration, Uint32 item_count,
@@ -2326,7 +2332,7 @@ bool bake_lightmap(RENDERER *r, const BVH *tree, const LIGHTMAP *lm, const PROBE
 #define PROBE_MAX_SAMPLES 1024u
 #define PROBE_MAX_BOUNCES 3u
 #define PROBE_PACKED_NODE_BYTES 32u
-#define PROBE_PACKED_TRIANGLE_BYTES 64u
+#define PROBE_PACKED_TRIANGLE_BYTES 80u
 #define PROBE_RAY_STATE_BYTES 80u
 #define PROBE_ACCUM_BYTES 32u
 #define PROBE_OUTPUT_STRIDE_BYTES (9u * 16u)
@@ -2560,7 +2566,7 @@ static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(const BVH *tree, const BEAM
                                       .sun_color_radius = {1.00f, 0.94f, 0.84f, 0.00465f},
                                       .sky_zenith = {0.22f, 0.42f, 0.78f, 1.0f},
                                       .sky_horizon = {0.68f, 0.76f, 0.88f, 1.0f},
-                                      .bake_params = {epsilon, 0.72f, 1.0f, 0.0f},
+                                      .bake_params = {epsilon, 0.72f, 1.0f, tree->emissive_weight},
                                       .beam_origin = {beams->origin.x, beams->origin.y, beams->origin.z, 0.0f},
                                       .beam_step = {beams->step.x, beams->step.y, beams->step.z, 0.0f}};
 }
@@ -2901,6 +2907,8 @@ void release_bake_resources(RENDERER *r) {
 
     r->bvh_node_buffer = NULL;
     r->bvh_triangle_buffer = NULL;
+    r->bvh_triangle_count = 0u;
+    r->bvh_emissive_weight = 0.0f;
     r->lightmap_sample_buffer = NULL;
     r->lightmap_full_sample_buffer = NULL;
     r->lightmap_sparse_sample_buffer = NULL;
