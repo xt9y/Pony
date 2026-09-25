@@ -393,10 +393,11 @@ void ssao_cs(uint3 id : SV_DispatchThreadID)
     float occlusion = 0.0f;
     float weight = 0.0f;
 
-    [unroll]
-    for (uint i = 0; i < 8u; ++i) {
+    float eccentricity = saturate(length(uv * 2.0f - 1.0f));
+    uint sample_count = eccentricity < 0.50f ? 8u : eccentricity < 0.82f ? 6u : 4u;
+    for (uint i = 0; i < sample_count; ++i) {
         float angle = rotation + (float(i) + 0.5f) * 2.39996322973f;
-        float scale = (float(i) + 1.0f) / 8.0f;
+        float scale = (float(i) + 1.0f) / (float)sample_count;
         float2 offset_px = float2(cos(angle), sin(angle)) * pixel_radius * scale;
         float2 sample_uv = uv + offset_px / float2(width, height);
         if (any(sample_uv <= 0.0f) || any(sample_uv >= 1.0f)) continue;
@@ -565,7 +566,7 @@ cbuffer BakeData : register(b0, space2)
     uint iteration;
     uint phase;
     uint max_bounces;
-    uint _padding;
+    uint batch_count;
 
     float4 sun_direction_intensity;
     float4 sun_color_radius;
@@ -862,7 +863,7 @@ float3 trace_path(float3 position, float3 normal, inout uint seed)
 float4 filtered_pixel(int2 p)
 {
     float4 center = source_pixel(p);
-    if (center.a <= 0.0f) return 0.0f;
+    if (center.a == 0.0f) return 0.0f;
 
     float3 sum = 0.0f;
     float total = 0.0f;
@@ -875,7 +876,7 @@ float4 filtered_pixel(int2 p)
             int2 q = clamp(p + int2(x, y), int2(0, 0),
                            int2((int)lightmap_width - 1, (int)lightmap_height - 1));
             float4 c = source_pixel(q);
-            if (c.a <= 0.0f) continue;
+            if (c.a == 0.0f) continue;
             float difference = length(c.rgb - center.rgb);
             float weight = 1.0f / (1.0f + difference * 4.0f);
             sum += c.rgb * weight;
@@ -888,7 +889,7 @@ float4 filtered_pixel(int2 p)
 float4 dilated_pixel(int2 p)
 {
     float4 center = source_pixel(p);
-    if (center.a > 0.0f) return center;
+    if (center.a != 0.0f) return float4(center.rgb, 1.0f);
 
     float3 sum = 0.0f;
     float count = 0.0f;
@@ -901,7 +902,7 @@ float4 dilated_pixel(int2 p)
             int2 q = clamp(p + int2(x, y), int2(0, 0),
                            int2((int)lightmap_width - 1, (int)lightmap_height - 1));
             float4 c = source_pixel(q);
-            if (c.a <= 0.0f) continue;
+            if (c.a == 0.0f) continue;
             sum += c.rgb;
             count += 1.0f;
         }
@@ -930,11 +931,26 @@ void lightmap_cs(uint3 dispatch_id : SV_DispatchThreadID)
         float3 normal = normalize(sample.normal.xyz);
         uint pixel = asuint(sample.position.w);
         uint2 pixel_xy = uint2(pixel % lightmap_width, pixel / lightmap_width);
-        uint seed = hash_u32(pixel ^ hash_u32(iteration + 0x51f2e91du));
-        float3 value = trace_path(position, normal, seed);
-        float3 previous = iteration == 0u ? 0.0f : source_pixel(int2(pixel_xy)).rgb;
-        float n = (float)iteration;
-        Output[pixel_xy] = float4((previous * n + value) / (n + 1.0f), 1.0f);
+        float4 previous = iteration == 0u ? 0.0f : source_pixel(int2(pixel_xy));
+        for (uint offset = 0u; offset < batch_count && previous.a >= 0.0f; ++offset)
+        {
+            uint current = iteration + offset;
+            uint seed = hash_u32(pixel ^ hash_u32(current + 0x51f2e91du));
+            float3 value = trace_path(position, normal, seed);
+            float n = (float)current;
+            float3 mean = (previous.rgb * n + value) / (n + 1.0f);
+            float old_luma = dot(previous.rgb, float3(0.2126f, 0.7152f, 0.0722f));
+            float sample_luma = dot(value, float3(0.2126f, 0.7152f, 0.0722f));
+            float new_luma = dot(mean, float3(0.2126f, 0.7152f, 0.0722f));
+            float m2 = current == 0u ? 0.0f : previous.a;
+            m2 += (sample_luma - old_luma) * (sample_luma - new_luma);
+            float stderr = sqrt(max(m2, 0.0f) / max(n * (n + 1.0f), 1.0f));
+            bool converged = current + 1u >= 64u &&
+                ((current + 1u) % 8u == 0u) &&
+                stderr < 0.01f + 0.025f * abs(new_luma);
+            previous = float4(mean, converged ? -max(m2, 1.0e-6f) : max(m2, 1.0e-6f));
+        }
+        Output[pixel_xy] = previous;
         return;
     }
 
@@ -970,6 +986,10 @@ void probe_basis(float3 d, out float basis_values[9])
 
 groupshared float3 ProbePartial[64][9];
 groupshared float ProbeValid;
+groupshared float4 ProbeSHMeans[64];
+groupshared float4 ProbeSHSquares[64];
+groupshared uint ProbeSampleCount;
+groupshared uint ProbeContinue;
 
 [numthreads(64, 1, 1)]
 void probe_cs(uint3 group_id : SV_GroupID, uint3 local_id : SV_GroupThreadID)
@@ -979,6 +999,8 @@ void probe_cs(uint3 group_id : SV_GroupID, uint3 local_id : SV_GroupThreadID)
     float4 input = ProbePositions[probe_index];
     if (lane == 0u) {
         ProbeValid = input.w;
+        ProbeSampleCount = item_count;
+        ProbeContinue = 1u;
         float3 axes[6] = {
             float3(1,0,0), float3(-1,0,0), float3(0,1,0),
             float3(0,-1,0), float3(0,0,1), float3(0,0,-1)
@@ -993,25 +1015,58 @@ void probe_cs(uint3 group_id : SV_GroupID, uint3 local_id : SV_GroupThreadID)
     GroupMemoryBarrierWithGroupSync();
     float3 partial[9];
     [unroll] for (uint j = 0; j < 9; ++j) partial[j] = 0.0f;
+    float4 sh_mean = 0.0f;
+    float4 sh_square = 0.0f;
     uint seed = hash_u32(probe_index * 9781u + lane * 6271u + iteration * 13007u);
 
     if (ProbeValid > 0.0f) {
-        for (uint sample_index = lane; sample_index < item_count; sample_index += 64u) {
-            float3 d = uniform_sphere(seed);
-            TraceRay ray = make_trace_ray(input.xyz + d * bake_params.x,
-                                          d, bake_params.x, 1.0e20f);
-            TraceHit hit;
-            float3 incoming;
-            if (trace_closest(ray, hit)) {
-                float3 position = ray.origin + ray.direction * hit.t;
-                incoming = trace_path(position, hit.normal, seed) * (hit.albedo / PI);
-            } else {
-                incoming = sky_radiance(d);
+        for (uint block = 0u; block < item_count && ProbeContinue != 0u; block += 64u) {
+            uint sample_index = block + lane;
+            if (sample_index < item_count) {
+                float3 d = uniform_sphere(seed);
+                TraceRay ray = make_trace_ray(input.xyz + d * bake_params.x,
+                                              d, bake_params.x, 1.0e20f);
+                TraceHit hit;
+                float3 incoming;
+                if (trace_closest(ray, hit)) {
+                    float3 position = ray.origin + ray.direction * hit.t;
+                    incoming = trace_path(position, hit.normal, seed) * (hit.albedo / PI);
+                } else {
+                    incoming = sky_radiance(d);
+                }
+                float sh[9];
+                probe_basis(d, sh);
+                [unroll] for (uint j = 0; j < 9; ++j)
+                    partial[j] += incoming * sh[j];
+                float luma = dot(incoming, float3(0.2126f, 0.7152f, 0.0722f));
+                float4 sh_value = luma * float4(sh[0], sh[1], sh[2], sh[3]);
+                sh_mean += sh_value;
+                sh_square += sh_value * sh_value;
             }
-            float sh[9];
-            probe_basis(d, sh);
-            [unroll] for (uint j = 0; j < 9; ++j)
-                partial[j] += incoming * sh[j];
+            if ((block + 64u) % 128u == 0u && block + 64u >= 512u &&
+                block + 64u < item_count) {
+                ProbeSHMeans[lane] = sh_mean;
+                ProbeSHSquares[lane] = sh_square;
+                GroupMemoryBarrierWithGroupSync();
+                if (lane == 0u) {
+                    float4 total_mean = 0.0f;
+                    float4 total_square = 0.0f;
+                    for (uint i = 0u; i < 64u; ++i) {
+                        total_mean += ProbeSHMeans[i];
+                        total_square += ProbeSHSquares[i];
+                    }
+                    float samples = (float)(block + 64u);
+                    float4 mean = total_mean / samples;
+                    float4 variance = max(total_square / samples - mean * mean, 0.0f);
+                    float4 stderr = sqrt(variance / samples);
+                    float worst = max(max(stderr.x, stderr.y), max(stderr.z, stderr.w));
+                    if (worst < 0.01f + 0.025f * abs(mean.x)) {
+                        ProbeSampleCount = block + 64u;
+                        ProbeContinue = 0u;
+                    }
+                }
+                GroupMemoryBarrierWithGroupSync();
+            }
         }
     }
     [unroll] for (uint j = 0; j < 9; ++j)
@@ -1025,7 +1080,7 @@ void probe_cs(uint3 group_id : SV_GroupID, uint3 local_id : SV_GroupThreadID)
         GroupMemoryBarrierWithGroupSync();
     }
     if (lane < 9u) {
-        float scale = 4.0f * PI / max((float)item_count, 1.0f);
+        float scale = 4.0f * PI / max((float)ProbeSampleCount, 1.0f);
         float3 sun = normalize(sun_direction_intensity.xyz);
         TraceRay sun_ray = make_trace_ray(input.xyz + sun * bake_params.x,
                                           sun, bake_params.x, 1.0e20f);

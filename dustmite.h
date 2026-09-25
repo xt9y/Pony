@@ -1,21 +1,11 @@
 #ifndef DUSTMITE_H
 #define DUSTMITE_H
 
-/* Single public header for the whole app.
- *
- * The module dependency chain is linear:
- *   init -> glb -> gltf -> bvh -> lmap -> fx -> render
- * so one header in that order replaces the previous seven
- * per-module headers with zero cycles and zero ordering puzzles.
- */
-
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#include <SDL3/SDL.h>
-
-    //// init: math + mesh
+//// init: math + mesh
 
 typedef struct vec3 {
     float x, y, z;
@@ -60,9 +50,14 @@ float v3_len_sq(vec3 v);
 vec3 v3_normalize(vec3 v);
 void mesh_free(mesh *m);
 
-    //// glb: container + JSON tokenizer + accessors
+//// glb: container + JSON tokenizer + accessors
 
-typedef enum glb_token_type { GLB_TOKEN_OBJECT, GLB_TOKEN_ARRAY, GLB_TOKEN_STRING, GLB_TOKEN_PRIMITIVE } glb_token_type;
+typedef enum glb_token_type {
+    GLB_TOKEN_OBJECT,
+    GLB_TOKEN_ARRAY,
+    GLB_TOKEN_STRING,
+    GLB_TOKEN_PRIMITIVE
+} glb_token_type;
 
 typedef struct glb_token {
     uint32_t start;
@@ -113,10 +108,13 @@ bool glb_string(const glb_doc *doc, int token, const char **data, size_t *length
 bool glb_number(const glb_doc *doc, int token, double *value);
 bool glb_boolean(const glb_doc *doc, int token, bool *value);
 
-bool glb_buffer_view(const glb_doc *doc, size_t index, glb_span *span, size_t *stride);
+bool glb_buffer_view(const glb_doc *doc, size_t index, glb_span *span,
+                     size_t *stride);
 bool glb_accessor_open(const glb_doc *doc, size_t index, glb_accessor *out);
-bool glb_accessor_f32(const glb_accessor *accessor, size_t element, uint32_t component, float *value);
-bool glb_accessor_u32(const glb_accessor *accessor, size_t element, uint32_t *value);
+bool glb_accessor_f32(const glb_accessor *accessor, size_t element,
+                      uint32_t component, float *value);
+bool glb_accessor_u32(const glb_accessor *accessor, size_t element,
+                      uint32_t *value);
 
 bool glb_extract_mesh(const glb_doc *doc, mesh *out);
 
@@ -171,7 +169,7 @@ typedef struct gltf_scene {
 bool gltf_extract(const glb_doc *doc, gltf_scene *scene);
 void gltf_free(gltf_scene *scene);
 
-    //// bvh
+//// bvh
 
 typedef struct bvh_triangle {
     float a[4];
@@ -213,7 +211,7 @@ bool dm_trace_closest(const bvh *tree, dm_trace_ray ray, dm_trace_hit *hit);
 bool bvh_build(bvh *tree, const mesh *m, const gltf_scene *visual);
 void bvh_free(bvh *tree);
 
-    //// lmap: lightmap atlas
+//// lmap: lightmap atlas
 
 typedef struct lmap_uv {
     float u, v;
@@ -230,12 +228,13 @@ typedef struct lightmap {
     uint32_t padding;
     uint32_t chart_count;
     float texel_density;
-    lmap_uv *uvs; /* 3 entries per mesh face */
+    lmap_uv *uvs; /* front 3, back 3 per mesh face */
     lmap_sample *samples;
     uint32_t sample_count;
 } lightmap;
 
-bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit, uint32_t max_size);
+bool lmap_build(lightmap *lm, const mesh *m,
+                uint32_t preferred_texels_per_unit, uint32_t max_size);
 void lmap_free(lightmap *lm);
 
 typedef struct dm_probe {
@@ -268,132 +267,32 @@ bool dm_beam_build(dm_beam_grid *grid, const mesh *scene, const bvh *tree,
 void dm_beam_free(dm_beam_grid *grid);
 float *dm_beam_expand(const dm_beam_grid *grid);
 
-    //// fx: HDR post stack
+//// cache: baked lighting
 
-typedef struct fx_state {
-    SDL_GPUDevice *device;
-
-    SDL_GPUGraphicsPipeline *compose_pipeline;
-    SDL_GPUComputePipeline *ssao_pipeline;
-    SDL_GPUComputePipeline *bloom_pipeline;
-    SDL_GPUComputePipeline *grade_pipeline;
-    SDL_GPUComputePipeline *volume_pipeline;
-    SDL_GPUComputePipeline *volume_compose_pipeline;
-    SDL_GPUSampler *sampler;
-    SDL_GPUSampler *depth_sampler;
-
-    SDL_GPUTexture *hdr;
-    SDL_GPUTexture *normal_depth;
-    SDL_GPUTexture *ao;
-    SDL_GPUTexture *bloom_a;
-    SDL_GPUTexture *bloom_b;
-    SDL_GPUTexture *lut;
-    SDL_GPUTexture *volume;
-    SDL_GPUTexture *lit;
-
-    Uint32 width, height;
-    Uint32 ao_width, ao_height;
-    bool volume_ready;
-    uint32_t debug_view;
-} fx_state;
-
-bool fx_init(fx_state *fx, SDL_GPUDevice *device, SDL_Window *window);
-bool fx_ensure(fx_state *fx, Uint32 width, Uint32 height);
-bool fx_volume(fx_state *fx, SDL_GPUCommandBuffer *cmd, SDL_GPUBuffer *probes,
-               SDL_GPUBuffer *beams, const dm_probe_grid *grid,
-               const dm_beam_grid *beam_grid, vec3 eye, vec3 right, vec3 up,
-               vec3 forward, vec3 sun, float tan_half_fov, float aspect);
-bool fx_apply(fx_state *fx, SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *swap, float tan_half_fov, float aspect);
-void fx_deinit(fx_state *fx);
-
-    //// render
-
-typedef struct render_vertex {
-    float x, y, z;
-    float nx, ny, nz;
-    float u, v;
-    float lu, lv;
-    float r, g, b, a;
-} render_vertex;
-
-typedef struct gpu_material gpu_material;
-typedef struct draw_range draw_range;
-
-typedef struct renderer {
-    SDL_Window *window;
-    SDL_GPUDevice *device;
-    SDL_GPUGraphicsPipeline *sky_pipeline;
-    SDL_GPUGraphicsPipeline *solid_pipeline;
-    SDL_GPUGraphicsPipeline *line_pipeline;
-    SDL_GPUComputePipeline *bake_pipeline;
-
-    SDL_GPUBuffer *vertex_buffer;
-    SDL_GPUBuffer *bvh_node_buffer;
-    SDL_GPUBuffer *bvh_triangle_buffer;
-    SDL_GPUBuffer *lightmap_sample_buffer;
-
-    SDL_GPUTexture *depth_texture;
-    SDL_GPUTexture *lightmap_texture;
-    SDL_GPUTexture *lightmap_scratch;
-    SDL_GPUSampler *lightmap_sampler;
-    SDL_GPUSampler *material_sampler;
-    SDL_GPUTextureFormat depth_format;
-    Uint32 depth_width;
-    Uint32 depth_height;
-
-    SDL_GPUTexture **image_textures;
-    uint32_t image_texture_count;
-    SDL_GPUTexture *default_white;
-    SDL_GPUTexture *default_normal;
-
-    gpu_material *materials;
-    uint32_t material_count;
-    draw_range *draws;
-    uint32_t draw_count;
-
-    render_vertex *vertices;
-    uint32_t vertex_count;
-    uint32_t vertex_capacity;
-    uint32_t debug_vertex_start;
-    uint32_t debug_vertex_count;
-
-    uint32_t lightmap_width;
-    uint32_t lightmap_height;
-    uint32_t lightmap_sample_count;
-    uint32_t bake_target_samples;
-    float bake_epsilon;
-    bool has_bake;
-    const char *bake_stage;
+typedef struct dm_cached_lightmap {
+    uint32_t width;
+    uint32_t height;
+    uint64_t layout_hash;
+    uint64_t volume_hash;
+    uint64_t beam_hash;
+    unsigned char *pixels; /* tightly packed RGBA16F, width * height * 8 bytes */
     dm_probe_grid object_probes;
     dm_probe_grid volume_probes;
-    SDL_GPUBuffer *volume_probe_buffer;
-    SDL_GPUBuffer *beam_buffer;
     dm_beam_grid beams;
+} dm_cached_lightmap;
 
-    fx_state fx;
+uint64_t dm_hash_bytes(uint64_t seed, const void *bytes, size_t size);
+bool dm_cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash,
+                   uint64_t volume_hash, uint64_t beam_hash,
+                   dm_cached_lightmap *out);
+bool dm_cache_read_partial(const char *path, uint64_t scene_hash,
+                           dm_cached_lightmap *out);
+bool dm_cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash,
+                    uint64_t volume_hash, uint64_t beam_hash,
+                    const dm_cached_lightmap *data);
+void dm_cache_free(dm_cached_lightmap *data);
 
-    float yaw;
-    float pitch;
-    float distance;
-    float scene_radius;
-    double frame_time_ms;
-    vec3 target;
-
-    bool dragging;
-    bool show_debug;
-    bool show_volume;
-    uint32_t debug_view;
-} renderer;
-
-bool r_init(renderer *r, const char *title, int width, int height);
-bool r_build_scene(renderer *r, const mesh *m, const gltf_scene *visual, const lightmap *lm);
-bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash,
-                            uint64_t layout_hash, const lightmap *lm);
-bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual,
-                            const lightmap *lm,
-                            const char *path, uint64_t scene_hash, uint64_t layout_hash);
-void r_event(renderer *r, const SDL_Event *event);
-bool r_draw(renderer *r);
-void r_deinit(renderer *r);
+/* Keep existing source includes working while gpu.h owns all GPU declarations. */
+#include "gpu.h"
 
 #endif

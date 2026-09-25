@@ -22,6 +22,7 @@ struct SurfaceOutput
     float2 lightmap_uv : TEXCOORD3;
     float3 view_normal : TEXCOORD4;
     float view_depth : TEXCOORD5;
+    float2 back_lightmap_uv : TEXCOORD6;
 };
 
 SurfaceOutput surface_vs(SurfaceInput input)
@@ -34,6 +35,7 @@ SurfaceOutput surface_vs(SurfaceInput input)
     output.world_normal = normalize(input.normal);
     output.uv = input.uv;
     output.lightmap_uv = input.lightmap_uv;
+    output.back_lightmap_uv = input.lightmap_uv + float2(0.0f, 0.5f);
     output.view_normal = normalize(mul((float3x3)view, input.normal));
     // output.view_depth = max(-view_position.z, 0.0f);
     // output.view_depth = max(dot(input.position - camera_eye.xyz, camera_forward.xyz), 0.0f);

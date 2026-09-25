@@ -1,5 +1,4 @@
 #include "dustmite.h"
-#include "cache.h"
 
 #include <SDL3/SDL.h>
 
@@ -9,6 +8,14 @@
 
 #define LIGHTMAP_TEXELS_PER_UNIT 24u
 #define LIGHTMAP_MAX_SIZE 4096u
+
+bool bake_start(renderer *r, const mesh *scene, const gltf_scene *visual,
+                const lightmap *layout, const char *path,
+                uint64_t scene_hash, uint64_t layout_hash,
+                uint64_t volume_hash, uint64_t beam_hash);
+void bake_update(renderer *r);
+void bake_cancel(renderer *r);
+void bake_update_title(renderer *r);
 
 static double elapsed_ms(Uint64 begin) {
 
@@ -47,7 +54,7 @@ int main(int argc, char **argv) {
     memcpy(bake_path + stem_length, ".baked", sizeof(".baked"));
 
     char title[512];
-    snprintf(title, sizeof(title), "Dustmite - %s", filename ? filename + 1 : model_path);
+    snprintf(title, sizeof(title), "INIT | %s", filename ? filename + 1 : model_path);
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "Could not initialize SDL: %s\n", SDL_GetError());
@@ -78,6 +85,7 @@ int main(int argc, char **argv) {
         !r_build_scene(&r, &scene, &visual, &lm)) {
         fprintf(stderr, "Could not initialize renderer or scene: %s %s\n",
                 glb_error(&model), SDL_GetError());
+        bake_cancel(&r);
         r_deinit(&r);
         lmap_free(&lm);
         gltf_free(&visual);
@@ -92,11 +100,11 @@ int main(int argc, char **argv) {
     uint64_t layout_hash = dm_hash_bytes(0, &lm.width, sizeof(lm.width));
     layout_hash = dm_hash_bytes(layout_hash, &lm.height, sizeof(lm.height));
     layout_hash = dm_hash_bytes(layout_hash, lm.uvs,
-                                scene.faces.count * 3u * sizeof(*lm.uvs));
+                                scene.faces.count * 6u * sizeof(*lm.uvs));
 
     const uint32_t bake_settings[] = {
         LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE, 128u, 3u,
-        1024u, 2u, 4u, 64u, 16u, 5u
+        4u /* separate front and back irradiance */
     };
     layout_hash = dm_hash_bytes(layout_hash, bake_settings, sizeof(bake_settings));
 
@@ -106,9 +114,16 @@ int main(int argc, char **argv) {
     };
     layout_hash = dm_hash_bytes(layout_hash, lighting_settings, sizeof(lighting_settings));
 
-    const bool cached = r_load_cached_lightmap(&r, bake_path, scene_hash, layout_hash, &lm);
-    SDL_SetWindowTitle(r.window, cached ? "Dustmite - baked lighting loaded (B to rebake)" :
-                       "Dustmite - unbaked scene (press B to bake)");
+    const uint32_t volume_settings[] = {1024u, 4u, 3u};
+    uint64_t volume_hash = dm_hash_bytes(scene_hash, volume_settings, sizeof(volume_settings));
+    volume_hash = dm_hash_bytes(volume_hash, lighting_settings, sizeof(lighting_settings));
+    const uint32_t beam_settings[] = {64u, 16u, 5u};
+    uint64_t beam_hash = dm_hash_bytes(scene_hash, beam_settings, sizeof(beam_settings));
+    beam_hash = dm_hash_bytes(beam_hash, lighting_settings, 3u * sizeof(float));
+
+    const bool cached = r_load_cached_lightmap(&r, bake_path, scene_hash, layout_hash,
+                                                volume_hash, beam_hash, &lm);
+    SDL_SetWindowTitle(r.window, cached ? "READY" : "UNBAKED");
 
     printf("%s: %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n",
            model_path, load_ms, scene.vertices.count, scene.faces.count,
@@ -138,31 +153,29 @@ int main(int argc, char **argv) {
                 if (event.key.key == SDLK_ESCAPE) running = false;
 
                 if (event.key.scancode == SDL_SCANCODE_B || event.key.key == SDLK_B) {
-
                     SDL_ClearError();
-                    SDL_SetWindowTitle(r.window, "Dustmite - preparing bake...");
-                    SDL_PumpEvents();
-                    SDL_Log("B: rebaking current scene (this may take a while)");
-
-                    const Uint64 begin = SDL_GetPerformanceCounter();
-                    const bool good = r_rebake_current_scene(&r, &scene, &visual, &lm, bake_path, scene_hash, layout_hash);
-
-                    SDL_Log("B: %s after %.2f ms%s%s%s%s",
-                            good ? "bake saved" : "bake failed; previous lighting retained",
-                            elapsed_ms(begin), good ? "" : " at ",
-                            good ? "" : (r.bake_stage ? r.bake_stage : "unknown stage"),
-                            good ? "" : ": ",
-                            good ? "" : (*SDL_GetError() ? SDL_GetError() : "see the failing stage"));
-                    // SDL_Log("draw %u: material=%u first=%u count=%u", i, draw->material, draw->first, draw->count);
+                    if (!bake_start(&r, &scene, &visual, &lm, bake_path,
+                                    scene_hash, layout_hash, volume_hash, beam_hash)) {
+                        SDL_Log("B: could not start rebake: %s",
+                                *SDL_GetError() ? SDL_GetError() : "unknown error");
+                    }
                 }
             }
 
             r_event(&r, &event);
         }
 
+        if (!running) break;
+
         const Uint64 frame_begin = SDL_GetPerformanceCounter();
         r_draw(&r);
         r.frame_time_ms = elapsed_ms(frame_begin);
+
+        /* The bake owns a separate offscreen GPU device/queue, so the normal
+         * render loop stays unchanged. These calls notice completion and keep
+         * the compact title telemetry current on the main thread. */
+        bake_update(&r);
+        bake_update_title(&r);
 
         const Uint64 now = SDL_GetTicks();
         if (now - last_frame_print >= 1000u) {
@@ -172,6 +185,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    bake_cancel(&r);
     r_deinit(&r);
     gltf_free(&visual);
     lmap_free(&lm);
