@@ -194,6 +194,22 @@ typedef struct bvh {
     uint32_t triangle_count;
 } bvh;
 
+typedef struct dm_trace_ray {
+    vec3 origin;
+    float tmin;
+    vec3 direction;
+    float tmax;
+} dm_trace_ray;
+
+typedef struct dm_trace_hit {
+    float t;
+    vec3 normal;
+    vec3 albedo;
+    uint32_t triangle;
+} dm_trace_hit;
+
+bool dm_trace_any(const bvh *tree, dm_trace_ray ray);
+bool dm_trace_closest(const bvh *tree, dm_trace_ray ray, dm_trace_hit *hit);
 bool bvh_build(bvh *tree, const mesh *m, const gltf_scene *visual);
 void bvh_free(bvh *tree);
 

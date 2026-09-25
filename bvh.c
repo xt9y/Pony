@@ -197,6 +197,143 @@ static void thread_node(bvh *tree, uint32_t node_index, uint32_t next) {
     thread_node(tree, right, next);
 }
 
+static bool trace_box(dm_trace_ray ray, const bvh_node *node, float max_t) {
+
+    float lo = ray.tmin;
+    float hi = fminf(ray.tmax, max_t);
+    const float origin[3] = {ray.origin.x, ray.origin.y, ray.origin.z};
+    const float direction[3] = {ray.direction.x, ray.direction.y, ray.direction.z};
+
+    if (hi < lo) return false;
+
+    for (uint32_t axis = 0; axis < 3u; ++axis) {
+
+        if (fabsf(direction[axis]) < 1.0e-7f) {
+            if (origin[axis] < node->min[axis] || origin[axis] > node->max[axis]) return false;
+            continue;
+        }
+
+        const float inverse = 1.0f / direction[axis];
+        float a = (node->min[axis] - origin[axis]) * inverse;
+        float b = (node->max[axis] - origin[axis]) * inverse;
+        if (a > b) {
+            const float t = a;
+            a = b;
+            b = t;
+        }
+        lo = fmaxf(lo, a);
+        hi = fminf(hi, b);
+        if (lo > hi) return false;
+    }
+
+    return hi >= ray.tmin;
+}
+
+static bool trace_triangle(dm_trace_ray ray, const bvh_triangle *tri,
+                           float max_t, float *hit_t) {
+
+    const vec3 a = v3(tri->a[0], tri->a[1], tri->a[2]);
+    const vec3 e1 = v3_sub(v3(tri->b[0], tri->b[1], tri->b[2]), a);
+    const vec3 e2 = v3_sub(v3(tri->c[0], tri->c[1], tri->c[2]), a);
+    const vec3 p = v3_cross(ray.direction, e2);
+    const float determinant = v3_dot(e1, p);
+    if (fabsf(determinant) < 1.0e-7f) return false;
+
+    const float inverse = 1.0f / determinant;
+    const vec3 s = v3_sub(ray.origin, a);
+    const float u = v3_dot(s, p) * inverse;
+    if (u < 0.0f || u > 1.0f) return false;
+
+    const vec3 q = v3_cross(s, e1);
+    const float v = v3_dot(ray.direction, q) * inverse;
+    if (v < 0.0f || u + v > 1.0f) return false;
+
+    const float t = v3_dot(e2, q) * inverse;
+    if (t <= ray.tmin || t >= fminf(ray.tmax, max_t)) return false;
+
+    *hit_t = t;
+    return true;
+}
+
+bool dm_trace_any(const bvh *tree, dm_trace_ray ray) {
+
+    if (!tree || !tree->nodes || !tree->triangles || !tree->node_count ||
+        !tree->triangle_count || ray.tmax <= ray.tmin) return false;
+
+    uint32_t node_index = 0u;
+    while (node_index != UINT32_MAX) {
+
+        const bvh_node *node = &tree->nodes[node_index];
+        if (!trace_box(ray, node, ray.tmax)) {
+            node_index = node->meta[1];
+            continue;
+        }
+
+        if (node->meta[3]) {
+            for (uint32_t i = 0; i < node->meta[3]; ++i) {
+                float t;
+                if (trace_triangle(ray, &tree->triangles[node->meta[2] + i], ray.tmax, &t))
+                    return true;
+            }
+            node_index = node->meta[1];
+        } else {
+            node_index = node->meta[0];
+        }
+    }
+
+    return false;
+}
+
+bool dm_trace_closest(const bvh *tree, dm_trace_ray ray, dm_trace_hit *hit) {
+
+    if (!hit) return false;
+    *hit = (dm_trace_hit){.t = ray.tmax, .triangle = UINT32_MAX};
+    if (!tree || !tree->nodes || !tree->triangles || !tree->node_count ||
+        !tree->triangle_count || ray.tmax <= ray.tmin) return false;
+
+    uint32_t node_index = 0u;
+    float closest = ray.tmax;
+    bool found = false;
+    dm_trace_hit best = {0};
+
+    while (node_index != UINT32_MAX) {
+
+        const bvh_node *node = &tree->nodes[node_index];
+        if (!trace_box(ray, node, closest)) {
+            node_index = node->meta[1];
+            continue;
+        }
+
+        if (node->meta[3]) {
+            for (uint32_t i = 0; i < node->meta[3]; ++i) {
+                const uint32_t triangle = node->meta[2] + i;
+                const bvh_triangle *tri = &tree->triangles[triangle];
+                float t;
+                if (!trace_triangle(ray, tri, closest, &t)) continue;
+
+                closest = t;
+                vec3 normal = v3_normalize(v3(tri->normal[0], tri->normal[1], tri->normal[2]));
+                if (v3_dot(normal, ray.direction) > 0.0f)
+                    normal = v3_scale(normal, -1.0f);
+
+                best.t = t;
+                best.normal = normal;
+                best.albedo = v3(fminf(fmaxf(tri->a[3], 0.0f), 1.0f),
+                                 fminf(fmaxf(tri->b[3], 0.0f), 1.0f),
+                                 fminf(fmaxf(tri->c[3], 0.0f), 1.0f));
+                best.triangle = triangle;
+                found = true;
+            }
+            node_index = node->meta[1];
+        } else {
+            node_index = node->meta[0];
+        }
+    }
+
+    if (found) *hit = best;
+    return found;
+}
+
 void bvh_free(bvh *tree) {
     if (!tree) return;
     free(tree->nodes);

@@ -521,6 +521,22 @@ struct BvhTriangle
     float4 normal;
 };
 
+struct TraceRay
+{
+    float3 origin;
+    float tmin;
+    float3 direction;
+    float tmax;
+};
+
+struct TraceHit
+{
+    float t;
+    float3 normal;
+    float3 albedo;
+    uint triangle_index;
+};
+
 struct BakeSample
 {
     float4 position;
@@ -626,16 +642,28 @@ float3 sample_sun(float3 direction, float radius, inout uint seed)
     return normalize(direction + tangent * (cos(phi) * r) + bitangent * (sin(phi) * r));
 }
 
-bool ray_box(float3 origin, float3 direction, BvhNode node, float max_t)
+TraceRay make_trace_ray(float3 origin, float3 direction, float tmin, float tmax)
 {
-    float tmin = 0.0f;
-    float tmax = max_t;
+    TraceRay ray;
+    ray.origin = origin;
+    ray.tmin = tmin;
+    ray.direction = direction;
+    ray.tmax = tmax;
+    return ray;
+}
+
+bool trace_ray_box(TraceRay ray, BvhNode node, float max_t)
+{
+    float tmin = ray.tmin;
+    float tmax = min(ray.tmax, max_t);
+    if (tmax < tmin)
+        return false;
 
     [unroll]
     for (uint axis = 0; axis < 3; ++axis)
     {
-        float o = origin[axis];
-        float d = direction[axis];
+        float o = ray.origin[axis];
+        float d = ray.direction[axis];
         if (abs(d) < 1.0e-7f)
         {
             if (o < node.bmin[axis] || o > node.bmax[axis])
@@ -658,15 +686,15 @@ bool ray_box(float3 origin, float3 direction, BvhNode node, float max_t)
             return false;
     }
 
-    return tmax >= 0.0f;
+    return tmax >= ray.tmin;
 }
 
-bool ray_triangle(float3 origin, float3 direction, BvhTriangle tri, float max_t, out float hit_t)
+bool trace_ray_triangle(TraceRay ray, BvhTriangle tri, float max_t, out float hit_t)
 {
     float3 a = tri.a.xyz;
     float3 e1 = tri.b.xyz - a;
     float3 e2 = tri.c.xyz - a;
-    float3 p = cross(direction, e2);
+    float3 p = cross(ray.direction, e2);
     float det = dot(e1, p);
     if (abs(det) < 1.0e-7f)
     {
@@ -675,7 +703,7 @@ bool ray_triangle(float3 origin, float3 direction, BvhTriangle tri, float max_t,
     }
 
     float inv_det = 1.0f / det;
-    float3 s = origin - a;
+    float3 s = ray.origin - a;
     float u = dot(s, p) * inv_det;
     if (u < 0.0f || u > 1.0f)
     {
@@ -684,7 +712,7 @@ bool ray_triangle(float3 origin, float3 direction, BvhTriangle tri, float max_t,
     }
 
     float3 q = cross(s, e1);
-    float v = dot(direction, q) * inv_det;
+    float v = dot(ray.direction, q) * inv_det;
     if (v < 0.0f || u + v > 1.0f)
     {
         hit_t = 0.0f;
@@ -692,7 +720,7 @@ bool ray_triangle(float3 origin, float3 direction, BvhTriangle tri, float max_t,
     }
 
     float t = dot(e2, q) * inv_det;
-    if (t <= bake_params.x || t >= max_t)
+    if (t <= ray.tmin || t >= min(ray.tmax, max_t))
     {
         hit_t = 0.0f;
         return false;
@@ -702,19 +730,51 @@ bool ray_triangle(float3 origin, float3 direction, BvhTriangle tri, float max_t,
     return true;
 }
 
-bool trace_closest(float3 origin, float3 direction, float max_t,
-                   out float hit_t, out float3 hit_normal, out float3 hit_albedo)
+bool trace_any(TraceRay ray)
 {
     uint node_index = 0u;
-    float closest = max_t;
+    while (node_index != INVALID_NODE)
+    {
+        BvhNode node = Nodes[node_index];
+        if (!trace_ray_box(ray, node, ray.tmax))
+        {
+            node_index = node.meta.y;
+            continue;
+        }
+
+        uint count = node.meta.w;
+        if (count != 0u)
+        {
+            uint first = node.meta.z;
+            for (uint i = 0; i < count; ++i)
+            {
+                float t;
+                if (trace_ray_triangle(ray, Triangles[first + i], ray.tmax, t))
+                    return true;
+            }
+            node_index = node.meta.y;
+            continue;
+        }
+
+        node_index = node.meta.x;
+    }
+    return false;
+}
+
+bool trace_closest(TraceRay ray, out TraceHit hit)
+{
+    uint node_index = 0u;
+    float closest = ray.tmax;
     bool found = false;
-    float3 normal = 0.0f;
-    float3 albedo = 0.0f;
+    hit.t = ray.tmax;
+    hit.normal = 0.0f;
+    hit.albedo = 0.0f;
+    hit.triangle_index = INVALID_NODE;
 
     while (node_index != INVALID_NODE)
     {
         BvhNode node = Nodes[node_index];
-        if (!ray_box(origin, direction, node, closest))
+        if (!trace_ray_box(ray, node, closest))
         {
             node_index = node.meta.y;
             continue;
@@ -728,15 +788,20 @@ bool trace_closest(float3 origin, float3 direction, float max_t,
             {
                 uint tri_index = first + i;
                 float t;
-                if (!ray_triangle(origin, direction, Triangles[tri_index], closest, t))
+                if (!trace_ray_triangle(ray, Triangles[tri_index], closest, t))
                     continue;
+
                 closest = t;
-                normal = normalize(Triangles[tri_index].normal.xyz);
-                albedo = saturate(float3(Triangles[tri_index].a.w,
-                                         Triangles[tri_index].b.w,
-                                         Triangles[tri_index].c.w));
-                if (dot(normal, direction) > 0.0f)
+                float3 normal = normalize(Triangles[tri_index].normal.xyz);
+                if (dot(normal, ray.direction) > 0.0f)
                     normal = -normal;
+
+                hit.t = t;
+                hit.normal = normal;
+                hit.albedo = saturate(float3(Triangles[tri_index].a.w,
+                                             Triangles[tri_index].b.w,
+                                             Triangles[tri_index].c.w));
+                hit.triangle_index = tri_index;
                 found = true;
             }
             node_index = node.meta.y;
@@ -746,41 +811,7 @@ bool trace_closest(float3 origin, float3 direction, float max_t,
         node_index = node.meta.x;
     }
 
-    hit_t = closest;
-    hit_normal = normal;
-    hit_albedo = albedo;
     return found;
-}
-
-bool occluded(float3 origin, float3 direction, float max_t)
-{
-    uint node_index = 0u;
-    while (node_index != INVALID_NODE)
-    {
-        BvhNode node = Nodes[node_index];
-        if (!ray_box(origin, direction, node, max_t))
-        {
-            node_index = node.meta.y;
-            continue;
-        }
-
-        uint count = node.meta.w;
-        if (count != 0u)
-        {
-            uint first = node.meta.z;
-            for (uint i = 0; i < count; ++i)
-            {
-                float t;
-                if (ray_triangle(origin, direction, Triangles[first + i], max_t, t))
-                    return true;
-            }
-            node_index = node.meta.y;
-            continue;
-        }
-
-        node_index = node.meta.x;
-    }
-    return false;
 }
 
 float3 direct_sun(float3 position, float3 normal, inout uint seed)
@@ -791,8 +822,9 @@ float3 direct_sun(float3 position, float3 normal, inout uint seed)
     if (n_dot_l <= 0.0f)
         return 0.0f;
 
-    float3 origin = position + normal * bake_params.x;
-    if (occluded(origin, direction, 1.0e20f))
+    TraceRay ray = make_trace_ray(position + normal * bake_params.x,
+                                  direction, bake_params.x, 1.0e20f);
+    if (trace_any(ray))
         return 0.0f;
 
     return sun_color_radius.rgb * (sun_direction_intensity.w * n_dot_l);
@@ -808,20 +840,19 @@ float3 trace_path(float3 position, float3 normal, inout uint seed)
         radiance += throughput * direct_sun(position, normal, seed);
 
         float3 direction = cosine_hemisphere(normal, seed);
-        float hit_t;
-        float3 hit_normal;
-        float3 hit_albedo;
-        float3 origin = position + normal * bake_params.x;
+        TraceRay ray = make_trace_ray(position + normal * bake_params.x,
+                                      direction, bake_params.x, 1.0e20f);
+        TraceHit hit;
 
-        if (!trace_closest(origin, direction, 1.0e20f, hit_t, hit_normal, hit_albedo))
+        if (!trace_closest(ray, hit))
         {
             radiance += throughput * sky_radiance(direction);
             break;
         }
 
-        throughput *= hit_albedo;
-        position = origin + direction * hit_t;
-        normal = hit_normal;
+        throughput *= hit.albedo;
+        position = ray.origin + ray.direction * hit.t;
+        normal = hit.normal;
     }
 
     return radiance;
@@ -953,10 +984,9 @@ void probe_cs(uint3 group_id : SV_GroupID, uint3 local_id : SV_GroupThreadID)
             float3(0,-1,0), float3(0,0,1), float3(0,0,-1)
         };
         for (uint axis = 0; axis < 6u && ProbeValid > 0.0f; ++axis) {
-            float distance;
-            float3 ignored_normal;
-            float3 ignored_albedo;
-            if (trace_closest(input.xyz, axes[axis], 0.15f, distance, ignored_normal, ignored_albedo))
+            TraceRay ray = make_trace_ray(input.xyz, axes[axis], bake_params.x, 0.15f);
+            TraceHit hit;
+            if (trace_closest(ray, hit))
                 ProbeValid = 0.0f;
         }
     }
@@ -968,14 +998,13 @@ void probe_cs(uint3 group_id : SV_GroupID, uint3 local_id : SV_GroupThreadID)
     if (ProbeValid > 0.0f) {
         for (uint sample_index = lane; sample_index < item_count; sample_index += 64u) {
             float3 d = uniform_sphere(seed);
-            float hit_t;
-            float3 hit_normal;
-            float3 hit_albedo;
+            TraceRay ray = make_trace_ray(input.xyz + d * bake_params.x,
+                                          d, bake_params.x, 1.0e20f);
+            TraceHit hit;
             float3 incoming;
-            float3 origin = input.xyz + d * bake_params.x;
-            if (trace_closest(origin, d, 1.0e20f, hit_t, hit_normal, hit_albedo)) {
-                float3 position = origin + d * hit_t;
-                incoming = trace_path(position, hit_normal, seed) * (hit_albedo / PI);
+            if (trace_closest(ray, hit)) {
+                float3 position = ray.origin + ray.direction * hit.t;
+                incoming = trace_path(position, hit.normal, seed) * (hit.albedo / PI);
             } else {
                 incoming = sky_radiance(d);
             }
@@ -997,9 +1026,11 @@ void probe_cs(uint3 group_id : SV_GroupID, uint3 local_id : SV_GroupThreadID)
     }
     if (lane < 9u) {
         float scale = 4.0f * PI / max((float)item_count, 1.0f);
+        float3 sun = normalize(sun_direction_intensity.xyz);
+        TraceRay sun_ray = make_trace_ray(input.xyz + sun * bake_params.x,
+                                          sun, bake_params.x, 1.0e20f);
         float sun_visible = lane == 1u && ProbeValid > 0.0f &&
-            !occluded(input.xyz + normalize(sun_direction_intensity.xyz) * bake_params.x,
-                      normalize(sun_direction_intensity.xyz), 1.0e20f) ? 1.0f : 0.0f;
+            !trace_any(sun_ray) ? 1.0f : 0.0f;
         ProbeCoefficients[probe_index * 9u + lane] =
             float4(ProbePartial[0][lane] * scale,
                    lane == 0u ? ProbeValid : sun_visible);

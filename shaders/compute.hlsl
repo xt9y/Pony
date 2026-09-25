@@ -300,8 +300,6 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     float4 surface = NormalDepth.SampleLevel(DepthSampler, uv, 0.0f);
     float depth = surface.w;
 
-
-
     // if (height_debug.y == 3u) {
     //     if (depth <= 0.0f) {
     //         Output[id.xy] = float4(0, 0, 0, 1);
@@ -318,29 +316,52 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     //     return;
     // }
 
+    // if (height_debug.y == 3u) {
+    //     Output[id.xy] = depth > 0.0f
+    //         ? float4(surface.r, 0, 0, 1)
+    //         : float4(0, 0, 0, 1);
+    //     return;
+    // } 
+    // if (height_debug.y == 3u) {
+    //     if (depth <= 0.0f) {
+    //         Output[id.xy] = float4(0, 0, 0, 1);
+    //         return;
+    //     }
+    //     float mismatch = length(surface.xyz - eye_density.xyz);
+    //     Output[id.xy] = float4(saturate(mismatch * 5.0f), 0, 0, 1);
+    //     return;
+    // }
 
-    if (height_debug.y == 3u) {
-        if (depth <= 0.0f) {
-            Output[id.xy] = float4(0, 0, 0, 1);
-            return;
-        }
+    // if (height_debug.y == 3u) {
+    //     float mismatch = length(surface.xyz - forward_g.xyz);
+    //     Output[id.xy] = float4(saturate(mismatch * 5.0f), 0, 0, 1);
+    //     // Output[id.xy] = float4(surface.rgb, 1.0f);
+    //     return;
+    // }
 
 
-        // float3 actual = surface.xyz - eye_density.xyz;
-
-        float3 actual = surface.xyz;
-
-
-        float depth_error = abs(depth - dot(actual, forward_g.xyz));
-        float direction_error = length(direction - normalize(actual));
-
-        Output[id.xy] = float4(
-            saturate(depth_error * 2.0f),      // red: view-depth disagreement
-            0.0f,
-            saturate(direction_error * 25.0f), // blue: camera-ray disagreement
-            1.0f);
-        return;
-    }
+    // if (height_debug.y == 3u) {
+    //     if (depth <= 0.0f) {
+    //         Output[id.xy] = float4(0, 0, 0, 1);
+    //         return;
+    //     }
+    //
+    //
+    //     // float3 actual = surface.xyz - eye_density.xyz;
+    //
+    //     float3 actual = surface.xyz;
+    //
+    //
+    //     float depth_error = abs(depth - dot(actual, forward_g.xyz));
+    //     float direction_error = length(direction - normalize(actual));
+    //
+    //     Output[id.xy] = float4(
+    //         saturate(depth_error * 2.0f),      // red: view-depth disagreement
+    //         0.0f,
+    //         saturate(direction_error * 25.0f), // blue: camera-ray disagreement
+    //         1.0f);
+    //     return;
+    // }
 
 
     // if (height_debug.y == 3u) {

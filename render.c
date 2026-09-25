@@ -95,6 +95,7 @@ typedef struct material_uniforms {
     float sun_direction[4];
     float sun_color[4];
     float camera_position[4];
+    // float camera_forward[4]; // Fragment depth diagnostic.
 } material_uniforms;
 
 struct gpu_material {
@@ -1391,8 +1392,8 @@ bool r_draw(renderer *r) {
 
     if (!r || !r->device || !r->solid_pipeline || !r->sky_pipeline || !r->vertex_buffer || !r->lightmap_texture || !r->lightmap_sampler) return false;
 
-    r->debug_view = 3u;
-    r->show_volume = true;
+    // r->debug_view = 3u;
+    // r->show_volume = true;
 
     SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(r->device);
     if (!cmd) return false;
@@ -1422,7 +1423,10 @@ bool r_draw(renderer *r) {
     const float zfar = fmaxf(100.0f, r->scene_radius * 10.0f);
     const mat4 view = m4_look_at(eye, r->target, v3(0, 1, 0));
     const mat4 proj = m4_perspective(fov, aspect, znear, zfar);
-    const camera_uniforms camera = {.mvp = m4_mul(proj, view), .view = view};
+    const camera_uniforms camera = {
+        .mvp = m4_mul(proj, view), 
+        .view = view, 
+    };
 
     const vec3 sun = scene_sun_direction();
     const sky_uniforms sky = {
@@ -1485,7 +1489,8 @@ bool r_draw(renderer *r) {
             .sun_direction = {sun.x, sun.y, sun.z, 0},
             .sun_color = {1.00f, 0.94f, 0.84f, 1},
             .camera_position = {eye.x, eye.y, eye.z,
-                                r->debug_view==1u ? 2.0f : (r->has_bake ? 1.0f : 0.0f)}
+                                r->debug_view==1u ? 2.0f : (r->has_bake ? 1.0f : 0.0f)},
+            // .camera_forward = {forward.x, forward.y, forward.z, 0}
         };
 
         SDL_PushGPUFragmentUniformData(cmd, 0, &material, sizeof(material));
