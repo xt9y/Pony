@@ -11,12 +11,12 @@
  * texel. Keep connected charts effectively planar. */
 #define LMAP_CHART_DOT 0.99999f
 
-typedef struct edge_ref {
+typedef struct EDGE_REF {
     uint32_t a, b, face;
-} edge_ref;
+} EDGE_REF;
 
-typedef struct chart {
-    vec3 normal;
+typedef struct CHART {
+    VEC3 normal;
 
     float min_u, min_v;
     float max_u, max_v;
@@ -26,9 +26,9 @@ typedef struct chart {
     uint32_t x, y;
     uint32_t inner_w, inner_h;
     uint32_t rect_w, rect_h;
-} chart;
+} CHART;
 
-static const chart *g_sort_charts;
+static const CHART *g_sort_charts;
 
 static uint32_t next_pow2(uint32_t v) {
 
@@ -83,8 +83,8 @@ static void uf_join(uint32_t *parent, uint8_t *rank, uint32_t a, uint32_t b) {
 
 static int edge_compare(const void *lhs, const void *rhs) {
 
-    const edge_ref *a = lhs;
-    const edge_ref *b = rhs;
+    const EDGE_REF *a = lhs;
+    const EDGE_REF *b = rhs;
 
     if (a->a != b->a) return a->a < b->a ? -1 : 1;
 
@@ -107,16 +107,16 @@ static int chart_order_compare(const void *lhs, const void *rhs) {
     return a < b ? -1 : (a > b ? 1 : 0);
 }
 
-static vec3 geometric_normal(const point *points, mesh_face face) {
+static VEC3 geometric_normal(const POINT *points, MESH_FACE face) {
 
-    const vec3 a = points[face.indices[0]].p;
-    const vec3 b = points[face.indices[1]].p;
-    const vec3 c = points[face.indices[2]].p;
+    const VEC3 a = points[face.indices[0]].p;
+    const VEC3 b = points[face.indices[1]].p;
+    const VEC3 c = points[face.indices[2]].p;
 
     return v3_normalize(v3_cross(v3_sub(b, a), v3_sub(c, a)));
 }
 
-static void project_point(vec3 normal, vec3 p, float *u, float *v) {
+static void project_point(VEC3 normal, VEC3 p, float *u, float *v) {
 
     const float ax = fabsf(normal.x);
     const float ay = fabsf(normal.y);
@@ -134,7 +134,7 @@ static void project_point(vec3 normal, vec3 p, float *u, float *v) {
     }
 }
 
-static bool pack_charts(chart *charts, uint32_t chart_count, float density, uint32_t max_size, uint32_t *out_width, uint32_t *out_height) {
+static bool pack_charts(CHART *charts, uint32_t chart_count, float density, uint32_t max_size, uint32_t *out_width, uint32_t *out_height) {
 
     uint64_t total_area = 0;
     uint32_t largest_width = 1;
@@ -195,7 +195,7 @@ static bool pack_charts(chart *charts, uint32_t chart_count, float density, uint
 
         for (uint32_t oi = 0; oi < chart_count; ++oi) {
 
-            chart *c = &charts[order[oi]];
+            CHART *c = &charts[order[oi]];
 
             if (x + c->rect_w > width) {
                 x = 0;
@@ -243,16 +243,16 @@ static bool pack_charts(chart *charts, uint32_t chart_count, float density, uint
     return true;
 }
 
-static bool barycentric(float px, float py, lmap_uv a, lmap_uv b, lmap_uv c, float *w0, float *w1, float *w2) {
+static bool barycentric(float px, float py, LMAP_UV a, LMAP_UV b, LMAP_UV c, float *w0, float *w1, float *w2) {
 
     const float den = (b.v - c.v) * (a.u - c.u) + (c.u - b.u) * (a.v - c.v);
-    const lmap_uv corners[3] = {a, b, c};
+    const LMAP_UV corners[3] = {a, b, c};
 
     /* Cover every texel square touched by a triangle. Center-only coverage
    * drops entire subpixel charts on dense meshes. */
     for (uint32_t i = 0; i < 3u; ++i) {
-        const lmap_uv p = corners[i], q = corners[(i + 1u) % 3u];
-        const lmap_uv opposite = corners[(i + 2u) % 3u];
+        const LMAP_UV p = corners[i], q = corners[(i + 1u) % 3u];
+        const LMAP_UV opposite = corners[(i + 2u) % 3u];
         const float ex = q.u - p.u, ey = q.v - p.v;
         const float side = ex * (opposite.v - p.v) - ey * (opposite.u - p.u);
         const float center = ex * (py - p.v) - ey * (px - p.u);
@@ -273,7 +273,7 @@ static bool barycentric(float px, float py, lmap_uv a, lmap_uv b, lmap_uv c, flo
     float closest = INFINITY;
 
     for (uint32_t i = 0; i < 3u; ++i) {
-        const lmap_uv p = corners[i], q = corners[(i + 1u) % 3u];
+        const LMAP_UV p = corners[i], q = corners[(i + 1u) % 3u];
         const float dx = q.u - p.u, dy = q.v - p.v;
         const float length_sq = dx * dx + dy * dy;
         const float t = length_sq > 1.0e-12f ? fminf(fmaxf(((px - p.u) * dx + (py - p.v) * dy) / length_sq, 0.0f), 1.0f) : 0.0f;
@@ -295,23 +295,23 @@ static bool barycentric(float px, float py, lmap_uv a, lmap_uv b, lmap_uv c, flo
     return true;
 }
 
-static void vertex_normals(const mesh *m, vec3 *normals) {
+static void vertex_normals(const MESH *m, VEC3 *normals) {
 
-    const point *points = m->vertices.buffer;
-    const mesh_face *faces = m->faces.buffer;
+    const POINT *points = m->vertices.buffer;
+    const MESH_FACE *faces = m->faces.buffer;
 
     memset(normals, 0, m->vertices.count * sizeof(*normals));
 
     for (size_t i = 0; i < m->faces.count; ++i) {
 
-        const mesh_face f = faces[i];
+        const MESH_FACE f = faces[i];
 
         if (f.indices[0] >= m->vertices.count || f.indices[1] >= m->vertices.count || f.indices[2] >= m->vertices.count) continue;
 
-        const vec3 a = points[f.indices[0]].p;
-        const vec3 b = points[f.indices[1]].p;
-        const vec3 c = points[f.indices[2]].p;
-        const vec3 weighted = v3_cross(v3_sub(b, a), v3_sub(c, a));
+        const VEC3 a = points[f.indices[0]].p;
+        const VEC3 b = points[f.indices[1]].p;
+        const VEC3 c = points[f.indices[2]].p;
+        const VEC3 weighted = v3_cross(v3_sub(b, a), v3_sub(c, a));
 
         normals[f.indices[0]] = v3_add(normals[f.indices[0]], weighted);
         normals[f.indices[1]] = v3_add(normals[f.indices[1]], weighted);
@@ -322,7 +322,7 @@ static void vertex_normals(const mesh *m, vec3 *normals) {
         normals[i] = v3_normalize(normals[i]);
 }
 
-void lmap_free(lightmap *lm) {
+void lmap_free(LIGHTMAP *lm) {
     if (!lm) return;
 
     free(lm->uvs);
@@ -331,7 +331,7 @@ void lmap_free(lightmap *lm) {
     memset(lm, 0, sizeof(*lm));
 }
 
-bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit, uint32_t max_size) {
+bool lmap_build(LIGHTMAP *lm, const MESH *m, uint32_t preferred_texels_per_unit, uint32_t max_size) {
 
     if (!lm || !m || !m->faces.count || !m->vertices.count || m->faces.count > UINT32_MAX || m->vertices.count > UINT32_MAX || max_size < 256u) return false;
 
@@ -339,17 +339,17 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
     const uint32_t face_count = (uint32_t)m->faces.count;
     const uint32_t vertex_count = (uint32_t)m->vertices.count;
-    const point *points = m->vertices.buffer;
-    const mesh_face *faces = m->faces.buffer;
+    const POINT *points = m->vertices.buffer;
+    const MESH_FACE *faces = m->faces.buffer;
 
     uint32_t *parent = malloc((size_t)face_count * sizeof(*parent));
     uint8_t *rank = calloc(face_count, sizeof(*rank));
-    edge_ref *edges = malloc((size_t)face_count * 3u * sizeof(*edges));
+    EDGE_REF *edges = malloc((size_t)face_count * 3u * sizeof(*edges));
 
     uint32_t *root_chart = malloc((size_t)face_count * sizeof(*root_chart));
     uint32_t *face_chart = malloc((size_t)face_count * sizeof(*face_chart));
-    chart *charts = NULL;
-    vec3 *normals = NULL;
+    CHART *charts = NULL;
+    VEC3 *normals = NULL;
 
     if (!parent || !rank || !edges || !root_chart || !face_chart) goto fail;
 
@@ -358,7 +358,7 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
         parent[i] = i;
         root_chart[i] = UINT32_MAX;
 
-        const mesh_face f = faces[i];
+        const MESH_FACE f = faces[i];
         uint32_t e[3][2] = {{f.indices[0], f.indices[1]}, {f.indices[1], f.indices[2]}, {f.indices[2], f.indices[0]}};
 
         for (uint32_t j = 0; j < 3u; ++j) {
@@ -371,7 +371,7 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
                 e[j][1] = t;
             }
 
-            edges[i * 3u + j] = (edge_ref){e[j][0], e[j][1], i};
+            edges[i * 3u + j] = (EDGE_REF){e[j][0], e[j][1], i};
         }
     }
 
@@ -386,11 +386,11 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
         for (size_t a = first; a < end; ++a) {
 
-            const vec3 na = geometric_normal(points, faces[edges[a].face]);
+            const VEC3 na = geometric_normal(points, faces[edges[a].face]);
 
             for (size_t b = a + 1u; b < end; ++b) {
 
-                const vec3 nb = geometric_normal(points, faces[edges[b].face]);
+                const VEC3 nb = geometric_normal(points, faces[edges[b].face]);
 
                 if (v3_dot(na, nb) >= LMAP_CHART_DOT) uf_join(parent, rank, edges[a].face, edges[b].face);
             }
@@ -436,7 +436,7 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
     for (uint32_t i = 0; i < face_count; ++i) {
 
-        chart *c = &charts[face_chart[i]];
+        CHART *c = &charts[face_chart[i]];
 
         for (uint32_t k = 0; k < 3u; ++k) {
 
@@ -491,7 +491,7 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
     for (uint32_t i = 0; i < face_count; ++i) {
 
-        const chart *c = &charts[face_chart[i]];
+        const CHART *c = &charts[face_chart[i]];
         const float max_x = (float)(c->x + LMAP_PADDING + c->inner_w) - 0.5f;
         const float max_y = (float)(c->y + LMAP_PADDING + c->inner_h) - 0.5f;
 
@@ -509,8 +509,8 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
             if (py > max_y) py = max_y;
 
-            lm->uvs[i * 6u + k] = (lmap_uv){px / (float)width, py / (float)lm->height};
-            lm->uvs[i * 6u + 3u + k] = (lmap_uv){px / (float)width, (py + (float)height) / (float)lm->height};
+            lm->uvs[i * 6u + k] = (LMAP_UV){px / (float)width, py / (float)lm->height};
+            lm->uvs[i * 6u + 3u + k] = (LMAP_UV){px / (float)width, (py + (float)height) / (float)lm->height};
         }
     }
 
@@ -529,7 +529,7 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
     for (uint32_t i = 0; i < face_count; ++i) {
 
-        lmap_uv uv[3];
+        LMAP_UV uv[3];
 
         for (uint32_t k = 0; k < 3u; ++k) {
 
@@ -602,8 +602,8 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
     for (uint32_t i = 0; i < face_count; ++i) {
 
-        const mesh_face f = faces[i];
-        lmap_uv uv[3];
+        const MESH_FACE f = faces[i];
+        LMAP_UV uv[3];
 
         for (uint32_t k = 0; k < 3u; ++k) {
 
@@ -626,9 +626,9 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
         if (max_y >= (int)height) max_y = (int)height - 1;
 
-        const vec3 a = points[f.indices[0]].p;
-        const vec3 b = points[f.indices[1]].p;
-        const vec3 c = points[f.indices[2]].p;
+        const VEC3 a = points[f.indices[0]].p;
+        const VEC3 b = points[f.indices[1]].p;
+        const VEC3 c = points[f.indices[2]].p;
 
         for (int y = min_y; y <= max_y; ++y) {
 
@@ -644,14 +644,14 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
                 occupied[pixel] = 1u;
 
-                const vec3 p = v3_add(v3_scale(a, w0), v3_add(v3_scale(b, w1), v3_scale(c, w2)));
+                const VEC3 p = v3_add(v3_scale(a, w0), v3_add(v3_scale(b, w1), v3_scale(c, w2)));
 
-                vec3 n = v3_add(v3_scale(normals[f.indices[0]], w0), v3_add(v3_scale(normals[f.indices[1]], w1), v3_scale(normals[f.indices[2]], w2)));
+                VEC3 n = v3_add(v3_scale(normals[f.indices[0]], w0), v3_add(v3_scale(normals[f.indices[1]], w1), v3_scale(normals[f.indices[2]], w2)));
                 n = v3_normalize(n);
 
                 if (v3_len_sq(n) < 1.0e-10f) n = f.normal;
 
-                lmap_sample *s = &lm->samples[out_sample++];
+                LMAP_SAMPLE *s = &lm->samples[out_sample++];
                 s->position[0] = p.x;
                 s->position[1] = p.y;
                 s->position[2] = p.z;
@@ -666,7 +666,7 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
                 s->normal[2] = n.z;
                 s->normal[3] = (float)face_chart[i];
 
-                lmap_sample *back = &lm->samples[out_sample++];
+                LMAP_SAMPLE *back = &lm->samples[out_sample++];
                 *back = *s;
                 bits.u = (uint32_t)(pixel + pixel_count);
                 back->position[3] = bits.f;
