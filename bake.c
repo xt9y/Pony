@@ -1,10 +1,21 @@
-#include "dustmite.h"
+#include "game.h"
 
 #include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define PROBE_MAX_SAMPLES 1024u
+#define PROBE_GRID_SPACING 4.0f
+
+typedef enum bake_phase {
+    BAKE_PHASE_INIT = 0,
+    BAKE_PHASE_SUN,
+    BAKE_PHASE_PROBES,
+    BAKE_PHASE_SEED,
+    BAKE_PHASE_LIGHTMAP
+} bake_phase;
 
 typedef struct bake_job {
     renderer *renderer;
@@ -21,13 +32,19 @@ typedef struct bake_job {
     SDL_AtomicInt cancel;
     SDL_AtomicInt done;
     SDL_AtomicInt success;
-    SDL_AtomicInt cache_seeded;
+    SDL_AtomicInt phase;
+    SDL_AtomicInt phase_done;
+    SDL_AtomicInt phase_total;
+    SDL_AtomicInt phase_active;
+    SDL_AtomicInt phase_started_ms;
     Uint64 started;
     uint64_t previous_cache_bytes;
     Uint64 save_seen_at;
     uint64_t save_seen_bytes;
     char error[256];
 } bake_job;
+
+
 
 static bake_job *g_bake;
 static Uint64 g_title_tick;
@@ -62,11 +79,36 @@ static uint64_t bake_file_size(const char *path) {
     return size > 0 ? (uint64_t)size : 0u;
 }
 
+static const char *bake_phase_name(int phase) {
+    switch ((bake_phase)phase) {
+        case BAKE_PHASE_SUN: return "SUN";
+        case BAKE_PHASE_PROBES: return "PROBE";
+        case BAKE_PHASE_SEED: return "CACHE";
+        case BAKE_PHASE_LIGHTMAP: return "LIGHTMAP";
+        default: return "BAKE";
+    }
+}
+
+static void bake_set_phase(bake_phase phase, Uint32 done, Uint32 total, Uint32 active) {
+    bake_job *job = g_bake;
+    if (!job) return;
+    const int previous = SDL_GetAtomicInt(&job->phase);
+    if (previous != (int)phase)
+        SDL_SetAtomicInt(&job->phase_started_ms, (int)(Uint32)SDL_GetTicks());
+    SDL_SetAtomicInt(&job->phase_done, (int)done);
+    SDL_SetAtomicInt(&job->phase_total, (int)total);
+    SDL_SetAtomicInt(&job->phase_active, (int)active);
+    SDL_SetAtomicInt(&job->phase, (int)phase);
+}
+
+static bool bake_cancelled(void) {
+    return g_bake && SDL_GetAtomicInt(&g_bake->cancel) != 0;
+}
+
 static bool bake_probe_stats(const renderer *r, Uint32 *minimum,
                              double *average, Uint32 *maximum,
                              Uint32 *valid_count) {
     if (!r || !r->volume_probes.probes) return false;
-
     const uint64_t probe_count = (uint64_t)r->volume_probes.count_x *
                                  r->volume_probes.count_y *
                                  r->volume_probes.count_z;
@@ -76,21 +118,17 @@ static bool bake_probe_stats(const renderer *r, Uint32 *minimum,
     Uint32 max_samples = 0u;
     uint64_t sample_sum = 0u;
     Uint32 measured = 0u;
-
     for (uint64_t i = 0u; i < probe_count; ++i) {
-        const dm_probe *probe = &r->volume_probes.probes[i];
+        const probe *probe = &r->volume_probes.probes[i];
         if (probe->position[3] <= 0.0f) continue;
-
         const float encoded = probe->coefficients[2][3];
         if (!isfinite(encoded) || encoded < 1.0f || encoded > 65536.0f) continue;
         const Uint32 samples = (Uint32)(encoded + 0.5f);
-
         if (samples < min_samples) min_samples = samples;
         if (samples > max_samples) max_samples = samples;
         sample_sum += samples;
         measured++;
     }
-
     if (!measured) return false;
     if (minimum) *minimum = min_samples;
     if (average) *average = (double)sample_sum / (double)measured;
@@ -109,52 +147,30 @@ static void bake_remove_worker_files(const char *path) {
     }
 }
 
-static void bake_seed_worker_cache(bake_job *job) {
-    if (!job || SDL_GetAtomicInt(&job->cancel)) return;
-
-    FILE *source = fopen(job->path, "rb");
-    if (!source) return;
-
-    FILE *destination = fopen(job->worker_path, "wb");
+static bool bake_copy_cache(const char *source_path, const char *destination_path) {
+    FILE *source = fopen(source_path, "rb");
+    if (!source) return false;
+    FILE *destination = fopen(destination_path, "wb");
     if (!destination) {
         fclose(source);
-        SDL_Log("B: cache reuse seed unavailable: %s", strerror(errno));
-        return;
+        return false;
     }
-
     unsigned char *buffer = malloc(1024u * 1024u);
     bool good = buffer != NULL;
-    uint64_t copied = 0u;
-
-    while (good && !SDL_GetAtomicInt(&job->cancel)) {
+    while (good && !bake_cancelled()) {
         const size_t count = fread(buffer, 1, 1024u * 1024u, source);
-        if (count) {
-            if (fwrite(buffer, 1, count, destination) != count) {
-                good = false;
-                break;
-            }
-            copied += count;
-        }
+        if (count && fwrite(buffer, 1, count, destination) != count) good = false;
         if (count < 1024u * 1024u) {
             if (ferror(source)) good = false;
             break;
         }
     }
-
     free(buffer);
     if (fclose(source) != 0) good = false;
     if (fclose(destination) != 0) good = false;
-    if (SDL_GetAtomicInt(&job->cancel)) good = false;
-
-    if (!good) {
-        remove(job->worker_path);
-        SDL_Log("B: cache reuse seed failed; continuing with full rebake");
-        return;
-    }
-
-    SDL_SetAtomicInt(&job->cache_seeded, 1);
-    SDL_Log("B: seeded %.2f MiB previous cache for component reuse",
-            (double)copied / (1024.0 * 1024.0));
+    if (bake_cancelled()) good = false;
+    if (!good) remove(destination_path);
+    return good;
 }
 
 static void bake_set_error(bake_job *job, const char *message) {
@@ -163,16 +179,85 @@ static void bake_set_error(bake_job *job, const char *message) {
     snprintf(job->error, sizeof(job->error), "%s", text);
 }
 
+static bool bake_probe_progress(Uint32 done, Uint32 total, Uint32 active) {
+    bake_set_phase(BAKE_PHASE_PROBES, done, total, active);
+    return !bake_cancelled();
+}
+
+static bool bake_make_probe_grid(const mesh *m, probe_grid *grid) {
+    if (!m || !grid) return false;
+    memset(grid, 0, sizeof(*grid));
+    const vec3 extent = v3_sub(m->bounds.max, m->bounds.min);
+    if (!isfinite(extent.x) || !isfinite(extent.y) || !isfinite(extent.z) ||
+        extent.x < 0.0f || extent.y < 0.0f || extent.z < 0.0f) return false;
+    grid->count_x = (uint32_t)ceilf(extent.x / PROBE_GRID_SPACING) + 1u;
+    grid->count_y = (uint32_t)ceilf(extent.y / PROBE_GRID_SPACING) + 1u;
+    grid->count_z = (uint32_t)ceilf(extent.z / PROBE_GRID_SPACING) + 1u;
+    const uint64_t count = (uint64_t)grid->count_x * grid->count_y * grid->count_z;
+    if (!count || count > 16384u) return false;
+    grid->origin = m->bounds.min;
+    grid->spacing = PROBE_GRID_SPACING;
+    grid->probes = calloc((size_t)count, sizeof(*grid->probes));
+    if (!grid->probes) return false;
+    for (uint32_t z = 0; z < grid->count_z; ++z)
+        for (uint32_t y = 0; y < grid->count_y; ++y)
+            for (uint32_t x = 0; x < grid->count_x; ++x) {
+                const size_t index = x + (size_t)grid->count_x *
+                    (y + (size_t)grid->count_y * z);
+                probe *p = &grid->probes[index];
+                p->position[0] = grid->origin.x + x * PROBE_GRID_SPACING;
+                p->position[1] = grid->origin.y + y * PROBE_GRID_SPACING;
+                p->position[2] = grid->origin.z + z * PROBE_GRID_SPACING;
+                p->position[3] = 1.0f;
+            }
+    return true;
+}
+
+static bool bake_write_fast_seed(bake_job *job, probe_grid *probes,
+                                 beam_grid *beams) {
+    unsigned char black_pixel[8] = {0};
+    cached_lightmap seed = {0};
+    seed.width = 1u;
+    seed.height = 1u;
+    seed.pixels = black_pixel;
+    seed.volume_probes = *probes;
+    seed.beams = *beams;
+    const uint64_t stale_layout = job->layout_hash ^ UINT64_C(0x9e3779b97f4a7c15);
+    bake_set_phase(BAKE_PHASE_SEED, 0u, 0u, 0u);
+    return cache_write(job->worker_path, job->scene_hash, stale_layout,
+                          job->volume_hash, job->beam_hash, &seed);
+}
+
+static bool bake_prepare_fast_components(bake_job *job, renderer *worker) {
+    Uint64 started = SDL_GetPerformanceCounter();
+    bvh tree = {0};
+    probe_grid probes = {0};
+    beam_grid beams = {0};
+    bool good = bvh_build(&tree, job->scene, job->visual);
+    if (good) SDL_Log("B: fast probe BVH built in %.2f ms", bake_elapsed_ms(started));
+
+    bake_set_phase(BAKE_PHASE_SUN, 0u, 0u, 0u);
+    started = SDL_GetPerformanceCounter();
+    if (good) good = beam_build(&beams, job->scene, &tree,
+                                    v3_normalize(v3(0.38f, 0.30f, 0.32f)));
+    if (good) SDL_Log("B: fast sun field took %.2f ms", bake_elapsed_ms(started));
+
+    started = SDL_GetPerformanceCounter();
+    if (good) good = bake_make_probe_grid(job->scene, &probes) &&
+                     bake_probe_grid_fast(worker, &probes, &tree, &beams,
+                                          bake_probe_progress);
+    if (good) SDL_Log("B: wavefront volume probes took %.2f ms", bake_elapsed_ms(started));
+
+    if (good) good = bake_write_fast_seed(job, &probes, &beams);
+    bvh_free(&tree);
+    free(probes.probes);
+    beam_free(&beams);
+    return good;
+}
+
 static int SDLCALL bake_thread_main(void *userdata) {
     bake_job *job = userdata;
     renderer worker = {0};
-
-    bake_seed_worker_cache(job);
-    if (SDL_GetAtomicInt(&job->cancel)) {
-        SDL_SetAtomicInt(&job->done, 1);
-        return 1;
-    }
-
     if (!bake_worker_init(&worker)) {
         bake_set_error(job, SDL_GetError());
         SDL_SetAtomicInt(&job->done, 1);
@@ -180,15 +265,23 @@ static int SDLCALL bake_thread_main(void *userdata) {
     }
 
     SDL_Log("B: offscreen bake GPU device started");
-    bool good = r_rebake_current_scene(&worker, job->scene, job->visual,
+    bool fast = !bake_cancelled() && bake_prepare_fast_components(job, &worker);
+    if (!fast && !bake_cancelled()) {
+        SDL_Log("B: fast probe path unavailable; falling back to original bake: %s",
+                *SDL_GetError() ? SDL_GetError() : "unknown error");
+        bake_remove_worker_files(job->worker_path);
+        if (job->path && bake_copy_cache(job->path, job->worker_path))
+            SDL_Log("B: fallback seeded previous cache");
+    }
+
+    bake_set_phase(BAKE_PHASE_LIGHTMAP, 0u, 0u, 0u);
+    bool good = !bake_cancelled() && r_rebake_current_scene(&worker, job->scene, job->visual,
                                        job->layout, job->worker_path,
                                        job->scene_hash, job->layout_hash,
                                        job->volume_hash, job->beam_hash);
     if (!good) bake_set_error(job, SDL_GetError());
-
     bake_worker_deinit(&worker);
-
-    if (SDL_GetAtomicInt(&job->cancel)) good = false;
+    if (bake_cancelled()) good = false;
     if (!good) bake_remove_worker_files(job->worker_path);
 
     SDL_SetAtomicInt(&job->success, good ? 1 : 0);
@@ -201,17 +294,14 @@ static int SDLCALL bake_thread_main(void *userdata) {
 static bool bake_publish_cache(const char *worker_path, const char *path) {
     char *backup = bake_path_suffix(path, ".previous");
     if (!backup) return false;
-
     remove(backup);
     bool had_previous = false;
-    if (rename(path, backup) == 0) {
-        had_previous = true;
-    } else if (errno != ENOENT) {
+    if (rename(path, backup) == 0) had_previous = true;
+    else if (errno != ENOENT) {
         SDL_SetError("could not preserve previous bake cache: %s", strerror(errno));
         free(backup);
         return false;
     }
-
     if (rename(worker_path, path) != 0) {
         const int publish_error = errno;
         if (had_previous) rename(backup, path);
@@ -219,7 +309,6 @@ static bool bake_publish_cache(const char *worker_path, const char *path) {
         free(backup);
         return false;
     }
-
     if (had_previous) remove(backup);
     free(backup);
     return true;
@@ -241,7 +330,6 @@ bool bake_start(renderer *r, const mesh *scene, const gltf_scene *visual,
         SDL_SetError("a bake is already in progress");
         return false;
     }
-
     bake_job *job = calloc(1, sizeof(*job));
     if (!job) return false;
     job->renderer = r;
@@ -256,7 +344,6 @@ bool bake_start(renderer *r, const mesh *scene, const gltf_scene *visual,
     job->path = bake_path_suffix(path, "");
     job->worker_path = bake_path_suffix(path, ".worker");
     job->previous_cache_bytes = bake_file_size(path);
-
     if (!job->path || !job->worker_path) {
         bake_free_job(job);
         SDL_SetError("could not initialize offscreen bake job");
@@ -264,14 +351,15 @@ bool bake_start(renderer *r, const mesh *scene, const gltf_scene *visual,
     }
 
     bake_remove_worker_files(job->worker_path);
-    job->thread = SDL_CreateThread(bake_thread_main, "dustmite-bake", job);
+    g_bake = job;
+    SDL_SetAtomicInt(&job->phase_started_ms, (int)(Uint32)SDL_GetTicks());
+    job->thread = SDL_CreateThread(bake_thread_main, "pony-bake", job);
     if (!job->thread) {
+        g_bake = NULL;
         bake_remove_worker_files(job->worker_path);
         bake_free_job(job);
         return false;
     }
-
-    g_bake = job;
     r->bake_stage = "offscreen GPU bake";
     if (r->window) SDL_SetWindowTitle(r->window, "BAKE | 0.0s");
     SDL_Log("B: full-speed offscreen rebake started; render device remains independent");
@@ -284,91 +372,93 @@ bool bake_active(renderer *r) {
 
 void bake_update_title(renderer *r) {
     if (!r || !r->window) return;
-
     const Uint64 now = SDL_GetTicks();
     if (now - g_title_tick < 100u) return;
     g_title_tick = now;
-
     const double frame_ms = r->frame_time_ms;
     const double fps = frame_ms > 0.001 ? 1000.0 / frame_ms : 0.0;
     char title[256];
 
     bake_job *job = g_bake;
     if (job && job->renderer == r) {
+        const int phase = SDL_GetAtomicInt(&job->phase);
+        const Uint32 done = (Uint32)SDL_GetAtomicInt(&job->phase_done);
+        const Uint32 total = (Uint32)SDL_GetAtomicInt(&job->phase_total);
+        const Uint32 active = (Uint32)SDL_GetAtomicInt(&job->phase_active);
+        const Uint32 phase_started = (Uint32)SDL_GetAtomicInt(&job->phase_started_ms);
+        const double phase_seconds = (double)((Uint32)now - phase_started) / 1000.0;
         char *temporary = bake_path_suffix(job->worker_path, ".tmp");
         const uint64_t save_bytes = temporary ? bake_file_size(temporary) : 0u;
         free(temporary);
 
-        if (save_bytes) {
+        if (phase == BAKE_PHASE_LIGHTMAP && save_bytes) {
             if (!job->save_seen_at) {
                 job->save_seen_at = now;
                 job->save_seen_bytes = save_bytes;
             }
             const double save_seconds = (double)(now - job->save_seen_at) / 1000.0;
             const double mib = (double)save_bytes / (1024.0 * 1024.0);
+            const double expected = job->previous_cache_bytes
+                ? (double)job->previous_cache_bytes / (1024.0 * 1024.0) : 0.0;
             const double rate = save_seconds > 0.05
-                ? ((double)(save_bytes - job->save_seen_bytes) / (1024.0 * 1024.0)) /
-                      save_seconds
+                ? ((double)(save_bytes - job->save_seen_bytes) / (1024.0 * 1024.0)) / save_seconds
                 : 0.0;
-
-            if (job->previous_cache_bytes) {
-                const double expected = (double)job->previous_cache_bytes /
-                                        (1024.0 * 1024.0);
-                const double percent = fmin(100.0, 100.0 * (double)save_bytes /
-                                                     (double)job->previous_cache_bytes);
+            if (expected > 0.0) {
+                const double percent = fmin(100.0, mib * 100.0 / expected);
                 snprintf(title, sizeof(title),
-                         "%.1fms | %.1ffps | SAVE %.1f/%.1fMiB ~%.0f%% | %.0fMiB/s",
-                         frame_ms, fps, mib, expected, percent, rate);
+                    "%.1fms | %.1ffps | SAVE %.1f/%.1fMiB %.0f%% | %.0fMiB/s",
+                    frame_ms, fps, mib, expected, percent, rate);
             } else {
                 snprintf(title, sizeof(title),
-                         "%.1fms | %.1ffps | SAVE %.1fMiB | %.0fMiB/s",
-                         frame_ms, fps, mib, rate);
+                    "%.1fms | %.1ffps | SAVE %.1fMiB | %.0fMiB/s",
+                    frame_ms, fps, mib, rate);
             }
+        } else if (phase == BAKE_PHASE_PROBES && total) {
+            const double percent = 100.0 * (double)done / (double)total;
+            const double eta = done && done < total
+                ? phase_seconds * (double)(total - done) / (double)done : 0.0;
+            if (eta > 0.0)
+                snprintf(title, sizeof(title),
+                    "%.1fms | %.1ffps | PROBE %u/%u %.0f%% | A%u | %.1fs ETA %.1fs | F%u D%u",
+                    frame_ms, fps, done, total, percent, active, phase_seconds, eta,
+                    r->show_volume ? 1u : 0u, r->debug_view);
+            else
+                snprintf(title, sizeof(title),
+                    "%.1fms | %.1ffps | PROBE %u/%u %.0f%% | A%u | %.1fs | F%u D%u",
+                    frame_ms, fps, done, total, percent, active, phase_seconds,
+                    r->show_volume ? 1u : 0u, r->debug_view);
         } else {
-            const double seconds = bake_elapsed_ms(job->started) / 1000.0;
-            if (SDL_GetAtomicInt(&job->cache_seeded)) {
-                snprintf(title, sizeof(title),
-                         "%.1fms | %.1ffps | BAKE %.1fs | CACHE %.1fMiB | F%u D%u",
-                         frame_ms, fps, seconds,
-                         (double)job->previous_cache_bytes / (1024.0 * 1024.0),
-                         r->show_volume ? 1u : 0u, r->debug_view);
-            } else {
-                snprintf(title, sizeof(title),
-                         "%.1fms | %.1ffps | BAKE %.1fs | F%u D%u",
-                         frame_ms, fps, seconds,
-                         r->show_volume ? 1u : 0u, r->debug_view);
-            }
+            snprintf(title, sizeof(title),
+                "%.1fms | %.1ffps | %s %.1fs | F%u D%u",
+                frame_ms, fps, bake_phase_name(phase), phase_seconds,
+                r->show_volume ? 1u : 0u, r->debug_view);
         }
     } else {
         Uint32 min_samples = 0u, max_samples = 0u, measured = 0u;
         double avg_samples = 0.0;
-        const bool have_probe_stats = r->has_bake &&
-            bake_probe_stats(r, &min_samples, &avg_samples, &max_samples, &measured);
-        if (have_probe_stats) {
+        if (r->has_bake && bake_probe_stats(r, &min_samples, &avg_samples,
+                                             &max_samples, &measured)) {
             snprintf(title, sizeof(title),
-                     "%.1fms | %.1ffps | READY | LM %ux%u | P %u/%.0f/%u x%u | F%u D%u",
-                     frame_ms, fps, r->lightmap_width, r->lightmap_height,
-                     min_samples, avg_samples, max_samples, measured,
-                     r->show_volume ? 1u : 0u, r->debug_view);
+                "%.1fms | %.1ffps | READY | LM %ux%u | P %u/%.0f/%u x%u | F%u D%u",
+                frame_ms, fps, r->lightmap_width, r->lightmap_height,
+                min_samples, avg_samples, max_samples, measured,
+                r->show_volume ? 1u : 0u, r->debug_view);
         } else {
             snprintf(title, sizeof(title),
-                     "%.1fms | %.1ffps | %s | LM %ux%u | F%u D%u",
-                     frame_ms, fps, r->has_bake ? "READY" : "UNBAKED",
-                     r->lightmap_width, r->lightmap_height,
-                     r->show_volume ? 1u : 0u, r->debug_view);
+                "%.1fms | %.1ffps | %s | LM %ux%u | F%u D%u",
+                frame_ms, fps, r->has_bake ? "READY" : "UNBAKED",
+                r->lightmap_width, r->lightmap_height,
+                r->show_volume ? 1u : 0u, r->debug_view);
         }
     }
-
     SDL_SetWindowTitle(r->window, title);
 }
 
 void bake_update(renderer *r) {
     bake_job *job = g_bake;
     if (!job || job->renderer != r || !SDL_GetAtomicInt(&job->done)) return;
-
     SDL_WaitThread(job->thread, NULL);
     job->thread = NULL;
-
     bool good = SDL_GetAtomicInt(&job->success) != 0 &&
                 SDL_GetAtomicInt(&job->cancel) == 0;
     if (good) {
@@ -378,30 +468,22 @@ void bake_update(renderer *r) {
                                       job->layout);
         if (!good) bake_set_error(job, SDL_GetError());
     }
-
-    if (good && !bake_publish_cache(job->worker_path, job->path)) {
+    if (good && !bake_publish_cache(job->worker_path, job->path))
         SDL_Log("B: new lighting is active but cache publish failed: %s", SDL_GetError());
-    }
-
     if (good) {
         r->bake_stage = NULL;
-        if (r->window) SDL_SetWindowTitle(r->window, "READY");
         Uint32 min_samples = 0u, max_samples = 0u, measured = 0u;
         double avg_samples = 0.0;
-        if (bake_probe_stats(r, &min_samples, &avg_samples, &max_samples, &measured)) {
+        if (bake_probe_stats(r, &min_samples, &avg_samples, &max_samples, &measured))
             SDL_Log("B: probe samples %u/%.1f/%u across %u valid probes",
                     min_samples, avg_samples, max_samples, measured);
-        }
-        SDL_Log("B: bake ready on render device after %.2f ms",
-                bake_elapsed_ms(job->started));
+        SDL_Log("B: bake ready on render device after %.2f ms", bake_elapsed_ms(job->started));
     } else {
         bake_remove_worker_files(job->worker_path);
         r->bake_stage = NULL;
-        if (r->window) SDL_SetWindowTitle(r->window, "BAKE FAIL");
         SDL_Log("B: offscreen bake failed; previous lighting retained: %s",
                 job->error[0] ? job->error : "unknown bake error");
     }
-
     g_bake = NULL;
     bake_free_job(job);
 }
@@ -409,7 +491,6 @@ void bake_update(renderer *r) {
 void bake_cancel(renderer *r) {
     bake_job *job = g_bake;
     if (!job || (r && job->renderer != r)) return;
-
     SDL_SetAtomicInt(&job->cancel, 1);
     if (job->thread) {
         SDL_Log("B: waiting for offscreen GPU bake to stop");

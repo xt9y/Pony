@@ -1,11 +1,11 @@
 #if defined(BUILD_VISION_VOLUME_CS)
 
-/* Reuse Dustmite's current volumetric helpers and resource layout verbatim,
+/* Reuse Pony's current volumetric helpers and resource layout verbatim,
  * but replace only the entry point.  This keeps the beam/probe integration
  * logic in one place while allowing the expensive camera rays to be sampled
  * at a lower spatial rate in peripheral vision. */
 #define BUILD_VOLUME_CS
-#define volume_cs dustmite_dense_volume_cs
+#define volume_cs pony_dense_volume_cs
 #include "compute.hlsl"
 #undef volume_cs
 #undef BUILD_VOLUME_CS

@@ -1,4 +1,4 @@
-#include "dustmite.h"
+#include "game.h"
 
 #include <math.h>
 #include <stdlib.h>

@@ -1,5 +1,5 @@
-#ifndef DUSTMITE_H
-#define DUSTMITE_H
+#ifndef GAME_H
+#define GAME_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -192,22 +192,22 @@ typedef struct bvh {
     uint32_t triangle_count;
 } bvh;
 
-typedef struct dm_trace_ray {
+typedef struct trace_ray {
     vec3 origin;
     float tmin;
     vec3 direction;
     float tmax;
-} dm_trace_ray;
+} trace_ray;
 
-typedef struct dm_trace_hit {
+typedef struct trace_hit {
     float t;
     vec3 normal;
     vec3 albedo;
     uint32_t triangle;
-} dm_trace_hit;
+} trace_hit;
 
-bool dm_trace_any(const bvh *tree, dm_trace_ray ray);
-bool dm_trace_closest(const bvh *tree, dm_trace_ray ray, dm_trace_hit *hit);
+bool trace_any(const bvh *tree, trace_ray ray);
+bool trace_closest(const bvh *tree, trace_ray ray, trace_hit *hit);
 bool bvh_build(bvh *tree, const mesh *m, const gltf_scene *visual);
 void bvh_free(bvh *tree);
 
@@ -237,62 +237,87 @@ bool lmap_build(lightmap *lm, const mesh *m,
                 uint32_t preferred_texels_per_unit, uint32_t max_size);
 void lmap_free(lightmap *lm);
 
-typedef struct dm_probe {
+typedef struct probe {
     float position[4]; /* xyz and validity */
     float coefficients[9][4]; /* RGB SH9; coefficient[1].w is sun visibility */
-} dm_probe;
+} probe;
 
-typedef struct dm_probe_grid {
+typedef struct probe_grid {
     vec3 origin;
     float spacing;
     uint32_t count_x, count_y, count_z;
-    dm_probe *probes;
-} dm_probe_grid;
+    probe *probes;
+} probe_grid;
 
-typedef struct dm_beam_cell {
+typedef struct beam_cell {
     uint32_t x, y, z, side;
-} dm_beam_cell;
+} beam_cell;
 
-typedef struct dm_beam_grid {
+typedef struct beam_grid {
     vec3 origin;
     vec3 step; /* world-space spacing along the three sun-space axes */
     uint32_t width, height, depth;
     uint32_t count;
-    dm_beam_cell *cells; /* visible quadtree squares; all other voxels are shaded */
+    beam_cell *cells; /* visible quadtree squares; all other voxels are shaded */
     float *shadow_depth; /* first sun-facing surface for each x/y column */
-} dm_beam_grid;
+} beam_grid;
 
-bool dm_beam_build(dm_beam_grid *grid, const mesh *scene, const bvh *tree,
+bool beam_build(beam_grid *grid, const mesh *scene, const bvh *tree,
                    vec3 sun_direction);
-void dm_beam_free(dm_beam_grid *grid);
-float *dm_beam_expand(const dm_beam_grid *grid);
+void beam_free(beam_grid *grid);
+float *beam_expand(const beam_grid *grid);
 
 //// cache: baked lighting
 
-typedef struct dm_cached_lightmap {
+typedef struct cached_lightmap {
     uint32_t width;
     uint32_t height;
     uint64_t layout_hash;
     uint64_t volume_hash;
     uint64_t beam_hash;
     unsigned char *pixels; /* tightly packed RGBA16F, width * height * 8 bytes */
-    dm_probe_grid object_probes;
-    dm_probe_grid volume_probes;
-    dm_beam_grid beams;
-} dm_cached_lightmap;
+    probe_grid object_probes;
+    probe_grid volume_probes;
+    beam_grid beams;
+} cached_lightmap;
 
-uint64_t dm_hash_bytes(uint64_t seed, const void *bytes, size_t size);
-bool dm_cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash,
+uint64_t hash_bytes(uint64_t seed, const void *bytes, size_t size);
+bool cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash,
                    uint64_t volume_hash, uint64_t beam_hash,
-                   dm_cached_lightmap *out);
-bool dm_cache_read_partial(const char *path, uint64_t scene_hash,
-                           dm_cached_lightmap *out);
-bool dm_cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash,
+                   cached_lightmap *out);
+bool cache_read_partial(const char *path, uint64_t scene_hash,
+                           cached_lightmap *out);
+bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash,
                     uint64_t volume_hash, uint64_t beam_hash,
-                    const dm_cached_lightmap *data);
-void dm_cache_free(dm_cached_lightmap *data);
+                    const cached_lightmap *data);
+void cache_free(cached_lightmap *data);
 
-/* Keep existing source includes working while gpu.h owns all GPU declarations. */
 #include "gpu.h"
+
+/* Renderer and bake orchestration. */
+bool r_init(renderer *r, const char *title, int width, int height);
+bool r_build_scene(renderer *r, const mesh *m, const gltf_scene *visual,
+                   const lightmap *lm);
+bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash,
+                            uint64_t layout_hash, uint64_t volume_hash,
+                            uint64_t beam_hash, const lightmap *lm);
+bool r_rebake_current_scene(renderer *r, const mesh *m,
+                            const gltf_scene *visual, const lightmap *lm,
+                            const char *path, uint64_t scene_hash,
+                            uint64_t layout_hash, uint64_t volume_hash,
+                            uint64_t beam_hash);
+void r_event(renderer *r, const SDL_Event *event);
+bool r_draw(renderer *r);
+void r_deinit(renderer *r);
+
+void bake_progress(renderer *r, const char *stage, Uint32 done, Uint32 total);
+bool bake_start(renderer *r, const mesh *scene, const gltf_scene *visual,
+                const lightmap *layout, const char *path,
+                uint64_t scene_hash, uint64_t layout_hash,
+                uint64_t volume_hash, uint64_t beam_hash);
+void bake_update(renderer *r);
+void bake_cancel(renderer *r);
+bool bake_active(renderer *r);
+void bake_update_title(renderer *r);
 
 #endif

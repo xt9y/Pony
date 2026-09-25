@@ -1,4 +1,4 @@
-#include "dustmite.h"
+#include "game.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -7,6 +7,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #define GLB_MAGIC 0x46546c67u
 #define GLB_JSON 0x4e4f534au
@@ -28,13 +35,27 @@ static void set_error(glb_doc *d, const char *fmt, ...) {
 
 }
 
+static void release_file_data(glb_doc *d) {
+
+    if (!d || !d->data) return;
+
+#if defined(_WIN32)
+    free(d->data);
+#else
+    (void)munmap(d->data, d->data_size);
+#endif
+
+    d->data = NULL;
+    d->data_size = 0;
+}
+
 static void release_keep_error(glb_doc *d) {
 
     char error[sizeof(d->error)];
     memcpy(error, d->error, sizeof(error));
 
     free(d->tokens);
-    free(d->data);
+    release_file_data(d);
 
     memset(d, 0, sizeof(*d));
     memcpy(d->error, error, sizeof(error));
@@ -212,12 +233,12 @@ bool glb_load(glb_doc *d, const char *path) {
     if (!d || !path) return false;
     memset(d, 0, sizeof(*d));
 
+#if defined(_WIN32)
     FILE *f = fopen(path, "rb");
     if (!f) {
         set_error(d, "%s: %s", path, strerror(errno));
         return false;
     }
-
 
     if (fseek(f, 0, SEEK_END) != 0) {
         set_error(d, "failed to seek %s", path);
@@ -231,7 +252,6 @@ bool glb_load(glb_doc *d, const char *path) {
         fclose(f);
         return false;
     }
-
 
     d->data_size = (size_t)end;
     d->data = malloc(d->data_size);
@@ -248,8 +268,41 @@ bool glb_load(glb_doc *d, const char *path) {
         return false;
     }
 
-
     fclose(f);
+#else
+    const int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        set_error(d, "%s: %s", path, strerror(errno));
+        return false;
+    }
+
+    struct stat info;
+    if (fstat(fd, &info) != 0) {
+        const int error = errno;
+        close(fd);
+        set_error(d, "failed to stat %s: %s", path, strerror(error));
+        return false;
+    }
+
+    if (info.st_size < 12 || (uint64_t)info.st_size > (uint64_t)SIZE_MAX) {
+        close(fd);
+        set_error(d, "%s is not a valid GLB", path);
+        return false;
+    }
+
+    d->data_size = (size_t)info.st_size;
+    void *mapping = mmap(NULL, d->data_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    const int map_error = errno;
+    close(fd);
+
+    if (mapping == MAP_FAILED) {
+        d->data_size = 0;
+        set_error(d, "failed to map %s: %s", path, strerror(map_error));
+        return false;
+    }
+
+    d->data = mapping;
+#endif
 
 
     if (rd32(d->data) != GLB_MAGIC || rd32(d->data + 4) != 2u) {
@@ -313,7 +366,7 @@ void glb_free(glb_doc *d) {
 
     if (!d) return;
     free(d->tokens);
-    free(d->data);
+    release_file_data(d);
     memset(d, 0, sizeof(*d));
 }
 
