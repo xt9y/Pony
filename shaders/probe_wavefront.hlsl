@@ -1,6 +1,7 @@
 #if defined(BUILD_PROBE_PREP_CS) || defined(BUILD_PROBE_RESET_CS) || \
       defined(BUILD_PROBE_VALIDATE_CS) || defined(BUILD_PROBE_PRIMARY_CS) || \
-      defined(BUILD_PROBE_BOUNCE_CS) || defined(BUILD_PROBE_REDUCE_CS)
+      defined(BUILD_PROBE_BOUNCE_CS) || defined(BUILD_PROBE_REDUCE_CS) || \
+      defined(BUILD_PROBE_EMISSIVE_CS)
 
 static const float PROBE_PI = 3.14159265358979323846f;
 static const float PROBE_SH0 = 0.2820947918f;
@@ -87,7 +88,7 @@ GPU_BIND_B(0, 2) cbuffer ProbeBakeData : register(b0, space2)
     uint bounce_index;
     uint max_bounces;
     uint beam_depth;
-    uint _probe_pad0;
+    uint emissive_samples;
     uint _probe_pad1;
     uint _probe_pad2;
     float4 sun_direction_intensity;
@@ -168,6 +169,21 @@ float3 probe_sphere_direction(uint probe_index, uint sample_index)
     float phi = 2.0f * PROBE_PI * xi.y;
     float radius = sqrt(max(0.0f, 1.0f - z * z));
     return float3(radius * cos(phi), radius * sin(phi), z);
+}
+
+void probe_sh_basis(float3 direction, out float basis[9])
+{
+    direction = normalize(direction);
+    float x = direction.x, y = direction.y, z = direction.z;
+    basis[0] = 0.2820947918f;
+    basis[1] = 0.4886025119f * y;
+    basis[2] = 0.4886025119f * z;
+    basis[3] = 0.4886025119f * x;
+    basis[4] = 1.0925484306f * x * y;
+    basis[5] = 1.0925484306f * y * z;
+    basis[6] = 0.3153915653f * (3.0f * z * z - 1.0f);
+    basis[7] = 1.0925484306f * x * z;
+    basis[8] = 0.5462742153f * (x * x - y * y);
 }
 
 float3 probe_safe_inverse(float3 direction)
@@ -325,9 +341,16 @@ GPU_BIND_U(1, 1) RWStructuredBuffer<ProbeRayState> ProbeStatesOut : register(u1,
 GPU_BIND_U(2, 1) RWStructuredBuffer<uint> ProbeCountersBounce : register(u2, space1);
 #define PROBE_NODES ProbeNodesBounce
 #define PROBE_TRIANGLES ProbeTrianglesBounce
+#elif defined(BUILD_PROBE_EMISSIVE_CS)
+GPU_BIND_T(0, 0) StructuredBuffer<float4> ProbePositionsEmissive : register(t0, space0);
+GPU_BIND_T(1, 0) StructuredBuffer<PackedProbeNode> ProbeNodesEmissive : register(t1, space0);
+GPU_BIND_T(2, 0) StructuredBuffer<PackedProbeTriangle> ProbeTrianglesEmissive : register(t2, space0);
+GPU_BIND_U(0, 1) RWStructuredBuffer<float4> ProbeCoefficientsEmissive : register(u0, space1);
+#define PROBE_NODES ProbeNodesEmissive
+#define PROBE_TRIANGLES ProbeTrianglesEmissive
 #endif
 
-#if defined(BUILD_PROBE_VALIDATE_CS) || defined(BUILD_PROBE_PRIMARY_CS) || defined(BUILD_PROBE_BOUNCE_CS)
+#if defined(BUILD_PROBE_VALIDATE_CS) || defined(BUILD_PROBE_PRIMARY_CS) || defined(BUILD_PROBE_BOUNCE_CS) || defined(BUILD_PROBE_EMISSIVE_CS)
 bool probe_trace_any(ProbeTraceRay ray)
 {
     uint node_index = 0u;
@@ -472,6 +495,84 @@ bool probe_trace_closest(ProbeTraceRay ray, out ProbeTraceHit hit)
 }
 #endif
 
+
+#if defined(BUILD_PROBE_EMISSIVE_CS)
+[numthreads(64, 1, 1)]
+void probe_emissive_cs(uint3 id : SV_DispatchThreadID)
+{
+    uint probe_index = id.x;
+    if (probe_index >= probe_count || emissive_samples == 0u || bake_params.w <= 0.0f)
+        return;
+    if (ProbeCoefficientsEmissive[probe_index * 9u].w <= 0.0f)
+        return;
+
+    float3 position = ProbePositionsEmissive[probe_index].xyz;
+    float3 sums[9];
+    [unroll] for (uint coefficient = 0u; coefficient < 9u; ++coefficient)
+        sums[coefficient] = 0.0f;
+
+    uint seed = probe_hash(probe_index * 0x9e3779b9u + 0x6a09e667u);
+    [loop] for (uint sample = 0u; sample < emissive_samples; ++sample) {
+        float target = probe_random(seed) * bake_params.w;
+        uint lo = 0u, hi = triangle_count;
+        while (lo < hi) {
+            uint mid = lo + (hi - lo) / 2u;
+            if (ProbeTrianglesEmissive[mid].emissive.w > target)
+                hi = mid;
+            else
+                lo = mid + 1u;
+        }
+        if (lo >= triangle_count)
+            continue;
+
+        PackedProbeTriangle tri = ProbeTrianglesEmissive[lo];
+        float previous = lo == 0u ? 0.0f : ProbeTrianglesEmissive[lo - 1u].emissive.w;
+        float triangle_weight = tri.emissive.w - previous;
+        float area = 0.5f * length(cross(tri.edge1.xyz, tri.edge2.xyz));
+        if (triangle_weight <= 0.0f || area <= 1.0e-10f)
+            continue;
+
+        float root = sqrt(probe_random(seed));
+        float bary = probe_random(seed);
+        float3 light_position = tri.a.xyz + tri.edge1.xyz * (root * (1.0f - bary)) +
+            tri.edge2.xyz * (root * bary);
+        float3 delta = light_position - position;
+        float distance2 = dot(delta, delta);
+        if (distance2 <= bake_params.x * bake_params.x)
+            continue;
+        float distance = sqrt(distance2);
+        float3 direction = delta / distance;
+        float emitter_cosine = saturate(dot(normalize(tri.normal.xyz), -direction));
+        if (emitter_cosine <= 0.0f)
+            continue;
+
+        ProbeTraceRay shadow = probe_make_ray(position + direction * bake_params.x,
+            direction, bake_params.x, max(bake_params.x, distance - 2.0f * bake_params.x));
+        if (probe_trace_any(shadow))
+            continue;
+
+        float pdf_area = (triangle_weight / bake_params.w) / area;
+        float pdf_solid_angle = pdf_area * distance2 / emitter_cosine;
+        if (pdf_solid_angle <= 1.0e-12f)
+            continue;
+
+        float3 contribution = max(tri.emissive.rgb, 0.0f) / pdf_solid_angle;
+        float basis[9];
+        probe_sh_basis(direction, basis);
+        [unroll] for (uint coefficient = 0u; coefficient < 9u; ++coefficient)
+            sums[coefficient] += contribution * basis[coefficient];
+    }
+
+    float inv_samples = rcp((float)emissive_samples);
+    [unroll] for (uint coefficient = 0u; coefficient < 9u; ++coefficient) {
+        uint index = probe_index * 9u + coefficient;
+        float4 value = ProbeCoefficientsEmissive[index];
+        value.rgb += sums[coefficient] * inv_samples;
+        ProbeCoefficientsEmissive[index] = value;
+    }
+}
+#endif
+
 #if defined(PROBE_NODES)
 #undef PROBE_NODES
 #undef PROBE_TRIANGLES
@@ -557,7 +658,7 @@ void probe_primary_cs(uint3 id : SV_DispatchThreadID)
     state.position = float4(ray.origin + ray.direction * hit.t, 0.0f);
     state.normal = float4(hit.normal, 0.0f);
     state.throughput = float4(hit.albedo / PROBE_PI, 0.0f);
-    state.radiance = float4(hit.emissive, 0.0f);
+    state.radiance = emissive_samples == 0u ? float4(hit.emissive, 0.0f) : 0.0f;
     state.meta = uint4(result_index, seed, 0u, 0u);
 
     uint slot;
@@ -758,15 +859,19 @@ void probe_reduce_cs(uint3 group_id : SV_GroupID, uint3 local_id : SV_GroupThrea
 
     float3 radiance = 0.0f;
     float luma = 0.0f;
+    float basis[9];
+    [unroll] for (uint coefficient = 0u; coefficient < 9u; ++coefficient)
+        basis[coefficient] = 0.0f;
     if (lane < samples_per_block) {
         radiance = ProbeSampleResultsReduce[probe_index * PROBE_BLOCK_SAMPLES + lane].rgb;
         luma = dot(radiance, float3(0.2126f, 0.7152f, 0.0722f));
+        probe_sh_basis(probe_sphere_direction(probe_index, sample_offset + lane), basis);
     }
+
     ProbeReduceRadiance[lane] = radiance;
     ProbeReduceLuma[lane] = luma;
     ProbeReduceLuma2[lane] = luma * luma;
     GroupMemoryBarrierWithGroupSync();
-
     for (uint stride = PROBE_BLOCK_SAMPLES / 2u; stride > 0u; stride >>= 1u) {
         if (lane < stride) {
             ProbeReduceRadiance[lane] += ProbeReduceRadiance[lane + stride];
@@ -776,42 +881,53 @@ void probe_reduce_cs(uint3 group_id : SV_GroupID, uint3 local_id : SV_GroupThrea
         GroupMemoryBarrierWithGroupSync();
     }
 
-    if (lane != 0u)
-        return;
-
     ProbeAccum accum = ProbeAccumsReduce[probe_index];
     bool valid = accum.stats.w > 0.0f;
-    if (!valid) {
-        ProbeCoefficientsReduce[probe_index * 9u] = float4(0, 0, 0, 0);
-        return;
+    if (lane == 0u && valid) {
+        accum.radiance_count.rgb += ProbeReduceRadiance[0];
+        accum.radiance_count.w += (float)samples_per_block;
+        accum.stats.x += ProbeReduceLuma[0];
+        accum.stats.y += ProbeReduceLuma2[0];
+
+        float n = max(accum.radiance_count.w, 1.0f);
+        float mean = accum.stats.x / n;
+        float variance = max(accum.stats.y / n - mean * mean, 0.0f);
+        float stderr = sqrt(variance / n);
+        bool checkpoint = (uint)n >= 256u && (uint)n < total_samples;
+        bool stable = checkpoint && stderr < 0.01f + 0.025f * abs(mean);
+        accum.stats.z = stable ? accum.stats.z + 1.0f : 0.0f;
+        bool active = (uint)n < total_samples && accum.stats.z < 2.0f;
+        ProbeAccumsReduce[probe_index] = accum;
+        if (active) {
+            uint ignored;
+            InterlockedAdd(ProbeCountersReduce[3], 1u, ignored);
+        }
     }
+    GroupMemoryBarrierWithGroupSync();
 
-    accum.radiance_count.rgb += ProbeReduceRadiance[0];
-    accum.radiance_count.w += (float)samples_per_block;
-    accum.stats.x += ProbeReduceLuma[0];
-    accum.stats.y += ProbeReduceLuma2[0];
-
-    float n = max(accum.radiance_count.w, 1.0f);
-    float mean = accum.stats.x / n;
-    float variance = max(accum.stats.y / n - mean * mean, 0.0f);
-    float stderr = sqrt(variance / n);
-    bool checkpoint = (uint)n >= 256u && (uint)n < total_samples;
-    bool stable = checkpoint && stderr < 0.01f + 0.025f * abs(mean);
-    accum.stats.z = stable ? accum.stats.z + 1.0f : 0.0f;
-    bool active = (uint)n < total_samples && accum.stats.z < 2.0f;
-    ProbeAccumsReduce[probe_index] = accum;
-
-    float3 average = accum.radiance_count.rgb / n;
-    ProbeCoefficientsReduce[probe_index * 9u + 0u] =
-        float4(average / PROBE_SH0, 1.0f);
-    ProbeCoefficientsReduce[probe_index * 9u + 1u] = 0.0f;
-    ProbeCoefficientsReduce[probe_index * 9u + 2u] = float4(0, 0, 0, n);
-    [unroll] for (uint coefficient = 3u; coefficient < 9u; ++coefficient)
-        ProbeCoefficientsReduce[probe_index * 9u + coefficient] = 0.0f;
-
-    if (active) {
-        uint ignored;
-        InterlockedAdd(ProbeCountersReduce[3], 1u, ignored);
+    float n = max(ProbeAccumsReduce[probe_index].radiance_count.w, 1.0f);
+    float previous_n = max(n - (float)samples_per_block, 0.0f);
+    [unroll] for (uint coefficient = 0u; coefficient < 9u; ++coefficient) {
+        ProbeReduceRadiance[lane] = lane < samples_per_block ? radiance * basis[coefficient] : 0.0f;
+        GroupMemoryBarrierWithGroupSync();
+        for (uint stride = PROBE_BLOCK_SAMPLES / 2u; stride > 0u; stride >>= 1u) {
+            if (lane < stride)
+                ProbeReduceRadiance[lane] += ProbeReduceRadiance[lane + stride];
+            GroupMemoryBarrierWithGroupSync();
+        }
+        if (lane == 0u && valid) {
+            uint index = probe_index * 9u + coefficient;
+            float4 old_value = ProbeCoefficientsReduce[index];
+            float3 old_sum = old_value.rgb * (previous_n / (4.0f * PROBE_PI));
+            float3 coefficient_value = (old_sum + ProbeReduceRadiance[0]) * (4.0f * PROBE_PI / n);
+            float metadata = old_value.w;
+            if (coefficient == 0u)
+                metadata = 1.0f;
+            if (coefficient == 2u)
+                metadata = n;
+            ProbeCoefficientsReduce[index] = float4(coefficient_value, metadata);
+        }
+        GroupMemoryBarrierWithGroupSync();
     }
 }
 #endif

@@ -256,14 +256,15 @@ bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, 
     return good;
 }
 
-bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm, const struct LIGHT *light, const SKY *sky, const char *path, uint64_t scene_hash, uint64_t layout_hash,
+bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const char *path, uint64_t scene_hash, uint64_t layout_hash,
                             uint64_t volume_hash, uint64_t beam_hash) {
-    if (!r || !m || !lm || !r->device || !light || light->type != LIGHT_DIRECTIONAL || !sky) return false;
+    if (!r || !m || !lm || !r->device || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics) return false;
 
     r->sun = light->directional;
     r->sun.direction = v3_normalize(r->sun.direction);
     if (v3_len_sq(r->sun.direction) <= 0.0f) return false;
     r->sky = *sky;
+    r->volumetrics = *volumetrics;
 
     CACHED_LIGHTMAP previous = {0};
     bool reuse = cache_read_partial(path, scene_hash, &previous);
@@ -304,7 +305,7 @@ bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual
         previous.volume_probes.probes = NULL;
         SDL_Log("B: reused cached volume probes");
     } else {
-        bool made = make_probe_grid(m, 4.0f, &volume_candidate) && bake_probe_grid(r, &volume_candidate, 1024u);
+        bool made = make_probe_grid(m, r->volumetrics.probe_spacing, &volume_candidate) && bake_probe_grid(r, &volume_candidate, r->volumetrics.probe_samples);
 
         if (!made) {
             free_probe_grid(&volume_candidate);
@@ -559,8 +560,8 @@ void r_event(RENDERER *r, const SDL_Event *event) {
     }
 }
 
-bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky) {
-    if (!r || !r->window || !light || light->type != LIGHT_DIRECTIONAL || !sky) return false;
+bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics) {
+    if (!r || !r->window || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics) return false;
 
     DIRECTIONAL_LIGHT sun = light->directional;
     sun.direction = v3_normalize(sun.direction);
@@ -589,7 +590,7 @@ bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky) {
     const MAT4 proj = m4_perspective(fov, aspect, znear, zfar);
     const MAT4 mvp = m4_mul(proj, view);
 
-    RENDER_FRAME frame = {.eye = eye, .right = right, .up = up, .forward = forward, .sun = sun, .sky = *sky, .tan_half_fov = tan_half, .aspect = aspect};
+    RENDER_FRAME frame = {.eye = eye, .right = right, .up = up, .forward = forward, .sun = sun, .sky = *sky, .volumetrics = *volumetrics, .tan_half_fov = tan_half, .aspect = aspect};
 
     memcpy(frame.mvp, mvp.m, sizeof(frame.mvp));
     memcpy(frame.view, view.m, sizeof(frame.view));

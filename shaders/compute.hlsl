@@ -18,6 +18,10 @@ GPU_BIND_B(0, 2) cbuffer VolumeData : register(b0, space2)
     uint4 height_debug;
     float4 beam_origin;
     float4 beam_step;
+    float4 volume_params;
+    float4 volume_radii;
+    uint4 volume_quality;
+    uint4 volume_strides;
 };
 
 static const uint BEAM_WIDTH = 64u;
@@ -234,7 +238,25 @@ float integrate_sun_grid(float3 world_origin, float3 world_direction,
     return integrated;
 }
 
-float3 volume_radiance(float3 p, float3 surface_position,
+float3 volume_sh_radiance(VolumeProbe probe, float3 direction)
+{
+    direction = normalize(direction);
+    float x = direction.x, y = direction.y, z = direction.z;
+    float g = clamp(volume_params.y, -0.99f, 0.99f);
+    float g2 = g * g;
+    float3 radiance = probe.coefficient[0].rgb * 0.2820947918f;
+    radiance += g * (probe.coefficient[1].rgb * (0.4886025119f * y) +
+                     probe.coefficient[2].rgb * (0.4886025119f * z) +
+                     probe.coefficient[3].rgb * (0.4886025119f * x));
+    radiance += g2 * (probe.coefficient[4].rgb * (1.0925484306f * x * y) +
+                      probe.coefficient[5].rgb * (1.0925484306f * y * z) +
+                      probe.coefficient[6].rgb * (0.3153915653f * (3.0f * z * z - 1.0f)) +
+                      probe.coefficient[7].rgb * (1.0925484306f * x * z) +
+                      probe.coefficient[8].rgb * (0.5462742153f * (x * x - y * y)));
+    return max(radiance, 0.0f);
+}
+
+float3 volume_radiance(float3 p, float3 scattering_direction, float3 surface_position,
                        float3 surface_normal, bool has_surface)
 {
     float3 coord = clamp((p - grid_origin_spacing.xyz) / grid_origin_spacing.w,
@@ -258,8 +280,8 @@ float3 volume_radiance(float3 p, float3 surface_position,
                                surface_normal) < -0.01f)
             continue;
         weight *= probe.position.w;
-        float3 indirect = probe.coefficient[0].rgb * 0.2820947918f;
-        radiance += max(indirect, 0.0f) * weight;
+        float3 indirect = volume_sh_radiance(probe, scattering_direction);
+        radiance += indirect * weight;
     }
     return radiance;
 }
@@ -276,7 +298,7 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     float3 minimum = grid_origin_spacing.xyz;
     float3 maximum = minimum + grid_origin_spacing.w *
         float3(grid_dims_width.xyz - 1u);
-    float enter = 0.0f, leave = 10000.0f;
+    float enter = 0.0f, leave = volume_params.w;
 
     // [unroll] for (uint axis = 0; axis < 3u; ++axis) {
     //
@@ -415,27 +437,27 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     float step_size = (leave-enter) * 0.25f;
     float3 sum = 0.0f;
     float sun_fraction = 0.0f;
-    float probe_transmission = exp(-eye_density.w * step_size);
+    float probe_transmission = exp(-volume_params.x * step_size);
     float probe_remaining = 1.0f;
     [unroll] for (uint i = 0; i < 4u; ++i) {
         float t = enter + (float(i) + 0.5f) * step_size;
         float integral = probe_remaining * (1.0f - probe_transmission);
-        sum += volume_radiance(eye_density.xyz + direction * t,
+        sum += volume_radiance(eye_density.xyz + direction * t, direction,
                                surface_position, surface_normal, depth > 0.0f) *
-               integral * 0.15f;
+               integral * volume_params.z;
         probe_remaining *= probe_transmission;
     }
-    float g = forward_g.w;
+    float g = volume_params.y;
     float cosine = dot(direction, normalize(sun_intensity.xyz));
     float hg = (1.0f - g*g) / (12.5663706144f *
         pow(max(1.0f + g*g - 2.0f*g*cosine, 0.001f), 1.5f));
     float sun_integral = integrate_sun_grid(eye_density.xyz, direction, enter, leave,
-                                            eye_density.w, sun_fraction);
+                                            volume_params.x, sun_fraction);
     sum += sun_integral * sun_intensity.w * hg * sun_color.rgb;
-    // float T = exp(-eye_density.w * (leave - enter));
+    // float T = exp(-volume_params.x * (leave - enter));
     // Output[id.xy] = float4(T.xxx, 1.0f);
     // return;
-    Output[id.xy] = float4(sum, exp(-eye_density.w * (leave-enter)));
+    Output[id.xy] = float4(sum, exp(-volume_params.x * (leave-enter)));
 }
 #elif defined(BUILD_PROBE_CS)
 #define probe_cs probe_cs_base

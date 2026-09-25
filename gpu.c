@@ -91,6 +91,8 @@ typedef struct VOLUME_UNIFORMS {
     float sun_intensity[4], sun_color[4], grid_origin_spacing[4];
     Uint32 grid_dims_width[4], height_debug[4];
     float beam_origin[4], beam_step[4];
+    float volume_params[4], volume_radii[4];
+    Uint32 volume_quality[4], volume_strides[4];
 } VOLUME_UNIFORMS;
 
 struct RENDER_MATERIAL {
@@ -2330,7 +2332,6 @@ bool bake_lightmap(RENDERER *r, const BVH *tree, const LIGHTMAP *lm, const PROBE
 }
 
 #define PROBE_BLOCK_SAMPLES 128u
-#define PROBE_MAX_SAMPLES 1024u
 #define PROBE_MAX_BOUNCES 3u
 #define PROBE_PACKED_NODE_BYTES 32u
 #define PROBE_PACKED_TRIANGLE_BYTES 80u
@@ -2349,7 +2350,7 @@ typedef struct PROBE_WAVEFRONT_UNIFORMS {
     Uint32 max_bounces;
     Uint32 beam_depth;
 
-    Uint32 pad0, pad1, pad2;
+    Uint32 emissive_samples, pad1, pad2;
 
     float sun_direction_intensity[4];
     float sun_color_radius[4];
@@ -2381,6 +2382,7 @@ typedef struct PROBE_WAVEFRONT_PIPELINES {
     PROBE_WAVEFRONT_STAGE primary;
     PROBE_WAVEFRONT_STAGE bounce;
     PROBE_WAVEFRONT_STAGE reduce;
+    PROBE_WAVEFRONT_STAGE emissive;
 } PROBE_WAVEFRONT_PIPELINES;
 
 static PROBE_WAVEFRONT_BUFFER probe_wavefront_uploaded(RENDERER *r, const void *data, uint64_t bytes, uint32_t stride) {
@@ -2461,10 +2463,12 @@ static bool probe_wavefront_pipelines_init(RENDERER *r, PROBE_WAVEFRONT_PIPELINE
            probe_wavefront_stage_init(r, &p->validate, "probe_validate_cs", "BUILD_PROBE_VALIDATE_CS", 3, 1) &&
            probe_wavefront_stage_init(r, &p->primary, "probe_primary_cs", "BUILD_PROBE_PRIMARY_CS", 4, 3) &&
            probe_wavefront_stage_init(r, &p->bounce, "probe_bounce_cs", "BUILD_PROBE_BOUNCE_CS", 4, 3) &&
-           probe_wavefront_stage_init(r, &p->reduce, "probe_reduce_cs", "BUILD_PROBE_REDUCE_CS", 1, 3);
+           probe_wavefront_stage_init(r, &p->reduce, "probe_reduce_cs", "BUILD_PROBE_REDUCE_CS", 1, 3) &&
+           probe_wavefront_stage_init(r, &p->emissive, "probe_emissive_cs", "BUILD_PROBE_EMISSIVE_CS", 3, 1);
 }
 
 static void probe_wavefront_pipelines_deinit(RENDERER *r, PROBE_WAVEFRONT_PIPELINES *p) {
+    probe_wavefront_stage_deinit(r, &p->emissive);
     probe_wavefront_stage_deinit(r, &p->reduce);
     probe_wavefront_stage_deinit(r, &p->bounce);
     probe_wavefront_stage_deinit(r, &p->primary);
@@ -2545,7 +2549,7 @@ static uint32_t probe_wavefront_groups64(uint64_t threads) {
     return groups && groups <= UINT32_MAX ? (uint32_t)groups : 0u;
 }
 
-static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(const BVH *tree, const BEAM_GRID *beams, DIRECTIONAL_LIGHT sun, SKY sky, uint32_t probe_count, uint32_t sample_offset, uint32_t block_samples,
+static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(const BVH *tree, const BEAM_GRID *beams, DIRECTIONAL_LIGHT sun, SKY sky, VOLUMETRICS_LIGHTING volumetrics, uint32_t probe_count, uint32_t sample_offset, uint32_t block_samples,
                                                      uint32_t bounce_index) {
     const BVH_NODE *root = &tree->nodes[0];
     float scene_scale = fmaxf(root->max[0] - root->min[0], fmaxf(root->max[1] - root->min[1], root->max[2] - root->min[2]));
@@ -2557,12 +2561,13 @@ static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(const BVH *tree, const BEAM
     return (PROBE_WAVEFRONT_UNIFORMS){.probe_count = probe_count,
                                       .sample_offset = sample_offset,
                                       .samples_per_block = block_samples,
-                                      .total_samples = PROBE_MAX_SAMPLES,
+                                      .total_samples = volumetrics.probe_samples,
                                       .node_count = tree->node_count,
                                       .triangle_count = tree->triangle_count,
                                       .bounce_index = bounce_index,
                                       .max_bounces = PROBE_MAX_BOUNCES,
                                       .beam_depth = beams->depth,
+                                      .emissive_samples = volumetrics.emissive_samples,
                                       .sun_direction_intensity = {sun.direction.x, sun.direction.y, sun.direction.z, sun.intensity},
                                       .sun_color_radius = {sun.color.x, sun.color.y, sun.color.z, sun.angular_radius},
                                       .sky_zenith = {sky.zenith.x, sky.zenith.y, sky.zenith.z, 1.0f},
@@ -2673,7 +2678,7 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
     const uint32_t prep_groups = probe_wavefront_groups64(tree->node_count > tree->triangle_count ? tree->node_count : tree->triangle_count);
     const uint32_t probe_groups = probe_wavefront_groups64(probe_count);
     const uint32_t ray_groups = probe_wavefront_groups64(max_rays);
-    PROBE_WAVEFRONT_UNIFORMS uniforms = probe_wavefront_data(tree, beams, r->sun, r->sky, probe_count, 0u, PROBE_BLOCK_SAMPLES, 0u);
+    PROBE_WAVEFRONT_UNIFORMS uniforms = probe_wavefront_data(tree, beams, r->sun, r->sky, r->volumetrics, probe_count, 0u, PROBE_BLOCK_SAMPLES, 0u);
 
     if (!prep_groups || !probe_groups || !ray_groups) good = false;
 
@@ -2703,13 +2708,15 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
 
     uint32_t completed = 0u;
     uint32_t active = probe_count;
+    const uint32_t max_samples = r->volumetrics.probe_samples;
 
-    if (good && progress && !progress(0u, PROBE_MAX_SAMPLES, active)) good = false;
+    if (!max_samples || max_samples > 65536u) good = false;
+    if (good && progress && !progress(0u, max_samples, active)) good = false;
 
-    while (good && completed < PROBE_MAX_SAMPLES && active) {
-        const uint32_t block = PROBE_MAX_SAMPLES - completed > PROBE_BLOCK_SAMPLES ? PROBE_BLOCK_SAMPLES : PROBE_MAX_SAMPLES - completed;
+    while (good && completed < max_samples && active) {
+        const uint32_t block = max_samples - completed > PROBE_BLOCK_SAMPLES ? PROBE_BLOCK_SAMPLES : max_samples - completed;
 
-        uniforms = probe_wavefront_data(tree, beams, r->sun, r->sky, probe_count, completed, block, 0u);
+        uniforms = probe_wavefront_data(tree, beams, r->sun, r->sky, r->volumetrics, probe_count, completed, block, 0u);
 
         NriCommandAllocator *allocator = NULL;
         NriCommandBuffer *cmd = NULL;
@@ -2767,11 +2774,25 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
         r->core.UnmapBuffer(counter_readback);
         completed += block;
 
-        const uint32_t progress_total = active ? PROBE_MAX_SAMPLES : completed;
+        const uint32_t progress_total = active ? max_samples : completed;
 
         if (progress && !progress(completed, progress_total, active)) good = false;
 
-        SDL_Log("B: probe wavefront %u/%u spp | %u active probes", completed, PROBE_MAX_SAMPLES, active);
+        SDL_Log("B: probe wavefront %u/%u spp | %u active probes", completed, max_samples, active);
+    }
+
+    if (good && uniforms.emissive_samples && tree->emissive_weight > 0.0f) {
+        NriCommandAllocator *allocator = NULL;
+        NriCommandBuffer *cmd = NULL;
+        good = begin_commands(r, &allocator, &cmd) == NriResult_SUCCESS;
+
+        if (good) {
+            PROBE_WAVEFRONT_BUFFER *emissive_reads[] = {&position_buffer, &packed_nodes, &packed_triangles};
+            PROBE_WAVEFRONT_BUFFER *emissive_writes[] = {&coefficients};
+            good = probe_wavefront_dispatch(r, cmd, &pipelines.emissive, emissive_reads, emissive_writes, &uniforms, probe_groups);
+            if (good) good = submit_commands(r, allocator, cmd);
+            else abort_commands(r, allocator, cmd);
+        }
     }
 
     if (good) {
@@ -3101,18 +3122,22 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
 
     RENDERER *r = fx->owner;
 
-    const VOLUME_UNIFORMS u = {.eye_density = {frame->eye.x, frame->eye.y, frame->eye.z, 0.045f},
+    const VOLUME_UNIFORMS u = {.eye_density = {frame->eye.x, frame->eye.y, frame->eye.z, 0.0f},
                                .right_tan = {frame->right.x * frame->tan_half_fov * frame->aspect, frame->right.y * frame->tan_half_fov * frame->aspect,
                                              frame->right.z * frame->tan_half_fov * frame->aspect, 0},
                                .up_tan = {frame->up.x * frame->tan_half_fov, frame->up.y * frame->tan_half_fov, frame->up.z * frame->tan_half_fov, 0},
-                               .forward_g = {frame->forward.x, frame->forward.y, frame->forward.z, 0.55f},
+                               .forward_g = {frame->forward.x, frame->forward.y, frame->forward.z, 0.0f},
                                .sun_intensity = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, frame->sun.intensity},
                                .sun_color = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, 1.0f},
                                .grid_origin_spacing = {grid->origin.x, grid->origin.y, grid->origin.z, grid->spacing},
                                .grid_dims_width = {grid->count_x, grid->count_y, grid->count_z, fx->ao_width},
                                .height_debug = {fx->ao_height, fx->debug_view, beam_grid->depth, 0},
                                .beam_origin = {beam_grid->origin.x, beam_grid->origin.y, beam_grid->origin.z, 0},
-                               .beam_step = {beam_grid->step.x, beam_grid->step.y, beam_grid->step.z, 0}};
+                               .beam_step = {beam_grid->step.x, beam_grid->step.y, beam_grid->step.z, 0},
+                               .volume_params = {frame->volumetrics.density, frame->volumetrics.anisotropy, frame->volumetrics.indirect_intensity, frame->volumetrics.max_distance},
+                               .volume_radii = {frame->volumetrics.center_radius, frame->volumetrics.middle_radius, 0.0f, 0.0f},
+                               .volume_quality = {frame->volumetrics.center_steps, frame->volumetrics.middle_steps, frame->volumetrics.peripheral_steps, 0u},
+                               .volume_strides = {frame->volumetrics.center_stride, frame->volumetrics.middle_stride, frame->volumetrics.peripheral_stride, 0u}};
 
     if (!bind_volume_resources(r, cmd, fx->normal_depth, fx->depth_sampler, probes, beams, fx->volume, &u, sizeof(u))) return false;
 

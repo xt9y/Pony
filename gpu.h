@@ -76,6 +76,7 @@ typedef struct RENDER_FRAME {
     VEC3 forward;
     DIRECTIONAL_LIGHT sun;
     SKY sky;
+    VOLUMETRICS_LIGHTING volumetrics;
     float tan_half_fov;
     float aspect;
 } RENDER_FRAME;
@@ -205,6 +206,7 @@ struct RENDERER {
     VEC3 target;
     DIRECTIONAL_LIGHT sun;
     SKY sky;
+    VOLUMETRICS_LIGHTING volumetrics;
 
     bool dragging;
     bool show_debug;
