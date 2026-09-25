@@ -520,6 +520,7 @@ struct BvhTriangle
     float4 b;
     float4 c;
     float4 normal;
+    float4 emissive;
 };
 
 struct TraceRay
@@ -536,6 +537,7 @@ struct TraceHit
     float3 normal;
     float3 albedo;
     uint triangle_index;
+    float3 emissive;
 };
 
 struct BakeSample
@@ -590,6 +592,7 @@ GPU_BIND_B(0, 2) cbuffer BakeData : register(b0, space2)
     float4 bake_params;
     float4 probe_origin_spacing;
     uint4 probe_dims_mode;
+    float4 emissive_data;
 };
 
 static const float PI = 3.14159265358979323846f;
@@ -791,6 +794,7 @@ bool trace_closest(TraceRay ray, out TraceHit hit)
     hit.normal = 0.0f;
     hit.albedo = 0.0f;
     hit.triangle_index = INVALID_NODE;
+    hit.emissive = 0.0f;
 
     while (node_index != INVALID_NODE)
     {
@@ -823,6 +827,7 @@ bool trace_closest(TraceRay ray, out TraceHit hit)
                                              Triangles[tri_index].b.w,
                                              Triangles[tri_index].c.w));
                 hit.triangle_index = tri_index;
+                hit.emissive = max(Triangles[tri_index].emissive.rgb, 0.0f);
                 found = true;
             }
             node_index = node.meta.y;
@@ -849,6 +854,72 @@ float3 direct_sun(float3 position, float3 normal, inout uint seed)
         return 0.0f;
 
     return sun_color_radius.rgb * (sun_direction_intensity.w * n_dot_l);
+}
+float3 direct_emissive(float3 position, float3 normal, inout uint seed)
+{
+    const float total_weight = emissive_data.x;
+    const uint count = (uint)emissive_data.y;
+    if (total_weight <= 0.0f || count == 0u)
+        return 0.0f;
+
+    const float target = random01(seed) * total_weight;
+    uint lo = 0u;
+    uint hi = count;
+    while (lo < hi)
+    {
+        uint mid = lo + (hi - lo) / 2u;
+        if (Triangles[mid].emissive.w > target)
+            hi = mid;
+        else
+            lo = mid + 1u;
+    }
+    if (lo >= count)
+        return 0.0f;
+
+    BvhTriangle tri = Triangles[lo];
+    const float previous = lo == 0u ? 0.0f : Triangles[lo - 1u].emissive.w;
+    const float triangle_weight = tri.emissive.w - previous;
+    if (triangle_weight <= 0.0f)
+        return 0.0f;
+
+    const float3 edge1 = tri.b.xyz - tri.a.xyz;
+    const float3 edge2 = tri.c.xyz - tri.a.xyz;
+    const float area = 0.5f * length(cross(edge1, edge2));
+    if (area <= 1.0e-10f)
+        return 0.0f;
+
+    const float root = sqrt(random01(seed));
+    const float bary = random01(seed);
+    const float3 light_position = tri.a.xyz * (1.0f - root) +
+        tri.b.xyz * (root * (1.0f - bary)) + tri.c.xyz * (root * bary);
+    const float3 delta = light_position - position;
+    const float distance2 = dot(delta, delta);
+    if (distance2 <= bake_params.x * bake_params.x)
+        return 0.0f;
+
+    const float distance = sqrt(distance2);
+    const float3 direction = delta / distance;
+    const float receiver_cosine = saturate(dot(normal, direction));
+    const float emitter_cosine = abs(dot(normalize(tri.normal.xyz), -direction));
+    if (receiver_cosine <= 0.0f || emitter_cosine <= 0.0f)
+        return 0.0f;
+
+    TraceRay shadow = make_trace_ray(position + normal * bake_params.x,
+        direction, bake_params.x, max(bake_params.x, distance - 2.0f * bake_params.x));
+    if (trace_any(shadow))
+        return 0.0f;
+
+    const float pdf_area = (triangle_weight / total_weight) / area;
+    if (pdf_area <= 1.0e-12f)
+        return 0.0f;
+
+    return max(tri.emissive.rgb, 0.0f) *
+        (receiver_cosine * emitter_cosine / max(distance2 * pdf_area, 1.0e-8f));
+}
+
+float3 direct_lighting(float3 position, float3 normal, inout uint seed)
+{
+    return direct_sun(position, normal, seed) + direct_emissive(position, normal, seed);
 }
 
 #if (defined(BUILD_LIGHTMAP_CS) || defined(BUILD_LIGHTMAP_WAVE_CS))
@@ -891,7 +962,7 @@ float3 trace_path_core(float3 position, float3 normal, inout uint seed,
     for (uint bounce = 0; bounce < max_bounces; ++bounce)
     {
         if (bounce != 0u || include_primary_sun)
-            radiance += throughput * direct_sun(position, normal, seed);
+            radiance += throughput * direct_lighting(position, normal, seed);
 
         float3 direction = cosine_hemisphere(normal, seed);
         TraceRay ray = make_trace_ray(position + normal * bake_params.x,
@@ -1008,10 +1079,10 @@ void lightmap_cs(uint3 dispatch_id : SV_DispatchThreadID)
         uint pixel = asuint(sample.position.w);
         float3 normal = normalize(sample.normal.xyz);
         uint seed = hash_u32(pixel ^ 0x4f03d2b1u);
-        float3 a = direct_sun(sample.position.xyz, normal, seed);
-        float3 b = direct_sun(sample.position.xyz, normal, seed);
-        float3 c = direct_sun(sample.position.xyz, normal, seed);
-        float3 d = direct_sun(sample.position.xyz, normal, seed);
+        float3 a = direct_lighting(sample.position.xyz, normal, seed);
+        float3 b = direct_lighting(sample.position.xyz, normal, seed);
+        float3 c = direct_lighting(sample.position.xyz, normal, seed);
+        float3 d = direct_lighting(sample.position.xyz, normal, seed);
         float3 sum = a + b + c + d;
         uint count = 4u;
         float3 mean = sum * 0.25f;
@@ -1019,7 +1090,7 @@ void lightmap_cs(uint3 dispatch_id : SV_DispatchThreadID)
             length(c - mean) + length(d - mean) > 0.02f)
         {
             for (uint i = 0u; i < 12u; ++i)
-                sum += direct_sun(sample.position.xyz, normal, seed);
+                sum += direct_lighting(sample.position.xyz, normal, seed);
             count = 16u;
         }
         Output[uint2(pixel % lightmap_width, pixel / lightmap_width)] =
@@ -1190,7 +1261,7 @@ void probe_cs(uint3 group_id : SV_GroupID, uint3 local_id : SV_GroupThreadID)
                 float3 incoming;
                 if (trace_closest(ray, hit)) {
                     float3 position = ray.origin + ray.direction * hit.t;
-                    incoming = trace_path(position, hit.normal, seed) * (hit.albedo / PI);
+                    incoming = hit.emissive + trace_path(position, hit.normal, seed) * (hit.albedo / PI);
                 } else {
                     incoming = sky_radiance(d);
                 }

@@ -211,6 +211,7 @@ typedef struct BVH_TRIANGLE {
     float b[4];
     float c[4];
     float normal[4];
+    float emissive[4]; /* rgb radiance + cumulative importance */
 } BVH_TRIANGLE;
 
 typedef struct BVH_NODE {
@@ -225,6 +226,7 @@ typedef struct BVH {
     uint32_t node_capacity;
     BVH_TRIANGLE *triangles;
     uint32_t triangle_count;
+    float emissive_weight;
 } BVH;
 
 typedef struct TRACE_RAY {

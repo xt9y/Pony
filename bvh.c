@@ -23,7 +23,7 @@ static float srgb_linear(float value) {
     return value <= 0.04045f ? value / 12.92f : powf((value + 0.055f) / 1.055f, 2.4f);
 }
 
-static VEC3 texture_color(const GLTF_SCENE *visual, SDL_Surface **images, int32_t texture_index, const GLTF_VERTEX *vertices) {
+static VEC3 texture_color_uv(const GLTF_SCENE *visual, SDL_Surface **images, int32_t texture_index, float u, float v) {
 
     if (texture_index < 0 || (uint32_t)texture_index >= visual->texture_count) return v3(1, 1, 1);
 
@@ -32,8 +32,6 @@ static VEC3 texture_color(const GLTF_SCENE *visual, SDL_Surface **images, int32_
     if (image < 0 || (uint32_t)image >= visual->image_count || !images[image]) return v3(1, 1, 1);
 
     const SDL_Surface *surface = images[image];
-    float u = (vertices[0].u + vertices[1].u + vertices[2].u) / 3.0f;
-    float v = (vertices[0].v + vertices[1].v + vertices[2].v) / 3.0f;
     u -= floorf(u);
     v -= floorf(v);
 
@@ -42,6 +40,25 @@ static VEC3 texture_color(const GLTF_SCENE *visual, SDL_Surface **images, int32_
     const unsigned char *pixel = (const unsigned char *)surface->pixels + (size_t)y * surface->pitch + (size_t)x * 4u;
 
     return v3(srgb_linear(pixel[0] / 255.0f), srgb_linear(pixel[1] / 255.0f), srgb_linear(pixel[2] / 255.0f));
+}
+
+static VEC3 texture_color(const GLTF_SCENE *visual, SDL_Surface **images, int32_t texture_index, const GLTF_VERTEX *vertices) {
+    const float u = (vertices[0].u + vertices[1].u + vertices[2].u) / 3.0f;
+    const float v = (vertices[0].v + vertices[1].v + vertices[2].v) / 3.0f;
+
+    return texture_color_uv(visual, images, texture_index, u, v);
+}
+
+static VEC3 texture_triangle_average(const GLTF_SCENE *visual, SDL_Surface **images, int32_t texture_index, const GLTF_VERTEX *vertices) {
+    if (texture_index < 0) return v3(1, 1, 1);
+
+    VEC3 sum = v3(0, 0, 0);
+
+    for (uint32_t i = 0; i < 3u; ++i)
+        sum = v3_add(sum, texture_color_uv(visual, images, texture_index, vertices[i].u, vertices[i].v));
+
+    sum = v3_add(sum, texture_color(visual, images, texture_index, vertices));
+    return v3_scale(sum, 0.25f);
 }
 
 static void release_images(SDL_Surface **images, uint32_t count) {
@@ -545,23 +562,31 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
         if (v3_dot(n, n) <= BVH_EPSILON) n = v3_normalize(v3_cross(v3_sub(b, a), v3_sub(c, a)));
 
         VEC3 albedo = v3(0.72f, 0.72f, 0.72f);
+        VEC3 emissive = v3(0, 0, 0);
 
         if (visual && i < visual->vertex_count / 3u) {
             uint32_t material = visual->vertices[i * 3u].material;
 
             if (material < visual->material_count) {
                 const GLTF_MATERIAL *mat = &visual->materials[material];
+                const GLTF_VERTEX *triangle = &visual->vertices[i * 3u];
                 albedo = v3(mat->base_color[0] * (1.0f - mat->metallic), mat->base_color[1] * (1.0f - mat->metallic), mat->base_color[2] * (1.0f - mat->metallic));
+                emissive = v3(mat->emissive[0], mat->emissive[1], mat->emissive[2]);
 
                 if (images) {
-
-                    VEC3 tex = texture_color(visual, images, mat->base_color_texture, &visual->vertices[i * 3u]);
+                    VEC3 tex = texture_color(visual, images, mat->base_color_texture, triangle);
+                    VEC3 emissive_tex = texture_triangle_average(visual, images, mat->emissive_texture, triangle);
                     albedo = v3(albedo.x * tex.x, albedo.y * tex.y, albedo.z * tex.z);
+                    emissive = v3(emissive.x * emissive_tex.x, emissive.y * emissive_tex.y, emissive.z * emissive_tex.z);
                 }
             }
         }
 
-        build[i].gpu = (BVH_TRIANGLE){.a = {a.x, a.y, a.z, albedo.x}, .b = {b.x, b.y, b.z, albedo.y}, .c = {c.x, c.y, c.z, albedo.z}, .normal = {n.x, n.y, n.z, 0.0f}};
+        build[i].gpu = (BVH_TRIANGLE){.a = {a.x, a.y, a.z, albedo.x},
+                                      .b = {b.x, b.y, b.z, albedo.y},
+                                      .c = {c.x, c.y, c.z, albedo.z},
+                                      .normal = {n.x, n.y, n.z, 0.0f},
+                                      .emissive = {emissive.x, emissive.y, emissive.z, 0.0f}};
         build[i].centroid = v3_scale(v3_add(v3_add(a, b), c), 1.0f / 3.0f);
         build[i].min = v3(fminf(a.x, fminf(b.x, c.x)), fminf(a.y, fminf(b.y, c.y)), fminf(a.z, fminf(b.z, c.z)));
         build[i].max = v3(fmaxf(a.x, fmaxf(b.x, c.x)), fmaxf(a.y, fmaxf(b.y, c.y)), fmaxf(a.z, fmaxf(b.z, c.z)));
@@ -592,6 +617,28 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
     for (uint32_t i = 0; i < count; ++i)
         tree->triangles[i] = build[i].gpu;
     free(build);
+
+    float emissive_weight = 0.0f;
+    uint32_t emissive_triangles = 0u;
+
+    for (uint32_t i = 0; i < count; ++i) {
+        BVH_TRIANGLE *tri = &tree->triangles[i];
+        const VEC3 a = v3(tri->a[0], tri->a[1], tri->a[2]);
+        const VEC3 b = v3(tri->b[0], tri->b[1], tri->b[2]);
+        const VEC3 c = v3(tri->c[0], tri->c[1], tri->c[2]);
+        const VEC3 e = v3(tri->emissive[0], tri->emissive[1], tri->emissive[2]);
+        const float area = 0.5f * sqrtf(v3_len_sq(v3_cross(v3_sub(b, a), v3_sub(c, a))));
+        const float luminance = fmaxf(0.0f, 0.2126f * e.x + 0.7152f * e.y + 0.0722f * e.z);
+        const float weight = area * luminance;
+
+        if (weight > 0.0f) ++emissive_triangles;
+        emissive_weight += weight;
+        tri->emissive[3] = emissive_weight;
+    }
+
+    tree->emissive_weight = emissive_weight;
+    if (emissive_triangles)
+        SDL_Log("B: emissive geometry: %u triangles | %.3f importance", emissive_triangles, emissive_weight);
 
     thread_node(tree, 0u, UINT32_MAX);
 

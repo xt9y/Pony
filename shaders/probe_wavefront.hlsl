@@ -32,6 +32,7 @@ struct SourceBvhTriangle
     float4 b;
     float4 c;
     float4 normal;
+    float4 emissive;
 };
 
 struct PackedProbeNode
@@ -65,6 +66,7 @@ struct ProbeTraceHit
     float3 normal;
     float3 albedo;
     uint triangle_index;
+    float3 emissive;
 };
 
 struct ProbeRayState
@@ -434,6 +436,7 @@ bool probe_trace_closest_threaded(ProbeTraceRay ray, out ProbeTraceHit hit)
     hit.normal = 0.0f;
     hit.albedo = 0.0f;
     hit.triangle_index = PROBE_INVALID;
+    hit.emissive = 0.0f;
 
     while (node_index != PROBE_INVALID) {
         PackedProbeNode node = PROBE_NODES[node_index];
@@ -460,6 +463,7 @@ bool probe_trace_closest_threaded(ProbeTraceRay ray, out ProbeTraceHit hit)
                 hit.normal = normal;
                 hit.albedo = saturate(float3(tri.a.w, tri.edge1.w, tri.edge2.w));
                 hit.triangle_index = triangle_index;
+                hit.emissive = max(tri.emissive.rgb, 0.0f);
                 found = true;
             }
             node_index = node.meta1;
@@ -481,6 +485,7 @@ bool probe_trace_closest(ProbeTraceRay ray, out ProbeTraceHit hit)
     hit.normal = 0.0f;
     hit.albedo = 0.0f;
     hit.triangle_index = PROBE_INVALID;
+    hit.emissive = 0.0f;
 
     while (node_index != PROBE_INVALID) {
         PackedProbeNode node = PROBE_NODES[node_index];
@@ -507,6 +512,7 @@ bool probe_trace_closest(ProbeTraceRay ray, out ProbeTraceHit hit)
                 hit.normal = normal;
                 hit.albedo = saturate(float3(tri.a.w, tri.edge1.w, tri.edge2.w));
                 hit.triangle_index = triangle_index;
+                hit.emissive = max(tri.emissive.rgb, 0.0f);
                 found = true;
             }
             node_index = stack_size ? stack[--stack_size] : PROBE_INVALID;
@@ -706,6 +712,64 @@ float3 probe_direct_sun(float3 position, float3 normal, inout uint seed)
 
     return sun_color_radius.rgb * (sun_direction_intensity.w * n_dot_l);
 }
+float3 probe_direct_emissive(float3 position, float3 normal, inout uint seed)
+{
+    const float total_weight = bake_params.w;
+    if (total_weight <= 0.0f || triangle_count == 0u)
+        return 0.0f;
+
+    const float target = probe_random(seed) * total_weight;
+    uint lo = 0u;
+    uint hi = triangle_count;
+    while (lo < hi)
+    {
+        uint mid = lo + (hi - lo) / 2u;
+        if (ProbeTrianglesBounce[mid].emissive.w > target)
+            hi = mid;
+        else
+            lo = mid + 1u;
+    }
+    if (lo >= triangle_count)
+        return 0.0f;
+
+    PackedProbeTriangle tri = ProbeTrianglesBounce[lo];
+    const float previous = lo == 0u ? 0.0f : ProbeTrianglesBounce[lo - 1u].emissive.w;
+    const float triangle_weight = tri.emissive.w - previous;
+    if (triangle_weight <= 0.0f)
+        return 0.0f;
+
+    const float area = 0.5f * length(cross(tri.edge1.xyz, tri.edge2.xyz));
+    if (area <= 1.0e-10f)
+        return 0.0f;
+
+    const float root = sqrt(probe_random(seed));
+    const float bary = probe_random(seed);
+    const float3 light_position = tri.a.xyz + tri.edge1.xyz * (root * (1.0f - bary)) +
+        tri.edge2.xyz * (root * bary);
+    const float3 delta = light_position - position;
+    const float distance2 = dot(delta, delta);
+    if (distance2 <= bake_params.x * bake_params.x)
+        return 0.0f;
+
+    const float distance = sqrt(distance2);
+    const float3 direction = delta / distance;
+    const float receiver_cosine = saturate(dot(normal, direction));
+    const float emitter_cosine = abs(dot(normalize(tri.normal.xyz), -direction));
+    if (receiver_cosine <= 0.0f || emitter_cosine <= 0.0f)
+        return 0.0f;
+
+    ProbeTraceRay shadow = probe_make_ray(position + normal * bake_params.x,
+        direction, bake_params.x, max(bake_params.x, distance - 2.0f * bake_params.x));
+    if (probe_trace_any(shadow))
+        return 0.0f;
+
+    const float pdf_area = (triangle_weight / total_weight) / area;
+    if (pdf_area <= 1.0e-12f)
+        return 0.0f;
+
+    return max(tri.emissive.rgb, 0.0f) *
+        (receiver_cosine * emitter_cosine / max(distance2 * pdf_area, 1.0e-8f));
+}
 
 [numthreads(64, 1, 1)]
 void probe_bounce_cs(uint3 id : SV_DispatchThreadID)
@@ -722,6 +786,7 @@ void probe_bounce_cs(uint3 id : SV_DispatchThreadID)
     uint seed = probe_hash(result_index * 0x9e3779b9u + (bounce_index + 1u) * 0x85ebca6bu);
 
     radiance += throughput * probe_direct_sun(position, normal, seed);
+    radiance += throughput * probe_direct_emissive(position, normal, seed);
 
     float3 direction = probe_cosine_hemisphere(normal, seed);
     ProbeTraceRay ray = probe_make_ray(position + normal * bake_params.x,
