@@ -1,5 +1,5 @@
 #if defined(BUILD_SURFACE_VS)
-cbuffer Camera : register(b0, space1)
+GPU_BIND_B(0, 1) cbuffer Camera : register(b0, space1)
 {
     float4x4 mvp;
     float4x4 view;
@@ -65,7 +65,7 @@ FullscreenOutput fullscreen_vs(uint vertex_id : SV_VertexID)
     return output;
 }
 #elif defined(BUILD_WIREFRAME_VS)
-cbuffer Camera : register(b0, space1)
+GPU_BIND_B(0, 1) cbuffer Camera : register(b0, space1)
 {
     float4x4 mvp;
 };

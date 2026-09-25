@@ -1,28 +1,42 @@
 #ifndef GPU_H
 #define GPU_H
 
+/* Uncomment to compile the SDL_GPU backend. */
+/* #define DUSTMITE_GPU_SDL */
+
 #include "dustmite.h"
 
 #include <SDL3/SDL.h>
 
-#if defined(__clang__)
+#if !defined(DUSTMITE_GPU_SDL) && defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wgnu-zero-variadic-macro-arguments"
 #pragma clang diagnostic ignored "-Wvariadic-macro-arguments-omitted"
 #pragma clang diagnostic ignored "-Wstrict-prototypes"
 #endif
 
+#ifndef DUSTMITE_GPU_SDL
 #include <NRI.h>
 #include <Extensions/NRIDeviceCreation.h>
 #include <Extensions/NRIHelper.h>
 #include <Extensions/NRISwapChain.h>
+#endif
 
-#if defined(__clang__)
+#if !defined(DUSTMITE_GPU_SDL) && defined(__clang__)
 #pragma clang diagnostic pop
 #endif
 
 #define WINDOW SDL_Window
 #define EVENT SDL_Event
+#ifdef DUSTMITE_GPU_SDL
+#define DEVICE SDL_GPUDevice
+#define BUFFER SDL_GPUBuffer
+#define TEXTURE SDL_GPUTexture
+#define SAMPLER SDL_GPUSampler
+#define GRAPHICS_PIPELINE SDL_GPUGraphicsPipeline
+#define COMPUTE_PIPELINE SDL_GPUComputePipeline
+#define TEXTURE_FORMAT SDL_GPUTextureFormat
+#else
 #define DEVICE NriDevice
 #define BUFFER NriBuffer
 #define TEXTURE NriTexture
@@ -30,11 +44,16 @@
 #define GRAPHICS_PIPELINE NriPipeline
 #define COMPUTE_PIPELINE NriPipeline
 #define TEXTURE_FORMAT NriFormat
+#endif
 
 typedef struct renderer renderer;
 
 typedef struct fx_state {
+#ifdef DUSTMITE_GPU_SDL
+    DEVICE *device;
+#else
     renderer *owner;
+#endif
 
     GRAPHICS_PIPELINE *compose_pipeline;
     COMPUTE_PIPELINE *ssao_pipeline;
@@ -88,17 +107,24 @@ typedef struct render_frame {
     float aspect;
 } render_frame;
 
+#ifndef DUSTMITE_GPU_SDL
 typedef struct swapchain_texture {
     TEXTURE *texture;
     NriDescriptor *color_attachment;
     NriFence *acquire;
     NriFence *release;
 } swapchain_texture;
+typedef struct texture_state {
+    NriTexture *texture;
+    NriAccessLayoutStage state;
+} texture_state;
+#endif
 
 struct renderer {
     WINDOW *window;
     DEVICE *device;
 
+#ifndef DUSTMITE_GPU_SDL
     NriCoreInterface core;
     NriHelperInterface helper;
     NriSwapChainInterface swapchain_api;
@@ -108,8 +134,16 @@ struct renderer {
     swapchain_texture *swapchain_frames;
     TEXTURE **swapchain_textures;
     uint32_t swapchain_texture_count;
+    uint32_t swapchain_width, swapchain_height, current_swap_index;
     uint64_t frame_index;
     NriFormat swapchain_format;
+    SDL_MetalView metal_view;
+    NriDescriptor **temporary_descriptors;
+    NriBuffer **temporary_buffers;
+    uint32_t temporary_descriptor_num, temporary_descriptor_cap;
+    uint32_t temporary_buffer_num, temporary_buffer_cap;
+    texture_state *texture_states;
+    uint32_t texture_state_num, texture_state_cap;
 
     NriPipelineLayout *surface_layout;
     NriPipelineLayout *line_layout;
@@ -122,6 +156,8 @@ struct renderer {
     NriPipelineLayout *volume_layout;
     NriPipelineLayout *volume_compose_layout;
     NriPipelineLayout *compose_layout;
+    NriPipelineLayout *current_graphics_layout, *current_compute_layout;
+#endif
 
     GRAPHICS_PIPELINE *sky_pipeline;
     GRAPHICS_PIPELINE *solid_pipeline;
@@ -227,4 +263,3 @@ bool bake_active(renderer *r);
 void bake_update_title(renderer *r);
 
 #endif
-

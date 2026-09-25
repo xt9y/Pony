@@ -111,15 +111,15 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
 
 #elif defined(BUILD_VISION_COMPOSE_CS)
 
-Texture2D<float4> Hdr : register(t0, space0);
-SamplerState HdrSampler : register(s0, space0);
-Texture2D<float4> Volume : register(t1, space0);
-SamplerState VolumeSampler : register(s1, space0);
-Texture2D<float4> NormalDepth : register(t2, space0);
-SamplerState DepthSampler : register(s2, space0);
-RWTexture2D<float4> Output : register(u0, space1);
+GPU_BIND_T(0, 0) Texture2D<float4> Hdr : register(t0, space0);
+GPU_BIND_S(0, 0) SamplerState HdrSampler : register(s0, space0);
+GPU_BIND_T(1, 0) Texture2D<float4> Volume : register(t1, space0);
+GPU_BIND_S(1, 0) SamplerState VolumeSampler : register(s1, space0);
+GPU_BIND_T(2, 0) Texture2D<float4> NormalDepth : register(t2, space0);
+GPU_BIND_S(2, 0) SamplerState DepthSampler : register(s2, space0);
+GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
 
-cbuffer VolumeComposeData : register(b0, space2)
+GPU_BIND_B(0, 2) cbuffer VolumeComposeData : register(b0, space2)
 {
     uint width;
     uint height;

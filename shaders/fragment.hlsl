@@ -1,18 +1,18 @@
 #if defined(BUILD_SURFACE_FS)
-Texture2D<float4> BaseColor : register(t0, space2);
-SamplerState BaseColorSampler : register(s0, space2);
-Texture2D<float4> MetallicRoughness : register(t1, space2);
-SamplerState MetallicRoughnessSampler : register(s1, space2);
-Texture2D<float4> NormalMap : register(t2, space2);
-SamplerState NormalMapSampler : register(s2, space2);
-Texture2D<float4> Occlusion : register(t3, space2);
-SamplerState OcclusionSampler : register(s3, space2);
-Texture2D<float4> Emissive : register(t4, space2);
-SamplerState EmissiveSampler : register(s4, space2);
-Texture2D<float4> Lightmap : register(t5, space2);
-SamplerState LightmapSampler : register(s5, space2);
+GPU_BIND_T(0, 2) Texture2D<float4> BaseColor : register(t0, space2);
+GPU_BIND_S(0, 2) SamplerState BaseColorSampler : register(s0, space2);
+GPU_BIND_T(1, 2) Texture2D<float4> MetallicRoughness : register(t1, space2);
+GPU_BIND_S(1, 2) SamplerState MetallicRoughnessSampler : register(s1, space2);
+GPU_BIND_T(2, 2) Texture2D<float4> NormalMap : register(t2, space2);
+GPU_BIND_S(2, 2) SamplerState NormalMapSampler : register(s2, space2);
+GPU_BIND_T(3, 2) Texture2D<float4> Occlusion : register(t3, space2);
+GPU_BIND_S(3, 2) SamplerState OcclusionSampler : register(s3, space2);
+GPU_BIND_T(4, 2) Texture2D<float4> Emissive : register(t4, space2);
+GPU_BIND_S(4, 2) SamplerState EmissiveSampler : register(s4, space2);
+GPU_BIND_T(5, 2) Texture2D<float4> Lightmap : register(t5, space2);
+GPU_BIND_S(5, 2) SamplerState LightmapSampler : register(s5, space2);
 
-cbuffer MaterialData : register(b0, space3)
+GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3)
 {
     float4 base_color_factor;
     float4 emissive_metallic;
@@ -231,7 +231,7 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace)
     return output;
 }
 #elif defined(BUILD_SKY_FS)
-cbuffer SkyData : register(b0, space3)
+GPU_BIND_B(0, 3) cbuffer SkyData : register(b0, space3)
 {
     float4 camera_right;
     float4 camera_up;
@@ -280,16 +280,16 @@ SkyOutput sky_fs(SkyInput input)
     return output;
 }
 #elif defined(BUILD_COMPOSE_FS)
-Texture2D<float4> Hdr : register(t0, space2);
-SamplerState HdrSampler : register(s0, space2);
-Texture2D<float4> Ao : register(t1, space2);
-SamplerState AoSampler : register(s1, space2);
-Texture2D<float4> Bloom : register(t2, space2);
-SamplerState BloomSampler : register(s2, space2);
-Texture2D<float4> Lut : register(t3, space2);
-SamplerState LutSampler : register(s3, space2);
+GPU_BIND_T(0, 2) Texture2D<float4> Hdr : register(t0, space2);
+GPU_BIND_S(0, 2) SamplerState HdrSampler : register(s0, space2);
+GPU_BIND_T(1, 2) Texture2D<float4> Ao : register(t1, space2);
+GPU_BIND_S(1, 2) SamplerState AoSampler : register(s1, space2);
+GPU_BIND_T(2, 2) Texture2D<float4> Bloom : register(t2, space2);
+GPU_BIND_S(2, 2) SamplerState BloomSampler : register(s2, space2);
+GPU_BIND_T(3, 2) Texture2D<float4> Lut : register(t3, space2);
+GPU_BIND_S(3, 2) SamplerState LutSampler : register(s3, space2);
 
-cbuffer ComposeData : register(b0, space3)
+GPU_BIND_B(0, 3) cbuffer ComposeData : register(b0, space3)
 {
     float exposure;
     float ao_strength;

@@ -1,11 +1,11 @@
 #if defined(BUILD_VOLUME_CS)
-Texture2D<float4> NormalDepth : register(t0, space0);
-SamplerState DepthSampler : register(s0, space0);
+GPU_BIND_T(0, 0) Texture2D<float4> NormalDepth : register(t0, space0);
+GPU_BIND_S(0, 0) SamplerState DepthSampler : register(s0, space0);
 struct VolumeProbe { float4 position; float4 coefficient[9]; };
-StructuredBuffer<VolumeProbe> VolumeProbes : register(t1, space0);
-StructuredBuffer<float> SunBeams : register(t2, space0);
-RWTexture2D<float4> Output : register(u0, space1);
-cbuffer VolumeData : register(b0, space2)
+GPU_BIND_T(1, 0) StructuredBuffer<VolumeProbe> VolumeProbes : register(t1, space0);
+GPU_BIND_T(2, 0) StructuredBuffer<float> SunBeams : register(t2, space0);
+GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
+GPU_BIND_B(0, 2) cbuffer VolumeData : register(b0, space2)
 {
     float4 eye_density;
     float4 right_tan;

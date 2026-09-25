@@ -1,11 +1,11 @@
 #if defined(BUILD_VOLUME_CS)
-Texture2D<float4> NormalDepth : register(t0, space0);
-SamplerState DepthSampler : register(s0, space0);
+GPU_BIND_T(0, 0) Texture2D<float4> NormalDepth : register(t0, space0);
+GPU_BIND_S(0, 0) SamplerState DepthSampler : register(s0, space0);
 struct VolumeProbe { float4 position; float4 coefficient[9]; };
-StructuredBuffer<VolumeProbe> VolumeProbes : register(t1, space0);
-StructuredBuffer<float> SunBeams : register(t2, space0);
-RWTexture2D<float4> Output : register(u0, space1);
-cbuffer VolumeData : register(b0, space2)
+GPU_BIND_T(1, 0) StructuredBuffer<VolumeProbe> VolumeProbes : register(t1, space0);
+GPU_BIND_T(2, 0) StructuredBuffer<float> SunBeams : register(t2, space0);
+GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
+GPU_BIND_B(0, 2) cbuffer VolumeData : register(b0, space2)
 {
     float4 eye_density;
     float4 right_tan;
@@ -296,14 +296,14 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     Output[id.xy] = float4(sum, exp(-eye_density.w * (leave-enter)));
 }
 #elif defined(BUILD_VOLUME_COMPOSE_CS)
-Texture2D<float4> Hdr : register(t0, space0);
-SamplerState HdrSampler : register(s0, space0);
-Texture2D<float4> Volume : register(t1, space0);
-SamplerState VolumeSampler : register(s1, space0);
-Texture2D<float4> NormalDepth : register(t2, space0);
-SamplerState DepthSampler : register(s2, space0);
-RWTexture2D<float4> Output : register(u0, space1);
-cbuffer VolumeComposeData : register(b0, space2) {
+GPU_BIND_T(0, 0) Texture2D<float4> Hdr : register(t0, space0);
+GPU_BIND_S(0, 0) SamplerState HdrSampler : register(s0, space0);
+GPU_BIND_T(1, 0) Texture2D<float4> Volume : register(t1, space0);
+GPU_BIND_S(1, 0) SamplerState VolumeSampler : register(s1, space0);
+GPU_BIND_T(2, 0) Texture2D<float4> NormalDepth : register(t2, space0);
+GPU_BIND_S(2, 0) SamplerState DepthSampler : register(s2, space0);
+GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
+GPU_BIND_B(0, 2) cbuffer VolumeComposeData : register(b0, space2) {
     uint width; uint height; uint debug_view; uint _pad1;
 };
 [numthreads(8,8,1)]
@@ -348,11 +348,11 @@ void volume_compose_cs(uint3 id : SV_DispatchThreadID) {
         float4(source.rgb*fog.a + fog.rgb, source.a);
 }
 #elif defined(BUILD_SSAO_CS)
-Texture2D<float4> NormalDepth : register(t0, space0);
-SamplerState NormalDepthSampler : register(s0, space0);
-RWTexture2D<float4> Output : register(u0, space1);
+GPU_BIND_T(0, 0) Texture2D<float4> NormalDepth : register(t0, space0);
+GPU_BIND_S(0, 0) SamplerState NormalDepthSampler : register(s0, space0);
+GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
 
-cbuffer SsaoData : register(b0, space2)
+GPU_BIND_B(0, 2) cbuffer SsaoData : register(b0, space2)
 {
     uint width;
     uint height;
@@ -423,11 +423,11 @@ void ssao_cs(uint3 id : SV_DispatchThreadID)
     Output[id.xy] = float4(ao, ao, ao, 1.0f);
 }
 #elif defined(BUILD_BLOOM_CS)
-Texture2D<float4> Source : register(t0, space0);
-SamplerState SourceSampler : register(s0, space0);
-RWTexture2D<float4> Output : register(u0, space1);
+GPU_BIND_T(0, 0) Texture2D<float4> Source : register(t0, space0);
+GPU_BIND_S(0, 0) SamplerState SourceSampler : register(s0, space0);
+GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
 
-cbuffer BloomData : register(b0, space2)
+GPU_BIND_B(0, 2) cbuffer BloomData : register(b0, space2)
 {
     uint src_width;
     uint src_height;
@@ -477,7 +477,7 @@ void bloom_cs(uint3 id : SV_DispatchThreadID)
     Output[id.xy] = float4(color, 1.0f);
 }
 #elif defined(BUILD_GRADE_CS)
-RWTexture2D<float4> Output : register(u0, space1);
+GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
 
 float3 grade(float3 c)
 {
@@ -544,19 +544,19 @@ struct BakeSample
     float4 normal;
 };
 
-StructuredBuffer<BvhNode> Nodes : register(t1, space0);
-StructuredBuffer<BvhTriangle> Triangles : register(t2, space0);
+GPU_BIND_T(1, 0) StructuredBuffer<BvhNode> Nodes : register(t1, space0);
+GPU_BIND_T(2, 0) StructuredBuffer<BvhTriangle> Triangles : register(t2, space0);
 #if defined(BUILD_LIGHTMAP_CS)
-Texture2D<float4> Source : register(t0, space0);
-SamplerState SourceSampler : register(s0, space0);
-StructuredBuffer<BakeSample> Samples : register(t3, space0);
-RWTexture2D<float4> Output : register(u0, space1);
+GPU_BIND_T(0, 0) Texture2D<float4> Source : register(t0, space0);
+GPU_BIND_S(0, 0) SamplerState SourceSampler : register(s0, space0);
+GPU_BIND_T(3, 0) StructuredBuffer<BakeSample> Samples : register(t3, space0);
+GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
 #else
-StructuredBuffer<float4> ProbePositions : register(t0, space0);
-RWStructuredBuffer<float4> ProbeCoefficients : register(u0, space1);
+GPU_BIND_T(0, 0) StructuredBuffer<float4> ProbePositions : register(t0, space0);
+GPU_BIND_U(0, 1) RWStructuredBuffer<float4> ProbeCoefficients : register(u0, space1);
 #endif
 
-cbuffer BakeData : register(b0, space2)
+GPU_BIND_B(0, 2) cbuffer BakeData : register(b0, space2)
 {
     uint item_count;
     uint lightmap_width;
