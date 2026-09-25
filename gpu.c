@@ -90,7 +90,7 @@ typedef struct COMPOSE_UNIFORMS {
 
 typedef struct VOLUME_UNIFORMS {
     float eye_density[4], right_tan[4], up_tan[4], forward_g[4];
-    float sun_intensity[4], grid_origin_spacing[4];
+    float sun_intensity[4], sun_color[4], grid_origin_spacing[4];
     Uint32 grid_dims_width[4], height_debug[4];
     float beam_origin[4], beam_step[4];
 } VOLUME_UNIFORMS;
@@ -2360,7 +2360,8 @@ static void dispatch_shape(Uint32 items, Uint32 *groups_x, Uint32 *groups_y, Uin
 }
 
 static BAKE_UNIFORMS bake_data(RENDERER *r, Uint32 phase, Uint32 iteration, Uint32 item_count, Uint32 dispatch_width, Uint32 batch_count) {
-    const VEC3 sun = r->sun;
+    const DIRECTIONAL_LIGHT sun = r->sun;
+    const SKY sky = r->sky;
 
     return (BAKE_UNIFORMS){.item_count = item_count,
                            .lightmap_width = r->lightmap_width,
@@ -2370,11 +2371,11 @@ static BAKE_UNIFORMS bake_data(RENDERER *r, Uint32 phase, Uint32 iteration, Uint
                            .phase = phase,
                            .max_bounces = BAKE_MAX_BOUNCES,
                            .batch_count = batch_count,
-                           .sun_direction_intensity = {sun.x, sun.y, sun.z, 2.4f},
-                           .sun_color_radius = {1.00f, 0.94f, 0.84f, 0.00465f},
-                           .sky_zenith = {0.22f, 0.42f, 0.78f, 1.0f},
-                           .sky_horizon = {0.68f, 0.76f, 0.88f, 1.0f},
-                           .bake_params = {r->bake_epsilon, 0.72f, 1.0f, (float)r->lightmap_min_samples},
+                           .sun_direction_intensity = {sun.direction.x, sun.direction.y, sun.direction.z, sun.intensity},
+                           .sun_color_radius = {sun.color.x, sun.color.y, sun.color.z, sun.angular_radius},
+                           .sky_zenith = {sky.zenith.x, sky.zenith.y, sky.zenith.z, 1.0f},
+                           .sky_horizon = {sky.horizon.x, sky.horizon.y, sky.horizon.z, 1.0f},
+                           .bake_params = {r->bake_epsilon, 0.72f, sky.intensity, (float)r->lightmap_min_samples},
                            .probe_origin_spacing = {r->lightmap_probe_origin.x, r->lightmap_probe_origin.y, r->lightmap_probe_origin.z, r->lightmap_probe_spacing},
                            .probe_dims_mode = {r->lightmap_probe_count_x, r->lightmap_probe_count_y, r->lightmap_probe_count_z, 0u},
                            .emissive_data = {r->bvh_emissive_weight, (float)r->bvh_triangle_count, 0.0f, 0.0f}};
@@ -3171,7 +3172,7 @@ static uint32_t probe_wavefront_groups64(uint64_t threads) {
     return groups && groups <= UINT32_MAX ? (uint32_t)groups : 0u;
 }
 
-static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(const BVH *tree, const BEAM_GRID *beams, VEC3 sun, uint32_t probe_count, uint32_t sample_offset, uint32_t block_samples,
+static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(const BVH *tree, const BEAM_GRID *beams, DIRECTIONAL_LIGHT sun, SKY sky, uint32_t probe_count, uint32_t sample_offset, uint32_t block_samples,
                                                      uint32_t bounce_index) {
     const BVH_NODE *root = &tree->nodes[0];
     float scene_scale = fmaxf(root->max[0] - root->min[0], fmaxf(root->max[1] - root->min[1], root->max[2] - root->min[2]));
@@ -3189,11 +3190,11 @@ static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(const BVH *tree, const BEAM
                                       .bounce_index = bounce_index,
                                       .max_bounces = PROBE_MAX_BOUNCES,
                                       .beam_depth = beams->depth,
-                                      .sun_direction_intensity = {sun.x, sun.y, sun.z, 2.4f},
-                                      .sun_color_radius = {1.00f, 0.94f, 0.84f, 0.00465f},
-                                      .sky_zenith = {0.22f, 0.42f, 0.78f, 1.0f},
-                                      .sky_horizon = {0.68f, 0.76f, 0.88f, 1.0f},
-                                      .bake_params = {epsilon, 0.72f, 1.0f, tree->emissive_weight},
+                                      .sun_direction_intensity = {sun.direction.x, sun.direction.y, sun.direction.z, sun.intensity},
+                                      .sun_color_radius = {sun.color.x, sun.color.y, sun.color.z, sun.angular_radius},
+                                      .sky_zenith = {sky.zenith.x, sky.zenith.y, sky.zenith.z, 1.0f},
+                                      .sky_horizon = {sky.horizon.x, sky.horizon.y, sky.horizon.z, 1.0f},
+                                      .bake_params = {epsilon, 0.72f, sky.intensity, tree->emissive_weight},
                                       .beam_origin = {beams->origin.x, beams->origin.y, beams->origin.z, 0.0f},
                                       .beam_step = {beams->step.x, beams->step.y, beams->step.z, 0.0f}};
 }
@@ -3335,7 +3336,7 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
     while (good && completed < PROBE_MAX_SAMPLES && active) {
         const uint32_t block = PROBE_MAX_SAMPLES - completed > PROBE_BLOCK_SAMPLES ? PROBE_BLOCK_SAMPLES : PROBE_MAX_SAMPLES - completed;
 
-        uniforms = probe_wavefront_data(tree, beams, r->sun, probe_count, completed, block, 0u);
+        uniforms = probe_wavefront_data(tree, beams, r->sun, r->sky, probe_count, completed, block, 0u);
 
         NriCommandAllocator *allocator = NULL;
         NriCommandBuffer *cmd = NULL;
@@ -3762,7 +3763,8 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
                                              frame->right.z * frame->tan_half_fov * frame->aspect, 0},
                                .up_tan = {frame->up.x * frame->tan_half_fov, frame->up.y * frame->tan_half_fov, frame->up.z * frame->tan_half_fov, 0},
                                .forward_g = {frame->forward.x, frame->forward.y, frame->forward.z, 0.55f},
-                               .sun_intensity = {frame->sun.x, frame->sun.y, frame->sun.z, 2.4f},
+                               .sun_intensity = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, frame->sun.intensity},
+                               .sun_color = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, 1.0f},
                                .grid_origin_spacing = {grid->origin.x, grid->origin.y, grid->origin.z, grid->spacing},
                                .grid_dims_width = {grid->count_x, grid->count_y, grid->count_z, fx->ao_width},
                                .height_debug = {fx->ao_height, fx->debug_view, beam_grid->depth, 0},
@@ -4063,10 +4065,10 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
                                                frame->right.z * frame->tan_half_fov * frame->aspect, 0},
                               .camera_up = {frame->up.x * frame->tan_half_fov, frame->up.y * frame->tan_half_fov, frame->up.z * frame->tan_half_fov, 0},
                               .camera_forward = {frame->forward.x, frame->forward.y, frame->forward.z, 0},
-                              .sky_zenith = {0.22f, 0.42f, 0.78f, 1},
-                              .sky_horizon = {0.68f, 0.76f, 0.88f, 1},
-                              .sun_direction_intensity = {frame->sun.x, frame->sun.y, frame->sun.z, 2.4f},
-                              .sun_color_radius = {1.00f, 0.94f, 0.84f, 0.00465f}};
+                              .sky_zenith = {frame->sky.zenith.x, frame->sky.zenith.y, frame->sky.zenith.z, frame->sky.intensity},
+                              .sky_horizon = {frame->sky.horizon.x, frame->sky.horizon.y, frame->sky.horizon.z, 1.0f},
+                              .sun_direction_intensity = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, frame->sun.intensity},
+                              .sun_color_radius = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, frame->sun.angular_radius}};
 
     if (!begin_scene_rendering(r, cmd, r->fx.hdr, r->fx.normal_depth, r->depth_texture, width, height)) goto failed_frame;
 
@@ -4088,9 +4090,9 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
 
         const MATERIAL_UNIFORMS material = {.base_color_factor = {m->data.base_color[0], m->data.base_color[1], m->data.base_color[2], m->data.base_color[3]},
                                             .emissive_metallic = {m->data.emissive[0], m->data.emissive[1], m->data.emissive[2], m->data.metallic},
-                                            .roughness_normal_ao_sun = {m->data.roughness, m->data.normal_scale, m->data.occlusion_strength, 2.4f},
-                                            .sun_direction = {frame->sun.x, frame->sun.y, frame->sun.z, 0},
-                                            .sun_color = {1.00f, 0.94f, 0.84f, 1},
+                                            .roughness_normal_ao_sun = {m->data.roughness, m->data.normal_scale, m->data.occlusion_strength, frame->sun.intensity},
+                                            .sun_direction = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, 0},
+                                            .sun_color = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, 1},
                                             .camera_position = {frame->eye.x, frame->eye.y, frame->eye.z, r->debug_view == 1u ? 2.0f : (r->has_bake ? 1.0f : 0.0f)}};
 
         if (!bind_surface_resources(r, cmd, m, r->lightmap_texture, r->material_sampler, r->lightmap_sampler, &material, sizeof(material))) goto failed_frame;
