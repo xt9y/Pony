@@ -46,6 +46,7 @@ typedef struct fx_state {
 
     Uint32 width, height;
     Uint32 ao_width, ao_height;
+
     bool volume_ready;
     uint32_t debug_view;
 } fx_state;
@@ -101,15 +102,20 @@ struct renderer {
     swapchain_texture *swapchain_frames;
     NriTexture **swapchain_textures;
     uint32_t swapchain_texture_count;
+
     uint32_t swapchain_width, swapchain_height, current_swap_index;
+
     uint64_t frame_index;
     NriFormat swapchain_format;
     SDL_MetalView metal_view;
     NriDescriptor **temporary_descriptors;
     NriBuffer **temporary_buffers;
+
     uint32_t temporary_descriptor_num, temporary_descriptor_cap;
     uint32_t temporary_buffer_num, temporary_buffer_cap;
+
     texture_state *texture_states;
+
     uint32_t texture_state_num, texture_state_cap;
 
     NriPipelineLayout *surface_layout;
@@ -203,12 +209,9 @@ struct renderer {
 
 bool upload_scene(renderer *r, const gltf_scene *visual);
 bool upload_bvh(renderer *r, const bvh *tree);
-bool bake_lightmap(renderer *r, const bvh *tree, const lightmap *lm,
-                   const probe_grid *probes);
+bool bake_lightmap(renderer *r, const bvh *tree, const lightmap *lm, const probe_grid *probes);
 typedef bool (*probe_bake_progress_fn)(Uint32 done, Uint32 total, Uint32 active);
-bool bake_probe_grid_fast(renderer *r, probe_grid *grid,
-                          const bvh *tree, const beam_grid *beams,
-                          probe_bake_progress_fn progress);
+bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const beam_grid *beams, probe_bake_progress_fn progress);
 bool bake_probe_grid(renderer *r, probe_grid *grid, Uint32 samples);
 NriTexture *upload_lightmap(renderer *r, const cached_lightmap *cached);
 NriBuffer *upload_probes(renderer *r, const probe_grid *grid);

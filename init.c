@@ -35,6 +35,7 @@ float v3_len_sq(vec3 v) {
 
 vec3 v3_normalize(vec3 v) {
     const float length = sqrtf(v3_len_sq(v));
+
     return length > FLT_EPSILON ? v3_scale(v, 1.0f / length) : v3(0, 0, 0);
 }
 
