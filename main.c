@@ -72,6 +72,21 @@ int main(int argc, char **argv) {
                                          .intensity = 2.4f,
                                          .angular_radius = 0.00465f};
     SKY sky = {.zenith = {0.22f, 0.42f, 0.78f}, .horizon = {0.68f, 0.76f, 0.88f}, .intensity = 1.0f};
+    VOLUMETRICS_LIGHTING volumetrics = {.density = 0.045f,
+                                         .anisotropy = 0.55f,
+                                         .indirect_intensity = 0.15f,
+                                         .max_distance = 10000.0f,
+                                         .center_radius = 0.50f,
+                                         .middle_radius = 0.82f,
+                                         .probe_spacing = 4.0f,
+                                         .center_steps = 4u,
+                                         .middle_steps = 3u,
+                                         .peripheral_steps = 2u,
+                                         .center_stride = 1u,
+                                         .middle_stride = 2u,
+                                         .peripheral_stride = 4u,
+                                         .probe_samples = 1024u,
+                                         .emissive_samples = 128u};
     struct LIGHT sun = {.type = LIGHT_DIRECTIONAL, .directional = directional_sun};
     OBJECT light_object = {.state = STATIC, .type = LIGHT, .data = &sun};
     struct LIGHT *light_data = light_object.data;
@@ -168,8 +183,11 @@ int main(int argc, char **argv) {
 
     layout_hash = hash_bytes(layout_hash, lighting_settings, sizeof(lighting_settings));
 
-    const uint32_t volume_settings[] = {1024u, 4u, 3u, 2u};
-    uint64_t volume_hash = hash_bytes(scene_hash, volume_settings, sizeof(volume_settings));
+    const float volume_bake_settings[] = {volumetrics.probe_spacing,
+                                          (float)volumetrics.probe_samples,
+                                          (float)volumetrics.emissive_samples,
+                                          9.0f};
+    uint64_t volume_hash = hash_bytes(scene_hash, volume_bake_settings, sizeof(volume_bake_settings));
 
     volume_hash = hash_bytes(volume_hash, lighting_settings, sizeof(lighting_settings));
 
@@ -213,7 +231,7 @@ int main(int argc, char **argv) {
                 if (event.key.scancode == SDL_SCANCODE_B || event.key.key == SDLK_B) {
                     SDL_ClearError();
 
-                    if (!bake_start(&r, scene_data->geometry, scene_data->visual, &lm, light_data, &sky, bake_path, scene_hash, layout_hash, volume_hash, beam_hash)) {
+                    if (!bake_start(&r, scene_data->geometry, scene_data->visual, &lm, light_data, &sky, &volumetrics, bake_path, scene_hash, layout_hash, volume_hash, beam_hash)) {
                         SDL_Log("B: could not start rebake: %s", *SDL_GetError() ? SDL_GetError() : "unknown error");
                     }
                 }
@@ -232,7 +250,7 @@ int main(int argc, char **argv) {
         if (render_due) {
             const Uint64 frame_begin = SDL_GetPerformanceCounter();
 
-            if (!r_draw(&r, light_data, &sky)) {
+            if (!r_draw(&r, light_data, &sky, &volumetrics)) {
                 SDL_Log("draw failed: %s", SDL_GetError());
 
                 running = false;
