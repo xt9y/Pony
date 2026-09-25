@@ -42,10 +42,6 @@ static void bake_timing(const char *stage, Uint64 started) {
     SDL_Log("B: %s took %.2f ms", stage, elapsed);
 }
 
-static VEC3 scene_sun_direction(void) {
-    return v3_normalize(v3(0.38f, 0.30f, 0.32f));
-}
-
 static MAT4 m4_identity(void) {
     MAT4 r = {0};
     r.m[0] = r.m[5] = r.m[10] = r.m[15] = 1.0f;
@@ -260,9 +256,12 @@ bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, 
     return good;
 }
 
-bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm, const char *path, uint64_t scene_hash, uint64_t layout_hash,
+bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm, const struct LIGHT *light, const char *path, uint64_t scene_hash, uint64_t layout_hash,
                             uint64_t volume_hash, uint64_t beam_hash) {
-    if (!r || !m || !lm || !r->device) return false;
+    if (!r || !m || !lm || !r->device || !light || light->type != LIGHT_DIRECTIONAL) return false;
+
+    r->sun = v3_normalize(light->directional.direction);
+    if (v3_len_sq(r->sun) <= 0.0f) return false;
 
     CACHED_LIGHTMAP previous = {0};
     bool reuse = cache_read_partial(path, scene_hash, &previous);
@@ -355,7 +354,7 @@ bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual
         previous.beams.shadow_depth = NULL;
         SDL_Log("B: reused cached sun beams");
     } else if (good) {
-        good = beam_build(&beam_candidate, m, &tree, scene_sun_direction());
+        good = beam_build(&beam_candidate, m, &tree, r->sun);
     }
 
     if (good) bake_timing("sun visibility", started);
@@ -558,8 +557,12 @@ void r_event(RENDERER *r, const SDL_Event *event) {
     }
 }
 
-bool r_draw(RENDERER *r) {
-    if (!r || !r->window) return false;
+bool r_draw(RENDERER *r, const struct LIGHT *light) {
+    if (!r || !r->window || !light || light->type != LIGHT_DIRECTIONAL) return false;
+
+    const VEC3 sun = v3_normalize(light->directional.direction);
+    if (v3_len_sq(sun) <= 0.0f) return false;
+    r->sun = sun;
 
     int width = 0;
     int height = 0;
@@ -582,7 +585,7 @@ bool r_draw(RENDERER *r) {
     const MAT4 proj = m4_perspective(fov, aspect, znear, zfar);
     const MAT4 mvp = m4_mul(proj, view);
 
-    RENDER_FRAME frame = {.eye = eye, .right = right, .up = up, .forward = forward, .sun = scene_sun_direction(), .tan_half_fov = tan_half, .aspect = aspect};
+    RENDER_FRAME frame = {.eye = eye, .right = right, .up = up, .forward = forward, .sun = sun, .tan_half_fov = tan_half, .aspect = aspect};
 
     memcpy(frame.mvp, mvp.m, sizeof(frame.mvp));
     memcpy(frame.view, view.m, sizeof(frame.view));
