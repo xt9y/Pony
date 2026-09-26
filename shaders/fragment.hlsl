@@ -110,6 +110,20 @@ float3 fresnel_schlick(float cos_theta, float3 f0)
     return f0 + (1.0f - f0) * pow(1.0f - saturate(cos_theta), 5.0f);
 }
 
+float3 surface_probe_value(SurfaceProbe probe, float3 normal)
+{
+    const float nx = normal.x, ny = normal.y, nz = normal.z;
+    float3 irradiance = probe.coefficient[0].rgb * (0.2820947918f * PI);
+    irradiance += (probe.coefficient[1].rgb * (0.4886025119f * ny) +
+                   probe.coefficient[2].rgb * (0.4886025119f * nz) +
+                   probe.coefficient[3].rgb * (0.4886025119f * nx)) * (2.0f * PI / 3.0f);
+    irradiance += (probe.coefficient[4].rgb * (1.0925484306f * nx * ny) +
+                   probe.coefficient[5].rgb * (1.0925484306f * ny * nz) +
+                   probe.coefficient[6].rgb * (0.3153915653f * (3.0f * nz * nz - 1.0f)) +
+                   probe.coefficient[7].rgb * (1.0925484306f * nx * nz) +
+                   probe.coefficient[8].rgb * (0.5462742153f * (nx * nx - ny * ny))) * (PI * 0.25f);
+    return max(irradiance, 0.0f);
+}
 
 float3 surface_probe_irradiance(float3 position, float3 normal)
 {
@@ -133,22 +147,35 @@ float3 surface_probe_irradiance(float3 position, float3 normal)
         SurfaceProbe probe = SurfaceProbes[cell.x + probe_dims.x * (cell.y + probe_dims.y * cell.z)];
         weight *= saturate(probe.position.w);
         if (weight <= 0.0f) continue;
-
-        const float nx = normal.x, ny = normal.y, nz = normal.z;
-        float3 irradiance = probe.coefficient[0].rgb * (0.2820947918f * PI);
-        irradiance += (probe.coefficient[1].rgb * (0.4886025119f * ny) +
-                       probe.coefficient[2].rgb * (0.4886025119f * nz) +
-                       probe.coefficient[3].rgb * (0.4886025119f * nx)) * (2.0f * PI / 3.0f);
-        irradiance += (probe.coefficient[4].rgb * (1.0925484306f * nx * ny) +
-                       probe.coefficient[5].rgb * (1.0925484306f * ny * nz) +
-                       probe.coefficient[6].rgb * (0.3153915653f * (3.0f * nz * nz - 1.0f)) +
-                       probe.coefficient[7].rgb * (1.0925484306f * nx * nz) +
-                       probe.coefficient[8].rgb * (0.5462742153f * (nx * nx - ny * ny))) * (PI * 0.25f);
-        sum += max(irradiance, 0.0f) * weight;
+        sum += surface_probe_value(probe, normal) * weight;
         weight_sum += weight;
     }
 
-    return weight_sum > 0.0f ? sum / weight_sum : float3(0.12f, 0.12f, 0.12f);
+    if (weight_sum > 0.0f) return sum / weight_sum;
+
+    float best_distance2 = 1.0e30f;
+    uint best_index = 0u;
+    bool found = false;
+    int3 center = int3(floor(coord + 0.5f));
+    [unroll] for (int z = -1; z <= 1; ++z)
+    [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x)
+    {
+        int3 cell = center + int3(x, y, z);
+        if (any(cell < 0) || any(cell >= int3(probe_dims.xyz))) continue;
+        uint index = (uint)cell.x + probe_dims.x * ((uint)cell.y + probe_dims.y * (uint)cell.z);
+        SurfaceProbe probe = SurfaceProbes[index];
+        if (probe.position.w <= 0.0f) continue;
+        float3 delta = probe.position.xyz - position;
+        float distance2 = dot(delta, delta);
+        if (distance2 < best_distance2) {
+            best_distance2 = distance2;
+            best_index = index;
+            found = true;
+        }
+    }
+
+    return found ? surface_probe_value(SurfaceProbes[best_index], normal) : float3(0.12f, 0.12f, 0.12f);
 }
 
 float static_beam_visibility(float3 position)
@@ -210,7 +237,8 @@ float3 runtime_indirect(float3 world, float2 uv, float3 baked)
     uint generation = CellGenerations[index];
     if (generation == 0u || OverlayGenerations[index] != generation) return baked;
     float4 overlay = DynamicOverlay.SampleLevel(IndirectLightmapSampler, uv, 0.0f);
-    float confidence = saturate(overlay.a / (float)dynamic_grid_dims_target.w);
+    float confidence_samples = min((float)dynamic_grid_dims_target.w, 4.0f);
+    float confidence = saturate(overlay.a / max(confidence_samples, 1.0f));
     return lerp(baked, max(overlay.rgb, 0.0f), confidence);
 }
 
