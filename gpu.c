@@ -4831,6 +4831,7 @@ void bake_worker_deinit(RENDERER *r) {
 
 void r_deinit(RENDERER *r) {
     if (!r) return;
+    dynamic_deinit(r);
 
     free(r->vertices);
     free(r->draws);

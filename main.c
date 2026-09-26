@@ -73,6 +73,8 @@ int main(int argc, char **argv) {
     OBJECT scene_object = {
         .state = STATIC,
         .type = MODEL,
+        .transform = {.scale = {1.0f, 1.0f, 1.0f}},
+        .previous_transform = {.scale = {1.0f, 1.0f, 1.0f}},
         .data = &scene_model
     };
     struct MODEL *scene_data = scene_object.data;
@@ -116,6 +118,15 @@ int main(int argc, char **argv) {
         .peripheral_stride = 24u
     };
 
+    DYNAMIC_LIGHTING dynamic_lighting = {
+        .texels_per_frame = 4096u,
+        .rays_per_texel = 1u,
+        .target_samples = 16u,
+        .shadow_map_size = 1024u,
+        .gi_radius = 3.0f,
+        .shadow_bias = 0.0025f
+    };
+
     struct LIGHT sun = {
         .type = LIGHT_DIRECTIONAL,
         .directional = directional_sun
@@ -124,6 +135,8 @@ int main(int argc, char **argv) {
     OBJECT light_object = {
         .state = STATIC,
         .type = LIGHT,
+        .transform = {.scale = {1.0f, 1.0f, 1.0f}},
+        .previous_transform = {.scale = {1.0f, 1.0f, 1.0f}},
         .data = &sun
     };
     struct LIGHT *light_data = light_object.data;
@@ -161,6 +174,10 @@ int main(int argc, char **argv) {
     if (!startup_stage && !r_build_scene(&r, scene_data->geometry, scene_data->visual, &lm)) {
         startup_stage = "GPU scene upload";
         startup_detail = SDL_GetError();
+    }
+
+    if (!startup_stage && !r_dynamic_init(&r, scene_data->geometry, &lm, &dynamic_lighting)) {
+        startup_stage = "dynamic lighting initialization";
     }
 
     if (startup_stage) {

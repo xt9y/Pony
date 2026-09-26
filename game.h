@@ -211,6 +211,21 @@ typedef struct PERIPHERAL_VISION {
     uint32_t peripheral_stride;
 } PERIPHERAL_VISION;
 
+typedef struct TRANSFORM {
+    VEC3 position;
+    VEC3 rotation;
+    VEC3 scale;
+} TRANSFORM;
+
+typedef struct DYNAMIC_LIGHTING {
+    uint32_t texels_per_frame;
+    uint32_t rays_per_texel;
+    uint32_t target_samples;
+    uint32_t shadow_map_size;
+    float gi_radius;
+    float shadow_bias;
+} DYNAMIC_LIGHTING;
+
 typedef struct POINT_LIGHT {
     VEC3 position;
 } POINT_LIGHT;
@@ -233,6 +248,8 @@ struct LIGHT {
 typedef struct OBJECT {
     OBJECT_STATE state;
     OBJECT_TYPE type;
+    TRANSFORM transform;
+    TRANSFORM previous_transform;
     void *data;
 } OBJECT;
 
@@ -365,6 +382,9 @@ void cache_free(CACHED_LIGHTMAP *data);
 /* Renderer and bake orchestration. */
 bool r_init(RENDERER *r, const char *title, int width, int height);
 bool r_build_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm);
+bool r_dynamic_init(RENDERER *r, const MESH *static_scene, const LIGHTMAP *lm, const DYNAMIC_LIGHTING *settings);
+bool r_add_dynamic_object(RENDERER *r, OBJECT *object);
+void r_remove_dynamic_object(RENDERER *r, OBJECT *object);
 bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, const LIGHTMAP *lm);
 bool r_rebake_current_scene(
     RENDERER *r,

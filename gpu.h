@@ -87,6 +87,19 @@ typedef struct FRAME_CONTEXT FRAME_CONTEXT;
 typedef struct UPLOAD_CONTEXT UPLOAD_CONTEXT;
 typedef struct TEXTURE_STATE TEXTURE_STATE;
 typedef struct PROBE_WAVEFRONT_SCRATCH PROBE_WAVEFRONT_SCRATCH;
+typedef struct DYNAMIC_STATE DYNAMIC_STATE;
+
+typedef struct DYNAMIC_GI_JOB {
+    uint32_t sample_index;
+    uint32_t cell_index;
+    uint32_t generation;
+    uint32_t _pad;
+} DYNAMIC_GI_JOB;
+
+typedef struct DYNAMIC_CELL_UPDATE {
+    uint32_t cell_index;
+    uint32_t generation;
+} DYNAMIC_CELL_UPDATE;
 
 struct RENDERER {
     SDL_Window *window;
@@ -121,6 +134,8 @@ struct RENDERER {
     uint32_t timestamp_query_size;
     bool timestamp_supported;
     PROBE_WAVEFRONT_SCRATCH *probe_scratch;
+    DYNAMIC_STATE *dynamic;
+    DYNAMIC_LIGHTING dynamic_lighting;
 
     uint32_t swapchain_width, swapchain_height, current_swap_index;
 
@@ -255,5 +270,9 @@ void release_bake_resources(RENDERER *r);
 bool draw_frame(RENDERER *r, const RENDER_FRAME *frame);
 bool bake_worker_init(RENDERER *r);
 void bake_worker_deinit(RENDERER *r);
+void dynamic_deinit(RENDERER *r);
+bool dynamic_sync(RENDERER *r);
+uint32_t dynamic_take_gi_jobs(RENDERER *r, DYNAMIC_GI_JOB *out, uint32_t capacity);
+uint32_t dynamic_take_cell_updates(RENDERER *r, DYNAMIC_CELL_UPDATE *out, uint32_t capacity);
 
 #endif

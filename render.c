@@ -585,6 +585,7 @@ void r_event(RENDERER *r, const SDL_Event *event) {
 
 bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const PERIPHERAL_VISION *vision) {
     if (!r || !r->window || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics || !vision) return false;
+    if (!dynamic_sync(r)) return false;
 
     DIRECTIONAL_LIGHT sun = light->directional;
 
