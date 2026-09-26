@@ -12,6 +12,7 @@ gpu = Path("gpu.c").read_text()
 vision = Path("shaders/vision_compute.hlsl").read_text()
 probe = Path("shaders/probe_wavefront.hlsl").read_text()
 compute = Path("shaders/compute.hlsl").read_text()
+compute_base = Path("shaders/compute_base.hlsl").read_text()
 
 require("float probe_intensity;" in game, "VOLUMETRICS_LIGHTING needs probe_intensity")
 require("float emissive_probe_intensity;" in game, "VOLUMETRICS_LIGHTING needs emissive_probe_intensity")
@@ -33,7 +34,8 @@ require("r->volumetrics.emissive_probe_intensity" in gpu, "legacy probe uniforms
 
 require("float4 emissive_params;" in probe, "probe bake cbuffer needs emissive_params")
 require("emissive_params.x" in probe, "wavefront emissive contribution must use emissive probe intensity")
-require("emissive_data.z" in compute, "legacy probe emissive contribution must use emissive probe intensity")
+require("emissive_data.z" in compute_base, "legacy direct emissive probe lighting must use emissive probe intensity")
+require("hit.emissive * max(emissive_data.z" in compute, "legacy primary emissive hits must use emissive probe intensity")
 
 require("float vision_transition(" in vision, "vision shader needs smooth transition helper")
 require("float3 vision_quality_weights(" in vision, "vision shader needs quality crossfade weights")
