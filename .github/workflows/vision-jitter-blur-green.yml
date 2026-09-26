@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Correct patch matcher
+        run: python3 .github/vision_jitter_blur_patch_fix.py
       - name: Apply implementation
         run: python3 .github/vision_jitter_blur_patch.py
       - name: Run source regression contract
