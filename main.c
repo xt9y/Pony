@@ -96,9 +96,9 @@ int main(int argc, char **argv) {
         .state = DYNAMIC,
         .type = MODEL,
         .transform = {
-            .position = {0.0f, 0.0f, 0.0f},
+            .position = {0.6f, 0.3f, 0.0f},
             .rotation = {0.0f, 0.0f, 0.0f},
-            .scale = {10.0f, 10.0f, 10.0f}
+            .scale = {0.8f, 0.8f, 0.8f}
         },
         .data = &cube_model
     };
@@ -107,14 +107,14 @@ int main(int argc, char **argv) {
     DIRECTIONAL_LIGHT directional_sun = {
         .direction = {0.38f, 0.30f, 0.32f},
         .color = {1.00f, 0.94f, 0.84f},
-        .intensity = 1.0f,
+        .intensity = 0.0f,
         .angular_radius = 0.00465f
     };
 
     SKY sky = {
         .zenith = {0.22f, 0.42f, 0.78f},
         .horizon = {0.68f, 0.76f, 0.88f},
-        .intensity = 1.0f
+        .intensity = 0.0f
     };
 
     VOLUMETRICS_LIGHTING volumetrics = {
@@ -377,7 +377,7 @@ int main(int argc, char **argv) {
         const Uint64 now = SDL_GetTicks();
         const float motion_seconds = (float)(now - motion_start) * 0.001f;
 
-        cube_object.transform.position.x = sinf(motion_seconds) * 2.0f;
+        cube_object.transform.position.x = sinf(motion_seconds) * 0.5f;
 
         const bool idle_bake = bake_active(&r) && now - last_input >= BAKE_IDLE_GRACE_MS;
 
