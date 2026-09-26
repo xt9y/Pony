@@ -506,7 +506,7 @@ void grade_cs(uint3 id : SV_DispatchThreadID)
     float3 color = float3(r, g, b) / float(size - 1u);
     Output[id.xy] = float4(grade(color), 1.0f);
 }
-#elif defined(BUILD_LIGHTMAP_CS) || defined(BUILD_PROBE_CS)
+#elif (defined(BUILD_LIGHTMAP_CS) || defined(BUILD_LIGHTMAP_WAVE_CS)) || defined(BUILD_PROBE_CS)
 struct BvhNode
 {
     float4 bmin;
@@ -544,14 +544,14 @@ struct BakeSample
     float4 normal;
 };
 
-#if defined(BUILD_LIGHTMAP_CS)
+#if (defined(BUILD_LIGHTMAP_CS) || defined(BUILD_LIGHTMAP_WAVE_CS))
 GPU_BIND_T(2, 0) StructuredBuffer<BvhNode> Nodes : register(t2, space0);
 GPU_BIND_T(3, 0) StructuredBuffer<BvhTriangle> Triangles : register(t3, space0);
 #else
 GPU_BIND_T(1, 0) StructuredBuffer<BvhNode> Nodes : register(t1, space0);
 GPU_BIND_T(2, 0) StructuredBuffer<BvhTriangle> Triangles : register(t2, space0);
 #endif
-#if defined(BUILD_LIGHTMAP_CS)
+#if (defined(BUILD_LIGHTMAP_CS) || defined(BUILD_LIGHTMAP_WAVE_CS))
 GPU_BIND_T(0, 0) Texture2D<float4> Source : register(t0, space0);
 GPU_BIND_S(0, 0) SamplerState SourceSampler : register(s0, space0);
 GPU_BIND_T(1, 0) Texture2D<float4> Direct : register(t1, space0);
@@ -561,7 +561,11 @@ GPU_BIND_T(5, 0) StructuredBuffer<BakeProbe> BakeProbes : register(t5, space0);
 GPU_BIND_T(6, 0) StructuredBuffer<uint> PatchMap : register(t6, space0);
 GPU_BIND_T(7, 0) StructuredBuffer<uint4> PatchAnchors : register(t7, space0);
 GPU_BIND_T(4, 0) StructuredBuffer<BakeSample> Samples : register(t4, space0);
+GPU_BIND_T(8, 0) StructuredBuffer<uint> ActiveIndices : register(t8, space0);
+GPU_BIND_T(9, 0) StructuredBuffer<uint> ActiveCount : register(t9, space0);
 GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
+GPU_BIND_U(1, 1) RWStructuredBuffer<uint> ActiveOut : register(u1, space1);
+GPU_BIND_U(2, 1) RWStructuredBuffer<uint> ActiveOutCount : register(u2, space1);
 #else
 GPU_BIND_T(0, 0) StructuredBuffer<float4> ProbePositions : register(t0, space0);
 GPU_BIND_U(0, 1) RWStructuredBuffer<float4> ProbeCoefficients : register(u0, space1);
@@ -621,7 +625,7 @@ float3 sky_radiance(float3 direction)
     return lerp(sky_horizon.rgb, sky_zenith.rgb, t) * bake_params.z;
 }
 
-#if defined(BUILD_LIGHTMAP_CS)
+#if (defined(BUILD_LIGHTMAP_CS) || defined(BUILD_LIGHTMAP_WAVE_CS))
 float4 source_pixel(int2 p)
 {
     float2 uv = (float2(p) + 0.5f) / float2(lightmap_width, lightmap_height);
@@ -847,7 +851,7 @@ float3 direct_sun(float3 position, float3 normal, inout uint seed)
     return sun_color_radius.rgb * (sun_direction_intensity.w * n_dot_l);
 }
 
-#if defined(BUILD_LIGHTMAP_CS)
+#if (defined(BUILD_LIGHTMAP_CS) || defined(BUILD_LIGHTMAP_WAVE_CS))
 float3 bake_probe_irradiance(float3 position, float3 normal,
                              out float validity)
 {
@@ -903,7 +907,7 @@ float3 trace_path_core(float3 position, float3 normal, inout uint seed,
         throughput *= hit.albedo;
         position = ray.origin + ray.direction * hit.t;
         normal = hit.normal;
-#if defined(BUILD_LIGHTMAP_CS)
+#if (defined(BUILD_LIGHTMAP_CS) || defined(BUILD_LIGHTMAP_WAVE_CS))
         // Only reuse probes at secondary hits; primary reuse leaks across walls.
         {
             float validity;
@@ -925,7 +929,7 @@ float3 trace_path(float3 position, float3 normal, inout uint seed)
     return trace_path_core(position, normal, seed, true);
 }
 
-#if defined(BUILD_LIGHTMAP_CS)
+#if (defined(BUILD_LIGHTMAP_CS) || defined(BUILD_LIGHTMAP_WAVE_CS))
 float4 filtered_pixel(int2 p)
 {
     float4 center = source_pixel(p);
@@ -979,8 +983,16 @@ float4 dilated_pixel(int2 p)
 [numthreads(64, 1, 1)]
 void lightmap_cs(uint3 dispatch_id : SV_DispatchThreadID)
 {
-    uint index = dispatch_id.x + dispatch_id.y * dispatch_width;
-    if (index >= item_count)
+    uint dispatch_index = dispatch_id.x + dispatch_id.y * dispatch_width;
+    uint index = dispatch_index;
+    if (phase == PHASE_TRACE && probe_dims_mode.w != 0u)
+    {
+        uint active_count = ActiveCount[0];
+        if (dispatch_index >= active_count)
+            return;
+        index = ActiveIndices[dispatch_index];
+    }
+    else if (index >= item_count)
         return;
 
     if (phase == PHASE_CLEAR)
@@ -1081,6 +1093,23 @@ void lightmap_cs(uint3 dispatch_id : SV_DispatchThreadID)
             // Retain the sample count in negative alpha to mark convergence.
             previous = float4(mean, converged ? -(float)(current + 1u) : max(m2, 1.0e-6f));
         }
+        if (previous.a >= 0.0f)
+        {
+            uint slot = 0u;
+#if defined(BUILD_LIGHTMAP_WAVE_CS)
+            uint wave_offset = WavePrefixCountBits(true);
+            uint wave_count = WaveActiveCountBits(true);
+            uint wave_base = 0u;
+            if (WaveIsFirstLane())
+                InterlockedAdd(ActiveOutCount[0], wave_count, wave_base);
+            wave_base = WaveReadLaneFirst(wave_base);
+            slot = wave_base + wave_offset;
+#else
+            InterlockedAdd(ActiveOutCount[0], 1u, slot);
+#endif
+            ActiveOut[slot] = index;
+        }
+
         Output[pixel_xy] = previous;
         return;
     }

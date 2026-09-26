@@ -1,6 +1,16 @@
+#ifndef GPU_BIND_S
+#define GPU_BIND_S(n,s) [[vk::binding(n, s)]]
+#define GPU_BIND_T(n,s) [[vk::binding(n + 16, s)]]
+#define GPU_BIND_B(n,s) [[vk::binding(n + 32, s)]]
+#define GPU_BIND_U(n,s) [[vk::binding(n + 48, s)]]
+#define GPU_STORAGE_RGBA16F [[vk::image_format("rgba16f")]]
+#endif
+
 #if defined(BUILD_PROBE_PREP_CS) || defined(BUILD_PROBE_RESET_CS) || \
       defined(BUILD_PROBE_VALIDATE_CS) || defined(BUILD_PROBE_PRIMARY_CS) || \
-      defined(BUILD_PROBE_BOUNCE_CS) || defined(BUILD_PROBE_REDUCE_CS)
+      defined(BUILD_PROBE_PRIMARY_WAVE_CS) || defined(BUILD_PROBE_BOUNCE_CS) || \
+      defined(BUILD_PROBE_BOUNCE_WAVE_CS) || defined(BUILD_PROBE_ARGS_CS) || \
+      defined(BUILD_PROBE_REDUCE_CS)
 
 static const float PROBE_PI = 3.14159265358979323846f;
 static const float PROBE_SH0 = 0.2820947918f;
@@ -37,7 +47,6 @@ struct PackedProbeTriangle
     float4 a;
     float4 edge1;
     float4 edge2;
-    float4 normal;
 };
 
 struct ProbeTraceRay
@@ -60,11 +69,10 @@ struct ProbeTraceHit
 
 struct ProbeRayState
 {
-    float4 position;
-    float4 normal;
-    float4 throughput;
-    float4 radiance;
-    uint4 meta;
+    // position_normal.w stores an octahedral 2x16-bit packed normal.
+    float4 position_normal;
+    // x/y/z store six FP16 throughput/radiance channels; w is result index.
+    uint4 packed;
 };
 
 struct ProbeAccum
@@ -173,6 +181,71 @@ float3 probe_safe_inverse(float3 direction)
         abs(direction.x) < 1.0e-8f ? 0.0f : rcp(direction.x),
         abs(direction.y) < 1.0e-8f ? 0.0f : rcp(direction.y),
         abs(direction.z) < 1.0e-8f ? 0.0f : rcp(direction.z));
+}
+
+float2 probe_oct_wrap(float2 value)
+{
+    float2 sign_value = float2(value.x >= 0.0f ? 1.0f : -1.0f,
+                               value.y >= 0.0f ? 1.0f : -1.0f);
+    return (1.0f - abs(value.yx)) * sign_value;
+}
+
+uint probe_pack_normal(float3 normal)
+{
+    normal /= max(abs(normal.x) + abs(normal.y) + abs(normal.z), 1.0e-8f);
+    float2 oct = normal.z >= 0.0f ? normal.xy : probe_oct_wrap(normal.xy);
+    int2 packed = int2(round(clamp(oct, -1.0f, 1.0f) * 32767.0f));
+    return (uint(packed.x) & 0xffffu) | ((uint(packed.y) & 0xffffu) << 16u);
+}
+
+float3 probe_unpack_normal(uint packed)
+{
+    int sx = (int)(packed << 16u) >> 16;
+    int sy = (int)packed >> 16;
+    float2 oct = float2(sx, sy) / 32767.0f;
+    float3 normal = float3(oct, 1.0f - abs(oct.x) - abs(oct.y));
+    if (normal.z < 0.0f)
+        normal.xy = probe_oct_wrap(normal.xy);
+    return normalize(normal);
+}
+
+uint probe_pack_half2(float2 value)
+{
+    value = clamp(value, -65504.0f, 65504.0f);
+    return (f32tof16(value.x) & 0xffffu) | ((f32tof16(value.y) & 0xffffu) << 16u);
+}
+
+float2 probe_unpack_half2(uint packed)
+{
+    return float2(f16tof32(packed & 0xffffu), f16tof32(packed >> 16u));
+}
+
+ProbeRayState probe_pack_state(float3 position, float3 normal,
+                               float3 throughput, float3 radiance,
+                               uint result_index)
+{
+    ProbeRayState state;
+    state.position_normal = float4(position, asfloat(probe_pack_normal(normal)));
+    state.packed.x = probe_pack_half2(throughput.rg);
+    state.packed.y = probe_pack_half2(float2(throughput.b, radiance.r));
+    state.packed.z = probe_pack_half2(radiance.gb);
+    state.packed.w = result_index;
+    return state;
+}
+
+void probe_unpack_state(ProbeRayState state,
+                        out float3 position, out float3 normal,
+                        out float3 throughput, out float3 radiance,
+                        out uint result_index)
+{
+    position = state.position_normal.xyz;
+    normal = probe_unpack_normal(asuint(state.position_normal.w));
+    float2 throughput_rg = probe_unpack_half2(state.packed.x);
+    float2 throughput_b_radiance_r = probe_unpack_half2(state.packed.y);
+    float2 radiance_gb = probe_unpack_half2(state.packed.z);
+    throughput = float3(throughput_rg, throughput_b_radiance_r.x);
+    radiance = float3(throughput_b_radiance_r.y, radiance_gb);
+    result_index = state.packed.w;
 }
 
 ProbeTraceRay probe_make_ray(float3 origin, float3 direction, float tmin, float tmax)
@@ -288,7 +361,6 @@ void probe_prepare_cs(uint3 id : SV_DispatchThreadID)
         packed.a = source.a;
         packed.edge1 = float4(source.b.xyz - source.a.xyz, source.b.w);
         packed.edge2 = float4(source.c.xyz - source.a.xyz, source.c.w);
-        packed.normal = source.normal;
         ProbePackedTrianglesOut[index] = packed;
     }
 }
@@ -301,7 +373,7 @@ GPU_BIND_T(2, 0) StructuredBuffer<PackedProbeTriangle> ProbeTrianglesValidate : 
 GPU_BIND_U(0, 1) RWStructuredBuffer<ProbeAccum> ProbeAccumsValidate : register(u0, space1);
 #define PROBE_NODES ProbeNodesValidate
 #define PROBE_TRIANGLES ProbeTrianglesValidate
-#elif defined(BUILD_PROBE_PRIMARY_CS)
+#elif defined(BUILD_PROBE_PRIMARY_CS) || defined(BUILD_PROBE_PRIMARY_WAVE_CS)
 GPU_BIND_T(0, 0) StructuredBuffer<float4> ProbePositionsFast : register(t0, space0);
 GPU_BIND_T(1, 0) StructuredBuffer<ProbeAccum> ProbeAccumsPrimary : register(t1, space0);
 GPU_BIND_T(2, 0) StructuredBuffer<PackedProbeNode> ProbeNodesPrimary : register(t2, space0);
@@ -311,7 +383,7 @@ GPU_BIND_U(1, 1) RWStructuredBuffer<ProbeRayState> ProbeStatesPrimary : register
 GPU_BIND_U(2, 1) RWStructuredBuffer<uint> ProbeCountersPrimary : register(u2, space1);
 #define PROBE_NODES ProbeNodesPrimary
 #define PROBE_TRIANGLES ProbeTrianglesPrimary
-#elif defined(BUILD_PROBE_BOUNCE_CS)
+#elif defined(BUILD_PROBE_BOUNCE_CS) || defined(BUILD_PROBE_BOUNCE_WAVE_CS)
 GPU_BIND_T(0, 0) StructuredBuffer<PackedProbeNode> ProbeNodesBounce : register(t0, space0);
 GPU_BIND_T(1, 0) StructuredBuffer<PackedProbeTriangle> ProbeTrianglesBounce : register(t1, space0);
 GPU_BIND_T(2, 0) StructuredBuffer<ProbeRayState> ProbeStatesIn : register(t2, space0);
@@ -323,7 +395,9 @@ GPU_BIND_U(2, 1) RWStructuredBuffer<uint> ProbeCountersBounce : register(u2, spa
 #define PROBE_TRIANGLES ProbeTrianglesBounce
 #endif
 
-#if defined(BUILD_PROBE_VALIDATE_CS) || defined(BUILD_PROBE_PRIMARY_CS) || defined(BUILD_PROBE_BOUNCE_CS)
+#if defined(BUILD_PROBE_VALIDATE_CS) || defined(BUILD_PROBE_PRIMARY_CS) || \
+    defined(BUILD_PROBE_PRIMARY_WAVE_CS) || defined(BUILD_PROBE_BOUNCE_CS) || \
+    defined(BUILD_PROBE_BOUNCE_WAVE_CS)
 bool probe_trace_any(ProbeTraceRay ray)
 {
     uint node_index = 0u;
@@ -379,7 +453,7 @@ bool probe_trace_closest_threaded(ProbeTraceRay ray, out ProbeTraceHit hit)
                 if (!probe_triangle_hit(ray, tri, closest, t))
                     continue;
                 closest = t;
-                float3 normal = normalize(tri.normal.xyz);
+                float3 normal = normalize(cross(tri.edge1.xyz, tri.edge2.xyz));
                 if (dot(normal, ray.direction) > 0.0f)
                     normal = -normal;
                 hit.t = t;
@@ -426,7 +500,7 @@ bool probe_trace_closest(ProbeTraceRay ray, out ProbeTraceHit hit)
                 if (!probe_triangle_hit(ray, tri, closest, t))
                     continue;
                 closest = t;
-                float3 normal = normalize(tri.normal.xyz);
+                float3 normal = normalize(cross(tri.edge1.xyz, tri.edge2.xyz));
                 if (dot(normal, ray.direction) > 0.0f)
                     normal = -normal;
                 hit.t = t;
@@ -504,6 +578,7 @@ void probe_validate_cs(uint3 id : SV_DispatchThreadID)
         float3(1,0,0), float3(-1,0,0), float3(0,1,0),
         float3(0,-1,0), float3(0,0,1), float3(0,0,-1)
     };
+
     for (uint axis = 0u; axis < 6u && valid; ++axis) {
         ProbeTraceRay ray = probe_make_ray(input.xyz, axes[axis], bake_params.x, 0.15f);
         if (probe_trace_any(ray))
@@ -516,7 +591,7 @@ void probe_validate_cs(uint3 id : SV_DispatchThreadID)
 }
 #endif
 
-#if defined(BUILD_PROBE_PRIMARY_CS)
+#if defined(BUILD_PROBE_PRIMARY_CS) || defined(BUILD_PROBE_PRIMARY_WAVE_CS)
 [numthreads(64, 1, 1)]
 void probe_primary_cs(uint3 id : SV_DispatchThreadID)
 {
@@ -545,20 +620,27 @@ void probe_primary_cs(uint3 id : SV_DispatchThreadID)
     }
 
     uint seed = probe_hash(probe_index * 9781u + sample_index * 6271u + 0x51f2e91du);
-    ProbeRayState state;
-    state.position = float4(ray.origin + ray.direction * hit.t, 0.0f);
-    state.normal = float4(hit.normal, 0.0f);
-    state.throughput = float4(hit.albedo / PROBE_PI, 0.0f);
-    state.radiance = 0.0f;
-    state.meta = uint4(result_index, seed, 0u, 0u);
+    ProbeRayState state = probe_pack_state(ray.origin + ray.direction * hit.t,
+                                          hit.normal, hit.albedo / PROBE_PI,
+                                          0.0f, result_index);
 
     uint slot;
+#if defined(BUILD_PROBE_PRIMARY_WAVE_CS)
+    uint wave_offset = WavePrefixCountBits(true);
+    uint wave_count = WaveActiveCountBits(true);
+    uint wave_base = 0u;
+    if (WaveIsFirstLane())
+        InterlockedAdd(ProbeCountersPrimary[0], wave_count, wave_base);
+    wave_base = WaveReadLaneFirst(wave_base);
+    slot = wave_base + wave_offset;
+#else
     InterlockedAdd(ProbeCountersPrimary[0], 1u, slot);
+#endif
     ProbeStatesPrimary[slot] = state;
 }
 #endif
 
-#if defined(BUILD_PROBE_BOUNCE_CS)
+#if defined(BUILD_PROBE_BOUNCE_CS) || defined(BUILD_PROBE_BOUNCE_WAVE_CS)
 bool probe_sun_hint(float3 position, out bool visible)
 {
     visible = false;
@@ -634,12 +716,10 @@ void probe_bounce_cs(uint3 id : SV_DispatchThreadID)
         return;
 
     ProbeRayState state = ProbeStatesIn[index];
-    uint result_index = state.meta.x;
-    uint seed = state.meta.y;
-    float3 position = state.position.xyz;
-    float3 normal = state.normal.xyz;
-    float3 throughput = state.throughput.rgb;
-    float3 radiance = state.radiance.rgb;
+    uint result_index;
+    float3 position, normal, throughput, radiance;
+    probe_unpack_state(state, position, normal, throughput, radiance, result_index);
+    uint seed = probe_hash(result_index * 0x9e3779b9u + (bounce_index + 1u) * 0x85ebca6bu);
 
     radiance += throughput * probe_direct_sun(position, normal, seed);
 
@@ -659,15 +739,36 @@ void probe_bounce_cs(uint3 id : SV_DispatchThreadID)
     }
 
     throughput *= hit.albedo;
-    state.position = float4(ray.origin + ray.direction * hit.t, 0.0f);
-    state.normal = float4(hit.normal, 0.0f);
-    state.meta.y = seed;
-    state.throughput = float4(throughput, 0.0f);
-    state.radiance = float4(radiance, 0.0f);
+    state = probe_pack_state(ray.origin + ray.direction * hit.t,
+                             hit.normal, throughput, radiance, result_index);
 
     uint slot;
+#if defined(BUILD_PROBE_BOUNCE_WAVE_CS)
+    uint wave_offset = WavePrefixCountBits(true);
+    uint wave_count = WaveActiveCountBits(true);
+    uint wave_base = 0u;
+    if (WaveIsFirstLane())
+        InterlockedAdd(ProbeCountersBounce[bounce_index + 1u], wave_count, wave_base);
+    wave_base = WaveReadLaneFirst(wave_base);
+    slot = wave_base + wave_offset;
+#else
     InterlockedAdd(ProbeCountersBounce[bounce_index + 1u], 1u, slot);
+#endif
     ProbeStatesOut[slot] = state;
+}
+#endif
+
+#if defined(BUILD_PROBE_ARGS_CS)
+GPU_BIND_T(0, 0) StructuredBuffer<uint> ProbeCountersArgs : register(t0, space0);
+GPU_BIND_U(0, 1) RWStructuredBuffer<uint> ProbeDispatchArgs : register(u0, space1);
+
+[numthreads(1, 1, 1)]
+void probe_args_cs(uint3 id : SV_DispatchThreadID)
+{
+    uint active_count = ProbeCountersArgs[bounce_index];
+    ProbeDispatchArgs[0] = (active_count + 63u) / 64u;
+    ProbeDispatchArgs[1] = 1u;
+    ProbeDispatchArgs[2] = 1u;
 }
 #endif
 

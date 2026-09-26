@@ -1,3 +1,11 @@
+#ifndef GPU_BIND_S
+#define GPU_BIND_S(n,s) [[vk::binding(n, s)]]
+#define GPU_BIND_T(n,s) [[vk::binding(n + 16, s)]]
+#define GPU_BIND_B(n,s) [[vk::binding(n + 32, s)]]
+#define GPU_BIND_U(n,s) [[vk::binding(n + 48, s)]]
+#define GPU_STORAGE_RGBA16F [[vk::image_format("rgba16f")]]
+#endif
+
 #if defined(BUILD_SURFACE_VS)
 GPU_BIND_B(0, 1) cbuffer Camera : register(b0, space1)
 {

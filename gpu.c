@@ -1,7 +1,6 @@
 #include "game.h"
 
 #include <SDL3_image/SDL_image.h>
-#include <SDL3_shadercross/SDL_shadercross.h>
 
 #include <math.h>
 #include <stddef.h>
@@ -14,6 +13,9 @@
 #define BAKE_BATCH_SAMPLES 8u
 #define BAKE_DILATION_PASSES 3u
 #define FRAME_QUEUE_DEPTH 2u
+#define WORK_QUEUE_DEPTH 8u
+#define UNIFORM_RING_BYTES (1024u * 1024u)
+#define TIMESTAMP_CAPACITY 16u
 #define UPLOAD_RING_SIZE 2u
 #define UPLOAD_CHUNK_BYTES (32u * 1024u * 1024u)
 #define UPLOAD_SLOW_LOG_MS 5000u
@@ -117,6 +119,9 @@ struct frame_context {
 
     uint32_t temporary_descriptor_num, temporary_descriptor_cap;
     uint32_t temporary_buffer_num, temporary_buffer_cap;
+    NriBuffer *uniform_buffer;
+    uint64_t uniform_offset;
+    uint64_t fence_value;
 };
 
 typedef struct upload_slot {
@@ -138,35 +143,15 @@ struct texture_state {
     NriAccessLayoutStage state;
 };
 
-static char *shader_source(const char *path) {
-    size_t size = 0;
-    char *body = SDL_LoadFile(path, &size);
+static Uint8 *load_spirv(const char *define, size_t *size) {
+    char path[256];
+    int written = snprintf(path, sizeof(path), "build/shaders/%s.spv", define);
+    if (written < 0 || (size_t)written >= sizeof(path)) return NULL;
 
-    if (!body) {
-        SDL_Log("shader source load failed for %s: %s", path, SDL_GetError());
-
-        return NULL;
-    }
-
-    const char *bindings = "#define GPU_BIND_S(n,s) [[vk::binding(n, s)]]\n"
-                           "#define GPU_BIND_T(n,s) [[vk::binding(n + 16, s)]]\n"
-                           "#define GPU_BIND_B(n,s) [[vk::binding(n + 32, s)]]\n"
-                           "#define GPU_BIND_U(n,s) [[vk::binding(n + 48, s)]]\n"
-                           "#define GPU_STORAGE_RGBA16F [[vk::image_format(\"rgba16f\")]]\n";
-
-    const size_t prefix = strlen(bindings);
-    char *source = SDL_malloc(prefix + size + 1);
-
-    if (source) {
-        memcpy(source, bindings, prefix);
-        memcpy(source + prefix, body, size);
-
-        source[prefix + size] = '\0';
-    }
-
-    SDL_free(body);
-
-    return source;
+    Uint8 *spirv = SDL_LoadFile(path, size);
+    if (!spirv)
+        SDL_Log("SPIR-V load failed for %s: %s", path, SDL_GetError());
+    return spirv;
 }
 
 static vec3 sun_direction(void) {
@@ -179,77 +164,146 @@ static void free_probe_grid(probe_grid *grid) {
     memset(grid, 0, sizeof(*grid));
 }
 
-static SDL_ShaderCross_ShaderStage get_shadercross_stage(NriStageBits stage) {
+static bool create_pipeline_cache(renderer *r) {
+    if (!r || !r->device) return false;
+    if (r->pipeline_cache) return true;
 
-    if (stage == NriStageBits_VERTEX_SHADER) return SDL_SHADERCROSS_SHADERSTAGE_VERTEX;
+    const NriPipelineCacheDesc desc = {0};
+    NriResult result = r->core.CreatePipelineCache(r->device, &desc, &r->pipeline_cache);
 
-    if (stage == NriStageBits_FRAGMENT_SHADER) return SDL_SHADERCROSS_SHADERSTAGE_FRAGMENT;
+    if (result == NriResult_UNSUPPORTED) {
+        r->pipeline_cache = NULL;
+        return true;
+    }
 
-    if (stage == NriStageBits_COMPUTE_SHADER) return SDL_SHADERCROSS_SHADERSTAGE_COMPUTE;
-
-    SDL_Log("unsupported NRI shader stage: %u", (unsigned)stage);
-
-    return SDL_SHADERCROSS_SHADERSTAGE_VERTEX;
+    return result == NriResult_SUCCESS;
 }
 
-static Uint8 *compile_spirv(const char *path, const char *entrypoint, const char *define, NriStageBits stage, size_t *size) {
+static void destroy_pipeline_cache(renderer *r) {
+    if (!r || !r->pipeline_cache) return;
+    r->core.DestroyPipelineCache(r->pipeline_cache);
+    r->pipeline_cache = NULL;
+}
 
-    char *source = shader_source(path);
+static bool acquire_queues(renderer *r) {
+    if (!r || !r->device) return false;
 
-    if (!source) {
-        SDL_Log("shader source load failed for %s: %s", path, SDL_GetError());
+    if (r->core.GetQueue(r->device, NriQueueType_GRAPHICS, 0, &r->graphics_queue) != NriResult_SUCCESS)
+        return false;
 
-        return NULL;
+    if (r->core.GetQueue(r->device, NriQueueType_COMPUTE, 0, &r->compute_queue) != NriResult_SUCCESS)
+        r->compute_queue = r->graphics_queue;
+
+    if (r->core.GetQueue(r->device, NriQueueType_COPY, 0, &r->copy_queue) != NriResult_SUCCESS)
+        r->copy_queue = r->graphics_queue;
+
+    r->work_queue = r->compute_queue ? r->compute_queue : r->graphics_queue;
+    return true;
+}
+
+static bool create_gpu_timestamps(renderer *r) {
+    if (!r || !r->device) return false;
+
+    const NriDeviceDesc *device = r->core.GetDeviceDesc(r->device);
+    if (!device || !device->features.timestamp || !device->other.timestampFrequencyHz)
+        return true;
+
+    const NriQueryPoolDesc query_desc = {.queryType = NriQueryType_TIMESTAMP, .capacity = TIMESTAMP_CAPACITY};
+    if (r->core.CreateQueryPool(r->device, &query_desc, &r->timestamp_pool) != NriResult_SUCCESS)
+        return true;
+
+    r->timestamp_query_size = r->core.GetQuerySize(r->timestamp_pool);
+    if (!r->timestamp_query_size) {
+        r->core.DestroyQueryPool(r->timestamp_pool);
+        r->timestamp_pool = NULL;
+        return true;
     }
 
-    SDL_ShaderCross_HLSL_Define defines[2] = {{.name = (char *)define, .value = NULL}, {0}};
-
-    const SDL_ShaderCross_HLSL_Info hlsl = {
-        .source = source, .entrypoint = entrypoint, .include_dir = "shaders", .defines = defines, .shader_stage = get_shadercross_stage(stage), .props = 0};
-
-    Uint8 *spirv = SDL_ShaderCross_CompileSPIRVFromHLSL(&hlsl, size);
-
-    SDL_free(source);
-
-    if (!spirv) {
-        SDL_Log("shadercross HLSL->SPIR-V failed for %s:%s: %s", path, entrypoint, SDL_GetError());
+    const NriBufferDesc readback_desc = {.size = (uint64_t)r->timestamp_query_size * TIMESTAMP_CAPACITY};
+    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_READBACK, 0.0f, &readback_desc, &r->timestamp_readback) != NriResult_SUCCESS) {
+        r->core.DestroyQueryPool(r->timestamp_pool);
+        r->timestamp_pool = NULL;
+        r->timestamp_query_size = 0u;
+        return true;
     }
 
-    return spirv;
+    r->timestamp_supported = true;
+    return true;
+}
+
+static void destroy_gpu_timestamps(renderer *r) {
+    if (!r) return;
+    if (r->timestamp_readback) r->core.DestroyBuffer(r->timestamp_readback);
+    if (r->timestamp_pool) r->core.DestroyQueryPool(r->timestamp_pool);
+    r->timestamp_readback = NULL;
+    r->timestamp_pool = NULL;
+    r->timestamp_query_size = 0u;
+    r->timestamp_supported = false;
+}
+
+static bool gpu_timestamp_begin(renderer *r, NriCommandBuffer *cmd, uint32_t slot) {
+    if (!r || !cmd || !r->timestamp_supported) return true;
+    if (slot + 1u >= TIMESTAMP_CAPACITY) return false;
+    r->core.CmdResetQueries(cmd, r->timestamp_pool, slot, 2u);
+    r->core.CmdEndQuery(cmd, r->timestamp_pool, slot);
+    return true;
+}
+
+static bool gpu_timestamp_end(renderer *r, NriCommandBuffer *cmd, uint32_t slot) {
+    if (!r || !cmd || !r->timestamp_supported) return true;
+    if (slot + 1u >= TIMESTAMP_CAPACITY) return false;
+    r->core.CmdEndQuery(cmd, r->timestamp_pool, slot + 1u);
+    r->core.CmdCopyQueries(cmd, r->timestamp_pool, slot, 2u, r->timestamp_readback, (uint64_t)slot * r->timestamp_query_size);
+    return true;
+}
+
+static void gpu_timestamp_log(renderer *r, uint32_t slot, const char *label) {
+    if (!r || !r->timestamp_supported || slot + 1u >= TIMESTAMP_CAPACITY || !label) return;
+
+    const NriDeviceDesc *device = r->core.GetDeviceDesc(r->device);
+    if (!device || !device->other.timestampFrequencyHz) return;
+
+    const uint64_t offset = (uint64_t)slot * r->timestamp_query_size;
+    const uint64_t bytes = (uint64_t)r->timestamp_query_size * 2u;
+    const uint8_t *mapped = r->core.MapBuffer(r->timestamp_readback, offset, bytes);
+    if (!mapped) return;
+
+    uint64_t begin = 0u;
+    uint64_t end = 0u;
+    memcpy(&begin, mapped, sizeof(begin));
+    memcpy(&end, mapped + r->timestamp_query_size, sizeof(end));
+    r->core.UnmapBuffer(r->timestamp_readback);
+
+    if (end >= begin) {
+        const double ms = (double)(end - begin) * 1000.0 / (double)device->other.timestampFrequencyHz;
+        SDL_Log("GPU: %s %.3f ms", label, ms);
+    }
 }
 
 static NriShaderDesc compile_shader(const char *path, const char *entrypoint, const char *define, NriStageBits stage) {
+    (void)path;
     size_t spirv_size = 0;
-
-    Uint8 *spirv = compile_spirv(path, entrypoint, define, stage, &spirv_size);
+    Uint8 *spirv = load_spirv(define, &spirv_size);
     if (!spirv) return (NriShaderDesc){0};
-
     return (NriShaderDesc){.stage = stage, .bytecode = spirv, .size = spirv_size, .entryPointName = entrypoint};
 }
 
-static NriPipeline *compile_compute(NriCoreInterface *core, NriDevice *device, NriPipelineLayout *layout, const char *path, const char *entrypoint, const char *define) {
+static NriPipeline *compile_compute(renderer *r, NriPipelineLayout *layout, const char *path, const char *entrypoint, const char *define) {
+    (void)path;
     size_t spirv_size = 0;
-
-    Uint8 *spirv = compile_spirv(path, entrypoint, define, NriStageBits_COMPUTE_SHADER, &spirv_size);
-
+    Uint8 *spirv = load_spirv(define, &spirv_size);
     if (!spirv) return NULL;
 
-    NriShaderDesc shader = {.stage = NriStageBits_COMPUTE_SHADER, .bytecode = spirv, .size = spirv_size, .entryPointName = entrypoint};
-
-    NriComputePipelineDesc desc = {.pipelineLayout = layout, .shader = shader};
-
+    const NriShaderDesc shader = {.stage = NriStageBits_COMPUTE_SHADER, .bytecode = spirv, .size = spirv_size, .entryPointName = entrypoint};
+    const NriComputePipelineDesc desc = {.pipelineLayout = layout, .shader = shader, .cache = r->pipeline_cache};
     NriPipeline *pipeline = NULL;
-
-    NriResult result = core->CreateComputePipeline(device, &desc, &pipeline);
-
+    NriResult result = r->core.CreateComputePipeline(r->device, &desc, &pipeline);
     SDL_free(spirv);
 
     if (result != NriResult_SUCCESS) {
-        SDL_Log("compute pipeline creation failed for %s:%s", path, entrypoint);
-
+        SDL_Log("compute pipeline creation failed for %s:%s", define, entrypoint);
         return NULL;
     }
-
     return pipeline;
 }
 
@@ -305,7 +359,7 @@ static NriPipeline *make_surface_pipeline(renderer *r, NriCoreInterface *core, N
                                                            .depthStencilFormat = r->depth_format},
 
                                           .shaders = shaders,
-                                          .shaderNum = 2};
+                                          .shaderNum = 2, .cache = r->pipeline_cache};
 
     NriPipeline *pipeline = NULL;
 
@@ -317,60 +371,25 @@ static NriPipeline *make_surface_pipeline(renderer *r, NriCoreInterface *core, N
 }
 
 static void clear_temporary(renderer *r);
+static bool begin_work_commands(renderer *r, NriCommandAllocator **allocator, NriCommandBuffer **command_buffer);
+static bool submit_work_commands(renderer *r, NriCommandAllocator *allocator, NriCommandBuffer *command_buffer, bool wait);
+static void abort_work_commands(renderer *r, NriCommandAllocator *allocator, NriCommandBuffer *command_buffer);
+static void work_drain(renderer *r);
 
 static NriResult begin_commands(renderer *r, NriCommandAllocator **allocator, NriCommandBuffer **command_buffer) {
-    if (!r || !r->graphics_queue) return NriResult_INVALID_ARGUMENT;
-    r->current_graphics_layout = r->current_compute_layout = NULL;
-
-    NriResult result = r->core.CreateCommandAllocator(r->graphics_queue, allocator);
-
-    if (result != NriResult_SUCCESS) return result;
-
-    result = r->core.CreateCommandBuffer(*allocator, command_buffer);
-
-    if (result != NriResult_SUCCESS) {
-        r->core.DestroyCommandAllocator(*allocator);
-        *allocator = NULL;
-        return result;
-    }
-
-    result = r->core.BeginCommandBuffer(*command_buffer, r->descriptor_pool);
-
-    if (result != NriResult_SUCCESS) {
-        r->core.DestroyCommandBuffer(*command_buffer);
-        r->core.DestroyCommandAllocator(*allocator);
-        *command_buffer = NULL;
-        *allocator = NULL;
-    }
-
-    return result;
+    return begin_work_commands(r, allocator, command_buffer) ? NriResult_SUCCESS : NriResult_FAILURE;
 }
 
 static bool submit_commands(renderer *r, NriCommandAllocator *allocator, NriCommandBuffer *command_buffer) {
-    if (!r || !allocator || !command_buffer) return false;
+    return submit_work_commands(r, allocator, command_buffer, true);
+}
 
-    bool good = r->core.EndCommandBuffer(command_buffer) == NriResult_SUCCESS;
-
-    if (good) {
-        const NriQueueSubmitDesc submit = {.commandBuffers = (const NriCommandBuffer *const *)&command_buffer, .commandBufferNum = 1};
-
-        good = r->core.QueueSubmit(r->graphics_queue, &submit) == NriResult_SUCCESS;
-
-        if (good) good = r->core.QueueWaitIdle(r->graphics_queue) == NriResult_SUCCESS;
-    }
-
-    r->core.DestroyCommandBuffer(command_buffer);
-    r->core.DestroyCommandAllocator(allocator);
-    clear_temporary(r);
-
-    return good;
+static bool submit_commands_async(renderer *r, NriCommandAllocator *allocator, NriCommandBuffer *command_buffer) {
+    return submit_work_commands(r, allocator, command_buffer, false);
 }
 
 static void abort_commands(renderer *r, NriCommandAllocator *allocator, NriCommandBuffer *cmd) {
-    if (cmd) r->core.DestroyCommandBuffer(cmd);
-
-    if (allocator) r->core.DestroyCommandAllocator(allocator);
-    clear_temporary(r);
+    abort_work_commands(r, allocator, cmd);
 }
 
 /* Descriptor sets match the HLSL register spaces in shaders/. */
@@ -387,8 +406,17 @@ static bool create_pipeline_layout(renderer *r, NriPipelineLayout **out, const N
             NriDescriptorType type = types[set][i];
             uint32_t reg = 0;
 
-            for (uint32_t j = 0; j < i; ++j)
-                if (types[set][j] == type || (type == NriDescriptorType_STRUCTURED_BUFFER && types[set][j] == NriDescriptorType_TEXTURE)) ++reg;
+            for (uint32_t j = 0; j < i; ++j) {
+                const NriDescriptorType previous = types[set][j];
+                const bool sampled_namespace =
+                    (type == NriDescriptorType_TEXTURE || type == NriDescriptorType_STRUCTURED_BUFFER) &&
+                    (previous == NriDescriptorType_TEXTURE || previous == NriDescriptorType_STRUCTURED_BUFFER);
+                const bool storage_namespace =
+                    (type == NriDescriptorType_STORAGE_TEXTURE || type == NriDescriptorType_STORAGE_STRUCTURED_BUFFER) &&
+                    (previous == NriDescriptorType_STORAGE_TEXTURE || previous == NriDescriptorType_STORAGE_STRUCTURED_BUFFER);
+
+                if (previous == type || sampled_namespace || storage_namespace) ++reg;
+            }
 
             ranges[set][i] = (NriDescriptorRangeDesc){.baseRegisterIndex = reg, .descriptorNum = 1, .descriptorType = type, .shaderStages = stages};
         }
@@ -450,9 +478,28 @@ static bool create_bake_layout(renderer *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE,           NriDescriptorType_SAMPLER,           NriDescriptorType_TEXTURE,
                                             NriDescriptorType_SAMPLER,           NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
                                             NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
-                                            NriDescriptorType_STRUCTURED_BUFFER};
+                                            NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER};
+    static const NriDescriptorType dst[] = {NriDescriptorType_STORAGE_TEXTURE, NriDescriptorType_STORAGE_STRUCTURED_BUFFER,
+                                            NriDescriptorType_STORAGE_STRUCTURED_BUFFER};
+    static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
+    const NriDescriptorType *sets[4] = {src, dst, uniform, NULL};
+    const uint8_t counts[4] = {12, 3, 1, 0};
 
-    return create_compute_layout(r, &r->bake_layout, src, 10, NriDescriptorType_STORAGE_TEXTURE, true);
+    return create_pipeline_layout(r, &r->bake_layout, sets, counts, NriStageBits_COMPUTE_SHADER);
+}
+
+static bool create_lightmap_queue_layouts(renderer *r) {
+    static const NriDescriptorType read_count[] = {NriDescriptorType_STRUCTURED_BUFFER};
+    static const NriDescriptorType write_buffer[] = {NriDescriptorType_STORAGE_STRUCTURED_BUFFER};
+    static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
+
+    const NriDescriptorType *reset_sets[4] = {NULL, write_buffer, NULL, NULL};
+    const uint8_t reset_counts[4] = {0, 1, 0, 0};
+    const NriDescriptorType *args_sets[4] = {read_count, write_buffer, uniform, NULL};
+    const uint8_t args_counts[4] = {1, 1, 1, 0};
+
+    return create_pipeline_layout(r, &r->lightmap_queue_reset_layout, reset_sets, reset_counts, NriStageBits_COMPUTE_SHADER) &&
+           create_pipeline_layout(r, &r->lightmap_queue_args_layout, args_sets, args_counts, NriStageBits_COMPUTE_SHADER);
 }
 
 static bool create_probe_layout(renderer *r) {
@@ -601,8 +648,155 @@ static void clear_frame_temporary(renderer *r, frame_context *frame) {
         r->core.DestroyBuffer(frame->temporary_buffers[i]);
     frame->temporary_descriptor_num = 0;
     frame->temporary_buffer_num = 0;
+    frame->uniform_offset = 0u;
 
     if (frame->descriptor_pool) r->core.ResetDescriptorPool(frame->descriptor_pool);
+}
+
+static bool create_uniform_ring(renderer *r, frame_context *context) {
+    if (!r || !context) return false;
+    const NriBufferDesc desc = {.size = UNIFORM_RING_BYTES, .usage = NriBufferUsageBits_CONSTANT};
+    return r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_UPLOAD, 0.0f, &desc, &context->uniform_buffer) == NriResult_SUCCESS;
+}
+
+static bool create_work_contexts(renderer *r) {
+    if (!r || !r->device || !r->work_queue) return false;
+
+    r->work_contexts = calloc(WORK_QUEUE_DEPTH, sizeof(*r->work_contexts));
+    if (!r->work_contexts) return false;
+
+    if (r->core.CreateFence(r->device, 0u, &r->work_fence) != NriResult_SUCCESS) return false;
+
+    for (uint32_t i = 0; i < WORK_QUEUE_DEPTH; ++i) {
+        frame_context *work = &r->work_contexts[i];
+
+        if (!create_descriptor_pool_object(r, &work->descriptor_pool) || !create_uniform_ring(r, work) ||
+            r->core.CreateCommandAllocator(r->work_queue, &work->allocator) != NriResult_SUCCESS ||
+            r->core.CreateCommandBuffer(work->allocator, &work->command_buffer) != NriResult_SUCCESS)
+            return false;
+    }
+
+    r->work_next_fence = 1u;
+    return true;
+}
+
+static void work_drain(renderer *r) {
+    if (!r || !r->work_fence || r->work_next_fence <= 1u) return;
+    r->core.Wait(r->work_fence, r->work_next_fence - 1u);
+}
+
+static void destroy_work_contexts(renderer *r) {
+    if (!r) return;
+    work_drain(r);
+
+    if (r->work_contexts) {
+        for (uint32_t i = 0; i < WORK_QUEUE_DEPTH; ++i) {
+            frame_context *work = &r->work_contexts[i];
+            clear_frame_temporary(r, work);
+
+            if (work->command_buffer) r->core.DestroyCommandBuffer(work->command_buffer);
+            if (work->allocator) r->core.DestroyCommandAllocator(work->allocator);
+            if (work->descriptor_pool) r->core.DestroyDescriptorPool(work->descriptor_pool);
+            if (work->uniform_buffer) r->core.DestroyBuffer(work->uniform_buffer);
+
+            free(work->temporary_descriptors);
+            free(work->temporary_buffers);
+        }
+
+        free(r->work_contexts);
+    }
+
+    r->work_contexts = NULL;
+    r->active_work = NULL;
+
+    if (r->work_fence) r->core.DestroyFence(r->work_fence);
+    r->work_fence = NULL;
+}
+
+static bool begin_work_commands(renderer *r, NriCommandAllocator **allocator, NriCommandBuffer **command_buffer) {
+    if (!r || !r->work_contexts || !r->work_fence || !r->work_queue || !allocator || !command_buffer) return false;
+
+    frame_context *work = &r->work_contexts[r->work_index % WORK_QUEUE_DEPTH];
+
+    if (work->fence_value && r->core.GetFenceValue(r->work_fence) < work->fence_value)
+        r->core.Wait(r->work_fence, work->fence_value);
+
+    clear_frame_temporary(r, work);
+    r->core.ResetCommandAllocator(work->allocator);
+    r->current_graphics_layout = r->current_compute_layout = NULL;
+    r->active_work = work;
+    r->active_frame = work;
+
+    if (r->core.BeginCommandBuffer(work->command_buffer, work->descriptor_pool) != NriResult_SUCCESS) {
+        r->active_work = NULL;
+        r->active_frame = NULL;
+        return false;
+    }
+
+    *allocator = work->allocator;
+    *command_buffer = work->command_buffer;
+    return true;
+}
+
+static bool submit_work_commands(renderer *r, NriCommandAllocator *allocator, NriCommandBuffer *command_buffer, bool wait) {
+    frame_context *work = r ? r->active_work : NULL;
+
+    if (!r || !work || work->allocator != allocator || work->command_buffer != command_buffer) return false;
+
+    bool good = r->core.EndCommandBuffer(command_buffer) == NriResult_SUCCESS;
+    uint64_t value = 0u;
+
+    if (good) {
+        value = r->work_next_fence++;
+        const NriFenceSubmitDesc signal = {.fence = r->work_fence, .value = value};
+        NriFenceSubmitDesc upload_wait = {0};
+        uint32_t upload_wait_num = 0u;
+
+        if (r->upload && r->upload->fence && r->upload->next_fence_value > 1u) {
+            upload_wait = (NriFenceSubmitDesc){.fence = r->upload->fence,
+                                               .value = r->upload->next_fence_value - 1u,
+                                               .stages = NriStageBits_ALL};
+            upload_wait_num = 1u;
+        }
+
+        const NriQueueSubmitDesc submit = {.waitFences = upload_wait_num ? &upload_wait : NULL,
+                                           .waitFenceNum = upload_wait_num,
+                                           .commandBuffers = (const NriCommandBuffer *const *)&command_buffer,
+                                           .commandBufferNum = 1u,
+                                           .signalFences = &signal,
+                                           .signalFenceNum = 1u};
+        good = r->core.QueueSubmit(r->work_queue, &submit) == NriResult_SUCCESS;
+    }
+
+    if (good) {
+        work->fence_value = value;
+        r->work_index++;
+    }
+
+    r->active_work = NULL;
+    r->active_frame = NULL;
+
+    if (good && wait) r->core.Wait(r->work_fence, value);
+    return good;
+}
+
+static void abort_work_commands(renderer *r, NriCommandAllocator *allocator, NriCommandBuffer *command_buffer) {
+    if (!r) return;
+
+    frame_context *work = r->active_work;
+    if (!work || work->allocator != allocator || work->command_buffer != command_buffer) return;
+
+    if (work->command_buffer) r->core.DestroyCommandBuffer(work->command_buffer);
+    if (work->allocator) r->core.DestroyCommandAllocator(work->allocator);
+
+    work->command_buffer = NULL;
+    work->allocator = NULL;
+    clear_frame_temporary(r, work);
+    r->active_work = NULL;
+    r->active_frame = NULL;
+
+    if (r->core.CreateCommandAllocator(r->work_queue, &work->allocator) == NriResult_SUCCESS)
+        r->core.CreateCommandBuffer(work->allocator, &work->command_buffer);
 }
 
 static bool create_frame_contexts(renderer *r) {
@@ -615,7 +809,8 @@ static bool create_frame_contexts(renderer *r) {
     for (uint32_t i = 0; i < FRAME_QUEUE_DEPTH; ++i) {
         frame_context *frame = &r->frame_contexts[i];
 
-        if (!create_descriptor_pool_object(r, &frame->descriptor_pool) || r->core.CreateCommandAllocator(r->graphics_queue, &frame->allocator) != NriResult_SUCCESS ||
+        if (!create_descriptor_pool_object(r, &frame->descriptor_pool) || !create_uniform_ring(r, frame) ||
+            r->core.CreateCommandAllocator(r->graphics_queue, &frame->allocator) != NriResult_SUCCESS ||
             r->core.CreateCommandBuffer(frame->allocator, &frame->command_buffer) != NriResult_SUCCESS)
             return false;
     }
@@ -634,6 +829,7 @@ static void destroy_frame_contexts(renderer *r) {
             if (frame->allocator) r->core.DestroyCommandAllocator(frame->allocator);
 
             if (frame->descriptor_pool) r->core.DestroyDescriptorPool(frame->descriptor_pool);
+            if (frame->uniform_buffer) r->core.DestroyBuffer(frame->uniform_buffer);
             free(frame->temporary_descriptors);
             free(frame->temporary_buffers);
         }
@@ -709,23 +905,46 @@ static NriDescriptor *create_buffer_view(renderer *r, NriBuffer *buffer, NriBuff
 }
 
 static NriDescriptor *uniform_view(renderer *r, const void *data, size_t size) {
-    if (!data || !size) return NULL;
+    if (!r || !data || !size) return NULL;
 
-    const NriBufferDesc desc = {.size = (size + 255u) & ~(uint64_t)255u, .usage = NriBufferUsageBits_CONSTANT};
+    frame_context *context = r->active_frame;
+    const NriDeviceDesc *device = r->core.GetDeviceDesc(r->device);
+    uint64_t alignment = device ? device->memoryAlignment.constantBufferOffset : 256u;
+    if (alignment < 16u) alignment = 16u;
+    const uint64_t view_size = ((uint64_t)size + alignment - 1u) / alignment * alignment;
 
+    if (context && context->uniform_buffer) {
+        const uint64_t offset = (context->uniform_offset + alignment - 1u) / alignment * alignment;
+        if (offset + view_size <= UNIFORM_RING_BYTES) {
+            void *mapped = r->core.MapBuffer(context->uniform_buffer, offset, view_size);
+            if (mapped) {
+                memset(mapped, 0, view_size);
+                memcpy(mapped, data, size);
+                r->core.UnmapBuffer(context->uniform_buffer);
+
+                NriDescriptor *view = NULL;
+                const NriBufferViewDesc desc = {.buffer = context->uniform_buffer,
+                                                .type = NriBufferView_CONSTANT_BUFFER,
+                                                .offset = offset,
+                                                .size = view_size};
+                if (r->core.CreateBufferView(&desc, &view) == NriResult_SUCCESS && track_descriptor(r, view)) {
+                    context->uniform_offset = offset + view_size;
+                    return view;
+                }
+            }
+        }
+    }
+
+    const NriBufferDesc desc = {.size = view_size, .usage = NriBufferUsageBits_CONSTANT};
     NriBuffer *buffer = NULL;
-
-    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_UPLOAD, 1.0f, &desc, &buffer) != NriResult_SUCCESS) return NULL;
-
+    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_UPLOAD, 0.0f, &desc, &buffer) != NriResult_SUCCESS) return NULL;
     if (!track_buffer(r, buffer)) return NULL;
 
     void *mapped = r->core.MapBuffer(buffer, 0, desc.size);
-
     if (!mapped) return NULL;
     memset(mapped, 0, desc.size);
     memcpy(mapped, data, size);
     r->core.UnmapBuffer(buffer);
-
     return create_buffer_view(r, buffer, NriBufferView_CONSTANT_BUFFER, 0);
 }
 
@@ -765,8 +984,11 @@ static bool bind_uniform_data(renderer *r, NriCommandBuffer *cmd, NriPipelineLay
 
 static bool transition_texture(renderer *r, NriCommandBuffer *cmd, NriTexture *texture, NriAccessBits access, NriLayout layout, NriStageBits stages);
 
-static bool bind_bake_resources(renderer *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, const bake_uniforms *uniforms, size_t size) {
-    if (!r || !cmd || !source || !destination || !r->lightmap_sampler || !r->bvh_node_buffer || !r->bvh_triangle_buffer || !r->lightmap_sample_buffer || !r->lightmap_probe_buffer)
+static bool bind_bake_resources_ex(renderer *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, NriBuffer *active_in,
+                                   NriBuffer *active_count, NriBuffer *active_out, NriBuffer *active_out_count,
+                                   const bake_uniforms *uniforms, size_t size) {
+    if (!r || !cmd || !source || !destination || !r->lightmap_sampler || !r->bvh_node_buffer || !r->bvh_triangle_buffer || !r->lightmap_sample_buffer ||
+        !r->lightmap_probe_buffer || !active_in || !active_count || !active_out || !active_out_count)
         return false;
 
     NriTexture *direct = r->lightmap_direct && r->lightmap_direct != destination ? r->lightmap_direct : source;
@@ -789,12 +1011,21 @@ static bool bind_bake_resources(renderer *r, NriCommandBuffer *cmd, NriTexture *
                             create_buffer_view(r, r->lightmap_sample_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(lmap_sample)),
                             create_buffer_view(r, r->lightmap_probe_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(probe)),
                             create_buffer_view(r, patch_map, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32)),
-                            create_buffer_view(r, patch_anchors, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32[4]))};
+                            create_buffer_view(r, patch_anchors, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32[4])),
+                            create_buffer_view(r, active_in, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32)),
+                            create_buffer_view(r, active_count, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32))};
 
-    NriDescriptor *dst = create_texture_view(r, destination, NriTextureView_STORAGE_TEXTURE);
+    NriDescriptor *dst[] = {create_texture_view(r, destination, NriTextureView_STORAGE_TEXTURE),
+                            create_buffer_view(r, active_out, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32)),
+                            create_buffer_view(r, active_out_count, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32))};
 
-    return bind_descriptor_set(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 0, src, 10) && bind_descriptor_set(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
+    return bind_descriptor_set(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 0, src, 12) && bind_descriptor_set(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 1, dst, 3) &&
            bind_uniform_data(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
+}
+
+static bool bind_bake_resources(renderer *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, const bake_uniforms *uniforms, size_t size) {
+    return bind_bake_resources_ex(r, cmd, source, destination, r->lightmap_active_buffer[0], r->lightmap_active_count[0],
+                                  r->lightmap_active_buffer[1], r->lightmap_active_count[1], uniforms, size);
 }
 
 static bool bind_probe_resources(renderer *r, NriCommandBuffer *cmd, NriBuffer *input, NriBuffer *nodes, NriBuffer *triangles, NriBuffer *output, const bake_uniforms *uniforms,
@@ -1166,12 +1397,21 @@ static bool submit_frame(renderer *r, frame_context *frame, NriCommandBuffer *cm
     if (good) good = r->core.EndCommandBuffer(cmd) == NriResult_SUCCESS;
 
     const uint64_t frame_value = 1u + r->frame_index;
-    const NriFenceSubmitDesc wait = {.fence = r->swapchain_frames[r->frame_index % r->swapchain_texture_count].acquire, .stages = NriStageBits_COLOR_ATTACHMENT};
+    NriFenceSubmitDesc waits[2] = {
+        {.fence = r->swapchain_frames[r->frame_index % r->swapchain_texture_count].acquire, .stages = NriStageBits_COLOR_ATTACHMENT},
+        {0}};
+    uint32_t wait_num = 1u;
+
+    if (r->upload && r->upload->fence && r->upload->next_fence_value > 1u) {
+        waits[wait_num++] = (NriFenceSubmitDesc){.fence = r->upload->fence,
+                                                 .value = r->upload->next_fence_value - 1u,
+                                                 .stages = NriStageBits_ALL};
+    }
 
     const NriFenceSubmitDesc signals[2] = {{.fence = r->swapchain_frames[index].release}, {.fence = r->frame_fence, .value = frame_value}};
 
     const NriQueueSubmitDesc submit = {
-        .waitFences = &wait, .waitFenceNum = 1, .commandBuffers = (const NriCommandBuffer *const *)&cmd, .commandBufferNum = 1, .signalFences = signals, .signalFenceNum = 2};
+        .waitFences = waits, .waitFenceNum = wait_num, .commandBuffers = (const NriCommandBuffer *const *)&cmd, .commandBufferNum = 1, .signalFences = signals, .signalFenceNum = 2};
 
     bool submitted = false;
 
@@ -1232,7 +1472,7 @@ static NriPipeline *make_line_pipeline(renderer *r, NriPipelineLayout *layout, c
         .multisample = &multisample,
         .outputMerger = {.colors = targets, .colorNum = 2, .depth = {.compareOp = NriCompareOp_LESS_EQUAL, .write = false}, .depthStencilFormat = r->depth_format},
         .shaders = shaders,
-        .shaderNum = 2};
+        .shaderNum = 2, .cache = r->pipeline_cache};
 
     NriPipeline *pipeline = NULL;
 
@@ -1254,7 +1494,7 @@ static NriPipeline *make_sky_pipeline(renderer *r, NriPipelineLayout *layout, co
                                           .multisample = &multisample,
                                           .outputMerger = {.colors = targets, .colorNum = 2, .depthStencilFormat = r->depth_format},
                                           .shaders = shaders,
-                                          .shaderNum = 2};
+                                          .shaderNum = 2, .cache = r->pipeline_cache};
 
     NriPipeline *pipeline = NULL;
 
@@ -1479,8 +1719,6 @@ static NriBuffer *upload_buffer(renderer *r, NriBufferUsageBits usage, const voi
         offset += chunk;
     }
 
-    if (!upload_drain(r)) goto fail;
-
     return buffer;
 
 fail:
@@ -1560,7 +1798,7 @@ static bool upload_texture_data(renderer *r, NriTexture *texture, const void *da
         first_row += rows;
     }
 
-    return upload_drain(r);
+    return true;
 
 fail:
     (void)upload_drain(r);
@@ -1948,6 +2186,112 @@ NriBuffer *upload_beams(renderer *r, const beam_grid *grid) {
     return buffer;
 }
 
+typedef struct lightmap_queue_uniforms {
+    Uint32 dispatch_width;
+    Uint32 pad0, pad1, pad2;
+} lightmap_queue_uniforms;
+
+static NriBuffer *lightmap_queue_buffer(renderer *r, uint64_t bytes, NriBufferUsageBits usage) {
+    const NriBufferDesc desc = {.size = bytes, .structureStride = sizeof(Uint32), .usage = usage};
+    NriBuffer *buffer = NULL;
+    return r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &buffer) == NriResult_SUCCESS ? buffer : NULL;
+}
+
+static bool lightmap_queue_ensure(renderer *r, Uint32 capacity) {
+    if (!r || !capacity) return false;
+
+    if (!r->lightmap_queue_reset_pipeline)
+        r->lightmap_queue_reset_pipeline = compile_compute(r, r->lightmap_queue_reset_layout, "shaders/lightmap_queue.hlsl", "lightmap_queue_reset_cs",
+                                                           "BUILD_LIGHTMAP_QUEUE_RESET_CS");
+    if (!r->lightmap_queue_args_pipeline)
+        r->lightmap_queue_args_pipeline = compile_compute(r, r->lightmap_queue_args_layout, "shaders/lightmap_queue.hlsl", "lightmap_queue_args_cs",
+                                                          "BUILD_LIGHTMAP_QUEUE_ARGS_CS");
+    if (!r->lightmap_queue_reset_pipeline || !r->lightmap_queue_args_pipeline) return false;
+
+    const uint64_t bytes = (uint64_t)capacity * sizeof(Uint32);
+    if (r->lightmap_active_capacity >= bytes && r->lightmap_active_buffer[0] && r->lightmap_active_buffer[1] &&
+        r->lightmap_active_count[0] && r->lightmap_active_count[1] && r->lightmap_dispatch_args)
+        return true;
+
+    for (uint32_t i = 0; i < 2u; ++i) {
+        release_buffer(r, r->lightmap_active_buffer[i]);
+        release_buffer(r, r->lightmap_active_count[i]);
+        r->lightmap_active_buffer[i] = NULL;
+        r->lightmap_active_count[i] = NULL;
+    }
+    release_buffer(r, r->lightmap_dispatch_args);
+    r->lightmap_dispatch_args = NULL;
+    r->lightmap_active_capacity = 0u;
+
+    const NriBufferUsageBits queue_usage = NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE;
+    const NriBufferUsageBits args_usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE | NriBufferUsageBits_ARGUMENT;
+    for (uint32_t i = 0; i < 2u; ++i) {
+        r->lightmap_active_buffer[i] = lightmap_queue_buffer(r, bytes, queue_usage);
+        r->lightmap_active_count[i] = lightmap_queue_buffer(r, sizeof(Uint32), queue_usage);
+    }
+    r->lightmap_dispatch_args = lightmap_queue_buffer(r, 3u * sizeof(Uint32), args_usage);
+
+    if (!r->lightmap_active_buffer[0] || !r->lightmap_active_buffer[1] || !r->lightmap_active_count[0] || !r->lightmap_active_count[1] || !r->lightmap_dispatch_args)
+        return false;
+
+    r->lightmap_active_capacity = bytes;
+    return true;
+}
+
+static void dispatch_shape_trace(Uint32 items, Uint32 *groups_x, Uint32 *groups_y, Uint32 *dispatch_width) {
+    Uint32 gx = (items + 63u) / 64u;
+    if (!gx) gx = 1u;
+    if (gx > 256u) gx = 256u;
+    const Uint32 width = gx * 64u;
+    const Uint32 gy = (items + width - 1u) / width;
+    *groups_x = gx;
+    *groups_y = gy ? gy : 1u;
+    *dispatch_width = width;
+}
+
+static void lightmap_buffer_barrier(renderer *r, NriCommandBuffer *cmd, NriBuffer *buffer, NriAccessBits before_access, NriStageBits before_stages,
+                                    NriAccessBits after_access, NriStageBits after_stages) {
+    const NriBufferBarrierDesc barrier = {.buffer = buffer,
+                                          .before = {.access = before_access, .stages = before_stages},
+                                          .after = {.access = after_access, .stages = after_stages}};
+    r->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1u});
+}
+
+static bool record_lightmap_queue_reset(renderer *r, NriCommandBuffer *cmd, uint32_t index, bool reused) {
+    NriBuffer *count = r->lightmap_active_count[index];
+    lightmap_buffer_barrier(r, cmd, count, reused ? NriAccessBits_SHADER_RESOURCE : NriAccessBits_NONE,
+                            reused ? NriStageBits_COMPUTE_SHADER : NriStageBits_NONE,
+                            NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER);
+    NriDescriptor *dst = create_buffer_view(r, count, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32));
+    if (!dst || !bind_descriptor_set(r, cmd, r->lightmap_queue_reset_layout, NriBindPoint_COMPUTE, 1, &dst, 1)) return false;
+    r->core.CmdSetPipeline(cmd, r->lightmap_queue_reset_pipeline);
+    r->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = 1u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+    return true;
+}
+
+static bool record_lightmap_queue_args(renderer *r, NriCommandBuffer *cmd, uint32_t index, Uint32 dispatch_width, bool args_reused) {
+    NriBuffer *count = r->lightmap_active_count[index];
+    lightmap_buffer_barrier(r, cmd, count, NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER,
+                            NriAccessBits_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER);
+    lightmap_buffer_barrier(r, cmd, r->lightmap_dispatch_args, args_reused ? NriAccessBits_ARGUMENT_BUFFER : NriAccessBits_NONE,
+                            args_reused ? NriStageBits_INDIRECT : NriStageBits_NONE,
+                            NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER);
+
+    NriDescriptor *src = create_buffer_view(r, count, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32));
+    NriDescriptor *dst = create_buffer_view(r, r->lightmap_dispatch_args, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32));
+    const lightmap_queue_uniforms uniforms = {.dispatch_width = dispatch_width};
+    if (!src || !dst || !bind_descriptor_set(r, cmd, r->lightmap_queue_args_layout, NriBindPoint_COMPUTE, 0, &src, 1) ||
+        !bind_descriptor_set(r, cmd, r->lightmap_queue_args_layout, NriBindPoint_COMPUTE, 1, &dst, 1) ||
+        !bind_uniform_data(r, cmd, r->lightmap_queue_args_layout, NriBindPoint_COMPUTE, 2, &uniforms, sizeof(uniforms)))
+        return false;
+
+    r->core.CmdSetPipeline(cmd, r->lightmap_queue_args_pipeline);
+    r->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = 1u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+    lightmap_buffer_barrier(r, cmd, r->lightmap_dispatch_args, NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER,
+                            NriAccessBits_ARGUMENT_BUFFER, NriStageBits_INDIRECT);
+    return true;
+}
+
 static void dispatch_shape(Uint32 items, Uint32 *groups_x, Uint32 *groups_y, Uint32 *dispatch_width) {
     Uint32 gx = (items + 63u) / 64u;
 
@@ -2005,23 +2349,43 @@ static void swap_lightmaps(renderer *r) {
     r->lightmap_scratch = tmp;
 }
 
-static bool submit_trace_batch(renderer *r, Uint32 first, Uint32 count, Uint32 items) {
-    NriCommandAllocator *allocator = NULL;
-    NriCommandBuffer *cmd = NULL;
+static bool record_trace_batch(renderer *r, NriCommandBuffer *cmd, Uint32 first, Uint32 count, Uint32 items, Uint32 batch_index,
+                               Uint32 groups_x, Uint32 groups_y, Uint32 dispatch_width) {
+    if (!r || !cmd || !items || !count) return false;
 
-    if (begin_commands(r, &allocator, &cmd) != NriResult_SUCCESS) return false;
+    const uint32_t output_index = batch_index & 1u;
+    const uint32_t input_index = output_index ^ 1u;
+    const bool active_mode = batch_index != 0u;
+    const bool output_reused = batch_index >= 2u;
 
-    if (!record_bake_pass(r, cmd, r->lightmap_texture, r->lightmap_scratch, PHASE_TRACE, first, items, count)) {
-        abort_commands(r, allocator, cmd);
+    if (!record_lightmap_queue_reset(r, cmd, output_index, output_reused)) return false;
+    lightmap_buffer_barrier(r, cmd, r->lightmap_active_buffer[output_index], output_reused ? NriAccessBits_SHADER_RESOURCE : NriAccessBits_NONE,
+                            output_reused ? NriStageBits_COMPUTE_SHADER : NriStageBits_NONE,
+                            NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER);
 
-        return false;
+    if (active_mode) {
+        lightmap_buffer_barrier(r, cmd, r->lightmap_active_buffer[input_index], NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER,
+                                NriAccessBits_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER);
     }
 
-    const bool good = submit_commands(r, allocator, cmd);
+    bake_uniforms uniforms = bake_data(r, PHASE_TRACE, first, items, dispatch_width, count);
+    uniforms.probe_dims_mode[3] = active_mode ? 1u : 0u;
 
-    if (good) swap_lightmaps(r);
+    if (!bind_bake_resources_ex(r, cmd, r->lightmap_texture, r->lightmap_scratch,
+                                r->lightmap_active_buffer[input_index], r->lightmap_active_count[input_index],
+                                r->lightmap_active_buffer[output_index], r->lightmap_active_count[output_index],
+                                &uniforms, sizeof(uniforms)))
+        return false;
 
-    return good;
+    r->core.CmdSetPipeline(cmd, r->bake_pipeline);
+    if (active_mode)
+        r->core.CmdDispatchIndirect(cmd, r->lightmap_dispatch_args, 0u);
+    else
+        r->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = groups_x, .workGroupNumY = groups_y, .workGroupNumZ = 1u});
+
+    if (!record_lightmap_queue_args(r, cmd, output_index, dispatch_width, batch_index != 0u)) return false;
+    swap_lightmaps(r);
+    return true;
 }
 
 static float decode_half(Uint16 h) {
@@ -2207,13 +2571,34 @@ static bool bake_lightmap_once(renderer *r, const lightmap *lm) {
 
     if (!build_lightmap_patches(r, lm)) return false;
 
-    for (Uint32 first = 0; first < r->bake_target_samples; first += BAKE_BATCH_SAMPLES) {
-        Uint32 count = r->bake_target_samples - first;
+    if (r->lightmap_trace_count) {
+        allocator = NULL;
+        cmd = NULL;
 
-        if (count > BAKE_BATCH_SAMPLES) count = BAKE_BATCH_SAMPLES;
+        if (begin_commands(r, &allocator, &cmd) != NriResult_SUCCESS) return false;
+        if (!gpu_timestamp_begin(r, cmd, 2u)) {
+            abort_commands(r, allocator, cmd);
+            return false;
+        }
 
-        if (r->lightmap_trace_count && !submit_trace_batch(r, first, count, r->lightmap_trace_count)) return false;
-        bake_progress(r, "surface lightmap", first + count, r->bake_target_samples);
+        Uint32 trace_groups_x = 0u, trace_groups_y = 0u, trace_dispatch_width = 0u;
+        dispatch_shape_trace(r->lightmap_trace_count, &trace_groups_x, &trace_groups_y, &trace_dispatch_width);
+        Uint32 batch_index = 0u;
+
+        for (Uint32 first = 0; first < r->bake_target_samples; first += BAKE_BATCH_SAMPLES, ++batch_index) {
+            Uint32 count = r->bake_target_samples - first;
+            if (count > BAKE_BATCH_SAMPLES) count = BAKE_BATCH_SAMPLES;
+
+            if (!record_trace_batch(r, cmd, first, count, r->lightmap_trace_count, batch_index,
+                                    trace_groups_x, trace_groups_y, trace_dispatch_width)) {
+                abort_commands(r, allocator, cmd);
+                return false;
+            }
+        }
+
+        if (!gpu_timestamp_end(r, cmd, 2u) || !submit_commands(r, allocator, cmd)) return false;
+        gpu_timestamp_log(r, 2u, "surface lightmap trace");
+        bake_progress(r, "surface lightmap", r->bake_target_samples, r->bake_target_samples);
     }
 
     bake_progress(r, "filtering lightmap", 0u, 0u);
@@ -2268,9 +2653,6 @@ static bool bake_lightmap_once(renderer *r, const lightmap *lm) {
     release_texture(r, r->lightmap_scratch);
     r->lightmap_scratch = NULL;
 
-    if (r->bake_pipeline) r->core.DestroyPipeline(r->bake_pipeline);
-    r->bake_pipeline = NULL;
-
     return true;
 }
 
@@ -2317,7 +2699,14 @@ bool bake_lightmap(renderer *r, const bvh *tree, const lightmap *lm, const probe
 
     if (!r->lightmap_sample_buffer) return false;
 
-    r->bake_pipeline = compile_compute(&r->core, r->device, r->bake_layout, "shaders/compute.hlsl", "lightmap_cs", "BUILD_LIGHTMAP_CS");
+    if (!lightmap_queue_ensure(r, lm->sample_count)) return false;
+
+    if (!r->bake_pipeline) {
+        const NriDeviceDesc *device = r->core.GetDeviceDesc(r->device);
+        const bool wave_ops = device && (device->wave.waveOpsStages & NriStageBits_COMPUTE_SHADER) != 0;
+        r->bake_pipeline = compile_compute(r, r->bake_layout, "shaders/compute.hlsl", "lightmap_cs",
+                                           wave_ops ? "BUILD_LIGHTMAP_WAVE_CS" : "BUILD_LIGHTMAP_CS");
+    }
 
     if (!r->bake_pipeline) return false;
 
@@ -2330,8 +2719,8 @@ bool bake_lightmap(renderer *r, const bvh *tree, const lightmap *lm, const probe
 #define PROBE_MAX_SAMPLES 1024u
 #define PROBE_MAX_BOUNCES 3u
 #define PROBE_PACKED_NODE_BYTES 32u
-#define PROBE_PACKED_TRIANGLE_BYTES 64u
-#define PROBE_RAY_STATE_BYTES 80u
+#define PROBE_PACKED_TRIANGLE_BYTES 48u
+#define PROBE_RAY_STATE_BYTES 32u
 #define PROBE_ACCUM_BYTES 32u
 #define PROBE_OUTPUT_STRIDE_BYTES (9u * 16u)
 
@@ -2362,6 +2751,8 @@ typedef struct probe_wavefront_buffer {
     uint32_t stride;
     NriAccessBits access;
     NriStageBits stages;
+    NriBufferUsageBits usage;
+    uint64_t capacity;
 } probe_wavefront_buffer;
 
 typedef struct probe_wavefront_stage {
@@ -2376,9 +2767,27 @@ typedef struct probe_wavefront_pipelines {
     probe_wavefront_stage reset;
     probe_wavefront_stage validate;
     probe_wavefront_stage primary;
+    probe_wavefront_stage args;
     probe_wavefront_stage bounce;
     probe_wavefront_stage reduce;
 } probe_wavefront_pipelines;
+
+struct probe_wavefront_scratch {
+    probe_wavefront_buffer packed_nodes;
+    probe_wavefront_buffer packed_triangles;
+    probe_wavefront_buffer states_a;
+    probe_wavefront_buffer states_b;
+    probe_wavefront_buffer results;
+    probe_wavefront_buffer accums;
+    probe_wavefront_buffer coefficients;
+    probe_wavefront_buffer counters;
+    probe_wavefront_buffer dispatch_args;
+    probe_wavefront_pipelines pipelines;
+    NriBuffer *counter_readback;
+    NriBuffer *output_readback;
+    uint64_t output_readback_capacity;
+    bool pipelines_ready;
+};
 
 static probe_wavefront_buffer probe_wavefront_uploaded(renderer *r, const void *data, uint64_t bytes, uint32_t stride) {
     probe_wavefront_buffer result = {0};
@@ -2390,6 +2799,8 @@ static probe_wavefront_buffer probe_wavefront_uploaded(renderer *r, const void *
         result.stride = stride;
         result.access = NriAccessBits_SHADER_RESOURCE;
         result.stages = NriStageBits_COMPUTE_SHADER;
+        result.usage = NriBufferUsageBits_SHADER_RESOURCE;
+        result.capacity = bytes;
     }
 
     return result;
@@ -2400,9 +2811,29 @@ static probe_wavefront_buffer probe_wavefront_storage(renderer *r, uint64_t byte
 
     if (!r || !r->device || !bytes) return result;
 
-    const NriBufferDesc desc = {.size = bytes, .structureStride = stride, .usage = NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE};
+    const NriBufferUsageBits usage = NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE;
+    const NriBufferDesc desc = {.size = bytes, .structureStride = stride, .usage = usage};
 
-    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &result.buffer) == NriResult_SUCCESS) result.stride = stride;
+    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &result.buffer) == NriResult_SUCCESS) {
+        result.stride = stride;
+        result.usage = usage;
+        result.capacity = bytes;
+    }
+
+    return result;
+}
+
+static probe_wavefront_buffer probe_wavefront_argument(renderer *r) {
+    probe_wavefront_buffer result = {0};
+    const NriBufferDesc desc = {.size = 3u * sizeof(uint32_t),
+                                .structureStride = sizeof(uint32_t),
+                                .usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE | NriBufferUsageBits_ARGUMENT};
+
+    if (r && r->device && r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &result.buffer) == NriResult_SUCCESS) {
+        result.stride = sizeof(uint32_t);
+        result.usage = desc.usage;
+        result.capacity = desc.size;
+    }
 
     return result;
 }
@@ -2411,6 +2842,39 @@ static void probe_wavefront_release_buffer(renderer *r, probe_wavefront_buffer *
     if (!buffer) return;
     release_buffer(r, buffer->buffer);
     *buffer = (probe_wavefront_buffer){0};
+}
+
+static bool probe_wavefront_reserve(renderer *r, probe_wavefront_buffer *buffer, uint64_t bytes, uint32_t stride, NriBufferUsageBits usage) {
+    if (!r || !buffer || !bytes || !stride) return false;
+
+    if (buffer->buffer && buffer->capacity >= bytes && buffer->stride == stride && buffer->usage == usage)
+        return true;
+
+    probe_wavefront_release_buffer(r, buffer);
+    const NriBufferDesc desc = {.size = bytes, .structureStride = stride, .usage = usage};
+    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &buffer->buffer) != NriResult_SUCCESS)
+        return false;
+
+    buffer->stride = stride;
+    buffer->usage = usage;
+    buffer->capacity = bytes;
+    return true;
+}
+
+static bool probe_wavefront_reserve_readback(renderer *r, NriBuffer **buffer, uint64_t *capacity, uint64_t bytes) {
+    if (!r || !buffer || !capacity || !bytes) return false;
+    if (*buffer && *capacity >= bytes) return true;
+
+    if (*buffer) r->core.DestroyBuffer(*buffer);
+    *buffer = NULL;
+    *capacity = 0u;
+
+    const NriBufferDesc desc = {.size = bytes};
+    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_READBACK, 0.0f, &desc, buffer) != NriResult_SUCCESS)
+        return false;
+
+    *capacity = bytes;
+    return true;
 }
 
 static bool probe_wavefront_layout(renderer *r, NriPipelineLayout **layout, uint8_t reads, uint8_t writes) {
@@ -2434,7 +2898,7 @@ static bool probe_wavefront_layout(renderer *r, NriPipelineLayout **layout, uint
 
 static bool probe_wavefront_stage_init(renderer *r, probe_wavefront_stage *stage, const char *entrypoint, const char *define, uint8_t reads, uint8_t writes) {
     if (!probe_wavefront_layout(r, &stage->layout, reads, writes)) return false;
-    stage->pipeline = compile_compute(&r->core, r->device, stage->layout, "shaders/probe_wavefront.hlsl", entrypoint, define);
+    stage->pipeline = compile_compute(r, stage->layout, "shaders/probe_wavefront.hlsl", entrypoint, define);
     stage->read_count = reads;
     stage->write_count = writes;
 
@@ -2453,21 +2917,85 @@ static void probe_wavefront_stage_deinit(renderer *r, probe_wavefront_stage *sta
 static bool probe_wavefront_pipelines_init(renderer *r, probe_wavefront_pipelines *p) {
     memset(p, 0, sizeof(*p));
 
+    const NriDeviceDesc *device = r->core.GetDeviceDesc(r->device);
+    const bool wave_ops = device && (device->wave.waveOpsStages & NriStageBits_COMPUTE_SHADER) != 0;
+    const char *primary_define = wave_ops ? "BUILD_PROBE_PRIMARY_WAVE_CS" : "BUILD_PROBE_PRIMARY_CS";
+    const char *bounce_define = wave_ops ? "BUILD_PROBE_BOUNCE_WAVE_CS" : "BUILD_PROBE_BOUNCE_CS";
+
     return probe_wavefront_stage_init(r, &p->prepare, "probe_prepare_cs", "BUILD_PROBE_PREP_CS", 2, 2) &&
            probe_wavefront_stage_init(r, &p->reset, "probe_reset_cs", "BUILD_PROBE_RESET_CS", 0, 3) &&
            probe_wavefront_stage_init(r, &p->validate, "probe_validate_cs", "BUILD_PROBE_VALIDATE_CS", 3, 1) &&
-           probe_wavefront_stage_init(r, &p->primary, "probe_primary_cs", "BUILD_PROBE_PRIMARY_CS", 4, 3) &&
-           probe_wavefront_stage_init(r, &p->bounce, "probe_bounce_cs", "BUILD_PROBE_BOUNCE_CS", 4, 3) &&
+           probe_wavefront_stage_init(r, &p->primary, "probe_primary_cs", primary_define, 4, 3) &&
+           probe_wavefront_stage_init(r, &p->args, "probe_args_cs", "BUILD_PROBE_ARGS_CS", 1, 1) &&
+           probe_wavefront_stage_init(r, &p->bounce, "probe_bounce_cs", bounce_define, 4, 3) &&
            probe_wavefront_stage_init(r, &p->reduce, "probe_reduce_cs", "BUILD_PROBE_REDUCE_CS", 1, 3);
 }
 
 static void probe_wavefront_pipelines_deinit(renderer *r, probe_wavefront_pipelines *p) {
     probe_wavefront_stage_deinit(r, &p->reduce);
     probe_wavefront_stage_deinit(r, &p->bounce);
+    probe_wavefront_stage_deinit(r, &p->args);
     probe_wavefront_stage_deinit(r, &p->primary);
     probe_wavefront_stage_deinit(r, &p->validate);
     probe_wavefront_stage_deinit(r, &p->reset);
     probe_wavefront_stage_deinit(r, &p->prepare);
+}
+
+static bool probe_wavefront_scratch_ensure(renderer *r, uint64_t node_bytes, uint64_t triangle_bytes, uint64_t state_bytes,
+                                           uint64_t result_bytes, uint64_t accum_bytes, uint64_t output_bytes) {
+    if (!r) return false;
+
+    if (!r->probe_scratch) {
+        r->probe_scratch = calloc(1, sizeof(*r->probe_scratch));
+        if (!r->probe_scratch) return false;
+    }
+
+    probe_wavefront_scratch *scratch = r->probe_scratch;
+    const NriBufferUsageBits storage = NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE;
+    const NriBufferUsageBits argument = NriBufferUsageBits_SHADER_RESOURCE_STORAGE | NriBufferUsageBits_ARGUMENT;
+
+    if (!probe_wavefront_reserve(r, &scratch->packed_nodes, node_bytes, PROBE_PACKED_NODE_BYTES, storage) ||
+        !probe_wavefront_reserve(r, &scratch->packed_triangles, triangle_bytes, PROBE_PACKED_TRIANGLE_BYTES, storage) ||
+        !probe_wavefront_reserve(r, &scratch->states_a, state_bytes, PROBE_RAY_STATE_BYTES, storage) ||
+        !probe_wavefront_reserve(r, &scratch->states_b, state_bytes, PROBE_RAY_STATE_BYTES, storage) ||
+        !probe_wavefront_reserve(r, &scratch->results, result_bytes, sizeof(float[4]), storage) ||
+        !probe_wavefront_reserve(r, &scratch->accums, accum_bytes, PROBE_ACCUM_BYTES, storage) ||
+        !probe_wavefront_reserve(r, &scratch->coefficients, output_bytes, sizeof(float[4]), storage) ||
+        !probe_wavefront_reserve(r, &scratch->counters, 4u * sizeof(uint32_t), sizeof(uint32_t), storage) ||
+        !probe_wavefront_reserve(r, &scratch->dispatch_args, 3u * sizeof(uint32_t), sizeof(uint32_t), argument))
+        return false;
+
+    uint64_t counter_capacity = scratch->counter_readback ? 4u * sizeof(uint32_t) : 0u;
+    if (!probe_wavefront_reserve_readback(r, &scratch->counter_readback, &counter_capacity, 4u * sizeof(uint32_t)) ||
+        !probe_wavefront_reserve_readback(r, &scratch->output_readback, &scratch->output_readback_capacity, output_bytes))
+        return false;
+
+    if (!scratch->pipelines_ready) {
+        if (!probe_wavefront_pipelines_init(r, &scratch->pipelines)) return false;
+        scratch->pipelines_ready = true;
+    }
+
+    return true;
+}
+
+static void probe_wavefront_scratch_destroy(renderer *r) {
+    if (!r || !r->probe_scratch) return;
+    probe_wavefront_scratch *scratch = r->probe_scratch;
+
+    if (scratch->pipelines_ready) probe_wavefront_pipelines_deinit(r, &scratch->pipelines);
+    probe_wavefront_release_buffer(r, &scratch->dispatch_args);
+    probe_wavefront_release_buffer(r, &scratch->counters);
+    probe_wavefront_release_buffer(r, &scratch->coefficients);
+    probe_wavefront_release_buffer(r, &scratch->accums);
+    probe_wavefront_release_buffer(r, &scratch->results);
+    probe_wavefront_release_buffer(r, &scratch->states_b);
+    probe_wavefront_release_buffer(r, &scratch->states_a);
+    probe_wavefront_release_buffer(r, &scratch->packed_triangles);
+    probe_wavefront_release_buffer(r, &scratch->packed_nodes);
+    if (scratch->counter_readback) r->core.DestroyBuffer(scratch->counter_readback);
+    if (scratch->output_readback) r->core.DestroyBuffer(scratch->output_readback);
+    free(scratch);
+    r->probe_scratch = NULL;
 }
 
 static bool probe_wavefront_transition(renderer *r, NriCommandBuffer *cmd, probe_wavefront_buffer *const *reads, uint8_t read_count, probe_wavefront_buffer *const *writes,
@@ -2533,6 +3061,44 @@ static bool probe_wavefront_dispatch(renderer *r, NriCommandBuffer *cmd, const p
     r->core.CmdSetPipeline(cmd, stage->pipeline);
     r->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = groups_x, .workGroupNumY = 1, .workGroupNumZ = 1});
 
+    return true;
+}
+
+static bool probe_wavefront_dispatch_indirect(renderer *r, NriCommandBuffer *cmd, const probe_wavefront_stage *stage,
+                                              probe_wavefront_buffer *const *reads, probe_wavefront_buffer *const *writes,
+                                              const probe_wavefront_uniforms *uniforms, probe_wavefront_buffer *arguments) {
+    if (!r || !cmd || !stage || !stage->pipeline || !stage->layout || !uniforms || !arguments || !arguments->buffer) return false;
+    if (!probe_wavefront_transition(r, cmd, reads, stage->read_count, writes, stage->write_count)) return false;
+
+    if (stage->read_count) {
+        NriDescriptor *descriptors[4] = {0};
+
+        for (uint8_t i = 0; i < stage->read_count; ++i)
+            descriptors[i] = create_buffer_view(r, reads[i]->buffer, NriBufferView_STRUCTURED_BUFFER, reads[i]->stride);
+
+        if (!bind_descriptor_set(r, cmd, stage->layout, NriBindPoint_COMPUTE, 0, descriptors, stage->read_count)) return false;
+    }
+
+    if (stage->write_count) {
+        NriDescriptor *descriptors[3] = {0};
+
+        for (uint8_t i = 0; i < stage->write_count; ++i)
+            descriptors[i] = create_buffer_view(r, writes[i]->buffer, NriBufferView_STORAGE_STRUCTURED_BUFFER, writes[i]->stride);
+
+        if (!bind_descriptor_set(r, cmd, stage->layout, NriBindPoint_COMPUTE, 1, descriptors, stage->write_count)) return false;
+    }
+
+    if (!bind_uniform_data(r, cmd, stage->layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms))) return false;
+
+    const NriBufferBarrierDesc barrier = {.buffer = arguments->buffer,
+                                          .before = {.access = arguments->access, .stages = arguments->stages},
+                                          .after = {.access = NriAccessBits_ARGUMENT_BUFFER, .stages = NriStageBits_INDIRECT}};
+    r->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
+    arguments->access = NriAccessBits_ARGUMENT_BUFFER;
+    arguments->stages = NriStageBits_INDIRECT;
+
+    r->core.CmdSetPipeline(cmd, stage->pipeline);
+    r->core.CmdDispatchIndirect(cmd, arguments->buffer, 0u);
     return true;
 }
 
@@ -2645,35 +3211,32 @@ bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const 
     free(positions);
     free(beam_data);
 
-    probe_wavefront_buffer packed_nodes = probe_wavefront_storage(r, (uint64_t)tree->node_count * PROBE_PACKED_NODE_BYTES, PROBE_PACKED_NODE_BYTES);
-    probe_wavefront_buffer packed_triangles = probe_wavefront_storage(r, (uint64_t)tree->triangle_count * PROBE_PACKED_TRIANGLE_BYTES, PROBE_PACKED_TRIANGLE_BYTES);
-    probe_wavefront_buffer states_a = probe_wavefront_storage(r, state_bytes, PROBE_RAY_STATE_BYTES);
+    const bool scratch_ready = probe_wavefront_scratch_ensure(r,
+        (uint64_t)tree->node_count * PROBE_PACKED_NODE_BYTES,
+        (uint64_t)tree->triangle_count * PROBE_PACKED_TRIANGLE_BYTES,
+        state_bytes, result_bytes, accum_bytes, output_bytes);
+    probe_wavefront_scratch *scratch = r->probe_scratch;
 
-    probe_wavefront_buffer states_b = probe_wavefront_storage(r, state_bytes, PROBE_RAY_STATE_BYTES);
+    probe_wavefront_buffer packed_nodes = scratch_ready ? scratch->packed_nodes : (probe_wavefront_buffer){0};
+    probe_wavefront_buffer packed_triangles = scratch_ready ? scratch->packed_triangles : (probe_wavefront_buffer){0};
+    probe_wavefront_buffer states_a = scratch_ready ? scratch->states_a : (probe_wavefront_buffer){0};
+    probe_wavefront_buffer states_b = scratch_ready ? scratch->states_b : (probe_wavefront_buffer){0};
+    probe_wavefront_buffer results = scratch_ready ? scratch->results : (probe_wavefront_buffer){0};
+    probe_wavefront_buffer accums = scratch_ready ? scratch->accums : (probe_wavefront_buffer){0};
+    probe_wavefront_buffer coefficients = scratch_ready ? scratch->coefficients : (probe_wavefront_buffer){0};
+    probe_wavefront_buffer counters = scratch_ready ? scratch->counters : (probe_wavefront_buffer){0};
+    probe_wavefront_buffer dispatch_args = scratch_ready ? scratch->dispatch_args : (probe_wavefront_buffer){0};
+    NriBuffer *counter_readback = scratch_ready ? scratch->counter_readback : NULL;
+    NriBuffer *output_readback = scratch_ready ? scratch->output_readback : NULL;
+    probe_wavefront_pipelines pipelines = scratch_ready ? scratch->pipelines : (probe_wavefront_pipelines){0};
 
-    probe_wavefront_buffer results = probe_wavefront_storage(r, result_bytes, sizeof(float[4]));
-
-    probe_wavefront_buffer accums = probe_wavefront_storage(r, accum_bytes, PROBE_ACCUM_BYTES);
-
-    probe_wavefront_buffer coefficients = probe_wavefront_storage(r, output_bytes, sizeof(float[4]));
-
-    probe_wavefront_buffer counters = probe_wavefront_storage(r, 4u * sizeof(uint32_t), sizeof(uint32_t));
-
-    NriBuffer *counter_readback = probe_wavefront_readback_buffer(r, 4u * sizeof(uint32_t));
-
-    NriBuffer *output_readback = probe_wavefront_readback_buffer(r, output_bytes);
-    probe_wavefront_pipelines pipelines = {0};
-
-    bool good = position_buffer.buffer && source_nodes.buffer && source_triangles.buffer && sun_beams.buffer && packed_nodes.buffer && packed_triangles.buffer && states_a.buffer &&
-                states_b.buffer && results.buffer && accums.buffer && coefficients.buffer && counters.buffer && counter_readback && output_readback &&
-                probe_wavefront_pipelines_init(r, &pipelines);
+    bool good = position_buffer.buffer && source_nodes.buffer && source_triangles.buffer && sun_beams.buffer && scratch_ready;
 
     const uint32_t prep_groups = probe_wavefront_groups64(tree->node_count > tree->triangle_count ? tree->node_count : tree->triangle_count);
     const uint32_t probe_groups = probe_wavefront_groups64(probe_count);
-    const uint32_t ray_groups = probe_wavefront_groups64(max_rays);
     probe_wavefront_uniforms uniforms = probe_wavefront_data(tree, beams, probe_count, 0u, PROBE_BLOCK_SAMPLES, 0u);
 
-    if (!prep_groups || !probe_groups || !ray_groups) good = false;
+    if (!prep_groups || !probe_groups) good = false;
 
     if (good) {
         NriCommandAllocator *allocator = NULL;
@@ -2681,6 +3244,7 @@ bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const 
         good = begin_commands(r, &allocator, &cmd) == NriResult_SUCCESS;
 
         if (good) {
+            good = gpu_timestamp_begin(r, cmd, 0u);
             probe_wavefront_buffer *prepare_reads[] = {&source_nodes, &source_triangles};
 
             probe_wavefront_buffer *prepare_writes[] = {&packed_nodes, &packed_triangles};
@@ -2694,9 +3258,11 @@ bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const 
                    probe_wavefront_dispatch(r, cmd, &pipelines.reset, NULL, reset_writes, &uniforms, probe_groups) &&
                    probe_wavefront_dispatch(r, cmd, &pipelines.validate, validate_reads, validate_writes, &uniforms, probe_groups);
 
+            if (good) good = gpu_timestamp_end(r, cmd, 0u);
             if (good) good = submit_commands(r, allocator, cmd);
             else abort_commands(r, allocator, cmd);
         }
+        if (good) gpu_timestamp_log(r, 0u, "probe prepare + validate");
     }
 
     uint32_t completed = 0u;
@@ -2714,6 +3280,7 @@ bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const 
         good = begin_commands(r, &allocator, &cmd) == NriResult_SUCCESS;
 
         if (!good) break;
+        good = gpu_timestamp_begin(r, cmd, 2u);
 
         if (completed) {
             probe_wavefront_buffer *reset_writes[] = {&counters, &accums, &coefficients};
@@ -2730,12 +3297,17 @@ bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const 
         for (uint32_t bounce = 0; good && bounce < PROBE_MAX_BOUNCES; ++bounce) {
             uniforms.bounce_index = bounce;
 
+            probe_wavefront_buffer *args_reads[] = {&counters};
+            probe_wavefront_buffer *args_writes[] = {&dispatch_args};
+            good = probe_wavefront_dispatch(r, cmd, &pipelines.args, args_reads, args_writes, &uniforms, 1u);
+
             probe_wavefront_buffer *input = bounce & 1u ? &states_b : &states_a;
             probe_wavefront_buffer *output = bounce & 1u ? &states_a : &states_b;
             probe_wavefront_buffer *bounce_reads[] = {&packed_nodes, &packed_triangles, input, &sun_beams};
-
             probe_wavefront_buffer *bounce_writes[] = {&results, output, &counters};
-            good = probe_wavefront_dispatch(r, cmd, &pipelines.bounce, bounce_reads, bounce_writes, &uniforms, ray_groups);
+
+            if (good)
+                good = probe_wavefront_dispatch_indirect(r, cmd, &pipelines.bounce, bounce_reads, bounce_writes, &uniforms, &dispatch_args);
         }
 
         uniforms.bounce_index = 0u;
@@ -2745,12 +3317,14 @@ bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const 
 
         if (good) good = probe_wavefront_dispatch(r, cmd, &pipelines.reduce, reduce_reads, reduce_writes, &uniforms, probe_count);
 
+        if (good) good = gpu_timestamp_end(r, cmd, 2u);
         if (good) good = probe_wavefront_copy_to_readback(r, cmd, &counters, counter_readback, 4u * sizeof(uint32_t));
 
         if (good) good = submit_commands(r, allocator, cmd);
         else abort_commands(r, allocator, cmd);
 
         if (!good) break;
+        gpu_timestamp_log(r, 2u, "probe trace block");
 
         const uint32_t *values = r->core.MapBuffer(counter_readback, 0, 4u * sizeof(uint32_t));
 
@@ -2800,19 +3374,18 @@ bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const 
         }
     }
 
-    probe_wavefront_pipelines_deinit(r, &pipelines);
+    if (scratch_ready) {
+        scratch->packed_nodes = packed_nodes;
+        scratch->packed_triangles = packed_triangles;
+        scratch->states_a = states_a;
+        scratch->states_b = states_b;
+        scratch->results = results;
+        scratch->accums = accums;
+        scratch->coefficients = coefficients;
+        scratch->counters = counters;
+        scratch->dispatch_args = dispatch_args;
+    }
 
-    if (counter_readback) r->core.DestroyBuffer(counter_readback);
-
-    if (output_readback) r->core.DestroyBuffer(output_readback);
-    probe_wavefront_release_buffer(r, &counters);
-    probe_wavefront_release_buffer(r, &coefficients);
-    probe_wavefront_release_buffer(r, &accums);
-    probe_wavefront_release_buffer(r, &results);
-    probe_wavefront_release_buffer(r, &states_b);
-    probe_wavefront_release_buffer(r, &states_a);
-    probe_wavefront_release_buffer(r, &packed_triangles);
-    probe_wavefront_release_buffer(r, &packed_nodes);
     probe_wavefront_release_buffer(r, &sun_beams);
     probe_wavefront_release_buffer(r, &source_triangles);
     probe_wavefront_release_buffer(r, &source_nodes);
@@ -2853,7 +3426,7 @@ bool bake_probe_grid(renderer *r, probe_grid *grid, Uint32 samples) {
 
     if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_DEVICE, 1.0f, &output_desc, &output) != NriResult_SUCCESS) output = NULL;
 
-    NriPipeline *pipeline = compile_compute(&r->core, r->device, r->probe_layout, "shaders/compute.hlsl", "probe_cs", "BUILD_PROBE_CS");
+    NriPipeline *pipeline = compile_compute(r, r->probe_layout, "shaders/compute.hlsl", "probe_cs", "BUILD_PROBE_CS");
 
     bool good = input && output && pipeline;
 
@@ -2899,10 +3472,17 @@ void release_bake_resources(renderer *r) {
     release_buffer(r, r->lightmap_probe_buffer);
     release_buffer(r, r->lightmap_patch_map_buffer);
     release_buffer(r, r->lightmap_patch_anchor_buffer);
+    for (uint32_t i = 0; i < 2u; ++i) {
+        release_buffer(r, r->lightmap_active_buffer[i]);
+        release_buffer(r, r->lightmap_active_count[i]);
+    }
+    release_buffer(r, r->lightmap_dispatch_args);
     release_texture(r, r->lightmap_scratch);
     release_texture(r, r->lightmap_direct);
 
     if (r->bake_pipeline) r->core.DestroyPipeline(r->bake_pipeline);
+    if (r->lightmap_queue_reset_pipeline) r->core.DestroyPipeline(r->lightmap_queue_reset_pipeline);
+    if (r->lightmap_queue_args_pipeline) r->core.DestroyPipeline(r->lightmap_queue_args_pipeline);
 
     r->bvh_node_buffer = NULL;
     r->bvh_triangle_buffer = NULL;
@@ -2912,9 +3492,17 @@ void release_bake_resources(renderer *r) {
     r->lightmap_probe_buffer = NULL;
     r->lightmap_patch_map_buffer = NULL;
     r->lightmap_patch_anchor_buffer = NULL;
+    for (uint32_t i = 0; i < 2u; ++i) {
+        r->lightmap_active_buffer[i] = NULL;
+        r->lightmap_active_count[i] = NULL;
+    }
+    r->lightmap_dispatch_args = NULL;
+    r->lightmap_active_capacity = 0u;
     r->lightmap_scratch = NULL;
     r->lightmap_direct = NULL;
     r->bake_pipeline = NULL;
+    r->lightmap_queue_reset_pipeline = NULL;
+    r->lightmap_queue_args_pipeline = NULL;
 }
 
 static bool dispatch_one(fx_state *fx, NriCommandBuffer *cmd, NriPipeline *pipeline, NriTexture *source, NriTexture *destination, const void *uniforms, Uint32 uniform_size,
@@ -2992,7 +3580,7 @@ static bool make_compose_pipeline(renderer *r, NriShaderDesc *vs, NriShaderDesc 
                                           .rasterization = {.fillMode = NriFillMode_SOLID, .cullMode = NriCullMode_NONE, .frontCounterClockwise = true, .depthClamp = false},
                                           .outputMerger = {.colors = &target, .colorNum = 1},
                                           .shaders = shaders,
-                                          .shaderNum = 2};
+                                          .shaderNum = 2, .cache = r->pipeline_cache};
 
     return r->core.CreateGraphicsPipeline(r->device, &desc, out) == NriResult_SUCCESS;
 }
@@ -3018,15 +3606,15 @@ static bool fx_init(fx_state *fx, renderer *r) {
 
     ps = compile_shader("shaders/fragment.hlsl", "compose_fs", "BUILD_COMPOSE_FS", NriStageBits_FRAGMENT_SHADER);
 
-    fx->ssao_pipeline = compile_compute(&r->core, r->device, r->ssao_layout, "shaders/compute.hlsl", "ssao_cs", "BUILD_SSAO_CS");
+    fx->ssao_pipeline = compile_compute(r, r->ssao_layout, "shaders/compute.hlsl", "ssao_cs", "BUILD_SSAO_CS");
 
-    fx->bloom_pipeline = compile_compute(&r->core, r->device, r->bloom_layout, "shaders/compute.hlsl", "bloom_cs", "BUILD_BLOOM_CS");
+    fx->bloom_pipeline = compile_compute(r, r->bloom_layout, "shaders/compute.hlsl", "bloom_cs", "BUILD_BLOOM_CS");
 
-    fx->grade_pipeline = compile_compute(&r->core, r->device, r->grade_layout, "shaders/compute.hlsl", "grade_cs", "BUILD_GRADE_CS");
+    fx->grade_pipeline = compile_compute(r, r->grade_layout, "shaders/compute.hlsl", "grade_cs", "BUILD_GRADE_CS");
 
-    fx->volume_pipeline = compile_compute(&r->core, r->device, r->volume_layout, "shaders/vision_compute.hlsl", "volume_cs", "BUILD_VISION_VOLUME_CS");
+    fx->volume_pipeline = compile_compute(r, r->volume_layout, "shaders/vision_compute.hlsl", "volume_cs", "BUILD_VISION_VOLUME_CS");
 
-    fx->volume_compose_pipeline = compile_compute(&r->core, r->device, r->volume_compose_layout, "shaders/vision_compute.hlsl", "volume_compose_cs", "BUILD_VISION_COMPOSE_CS");
+    fx->volume_compose_pipeline = compile_compute(r, r->volume_compose_layout, "shaders/vision_compute.hlsl", "volume_compose_cs", "BUILD_VISION_COMPOSE_CS");
 
     if (!vs.bytecode || !ps.bytecode || !fx->ssao_pipeline || !fx->bloom_pipeline || !fx->grade_pipeline || !fx->volume_pipeline || !fx->volume_compose_pipeline) goto fail;
 
@@ -3215,15 +3803,17 @@ static bool fx_apply(fx_state *fx, NriCommandBuffer *cmd, NriTexture *swap, floa
  * never learns about NRI descriptor sets/views.
  */
 static bool create_pipeline_layouts(renderer *r) {
-    return create_surface_layout(r) && create_line_layout(r) && create_sky_layout(r) && create_bake_layout(r) && create_probe_layout(r) && create_ssao_layout(r) &&
-           create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) && create_volume_compose_layout(r) && create_compose_layout(r);
+    return create_surface_layout(r) && create_line_layout(r) && create_sky_layout(r) && create_bake_layout(r) && create_lightmap_queue_layouts(r) &&
+           create_probe_layout(r) && create_ssao_layout(r) && create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) &&
+           create_volume_compose_layout(r) && create_compose_layout(r);
 }
 
 static void destroy_pipeline_layouts(renderer *r) {
     if (!r) return;
 
-    NriPipelineLayout **layouts[] = {&r->surface_layout, &r->line_layout,  &r->sky_layout,    &r->bake_layout,           &r->probe_layout,  &r->ssao_layout,
-                                     &r->bloom_layout,   &r->grade_layout, &r->volume_layout, &r->volume_compose_layout, &r->compose_layout};
+    NriPipelineLayout **layouts[] = {&r->surface_layout, &r->line_layout, &r->sky_layout, &r->bake_layout, &r->lightmap_queue_reset_layout,
+                                     &r->lightmap_queue_args_layout, &r->probe_layout, &r->ssao_layout, &r->bloom_layout, &r->grade_layout,
+                                     &r->volume_layout, &r->volume_compose_layout, &r->compose_layout};
 
     for (uint32_t i = 0; i < sizeof(layouts) / sizeof(layouts[0]); ++i) {
         if (*layouts[i]) {
@@ -3242,8 +3832,6 @@ bool r_init(renderer *r, const char *title, int width, int height) {
     r->pitch = 0.34f;
     r->distance = 14.0f;
     r->target = v3(0.0f, 1.0f, 0.0f);
-
-    if (!SDL_ShaderCross_Init()) return false;
 
     r->window = SDL_CreateWindow(title, width, height,
                                  SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY
@@ -3285,13 +3873,13 @@ bool r_init(renderer *r, const char *title, int width, int height) {
         return false;
     }
 
-    if (r->core.GetQueue(r->device, NriQueueType_GRAPHICS, 0, &r->graphics_queue) != NriResult_SUCCESS) {
+    if (!acquire_queues(r)) {
         r_deinit(r);
-
         return false;
     }
 
-    if (!create_swapchain(r, width, height) || !create_descriptor_pool(r) || !create_frame_contexts(r) || !create_pipeline_layouts(r)) {
+    if (!create_pipeline_cache(r) || !create_gpu_timestamps(r) || !create_swapchain(r, width, height) || !create_descriptor_pool(r) ||
+        !create_work_contexts(r) || !create_frame_contexts(r) || !create_pipeline_layouts(r)) {
         r_deinit(r);
 
         return false;
@@ -3478,14 +4066,12 @@ bool bake_worker_init(renderer *r) {
     if (nriCreateDevice(&device_desc, &r->device) != NriResult_SUCCESS) return false;
 
     if (nriGetInterface(r->device, NRI_INTERFACE(NriCoreInterface), &r->core) != NriResult_SUCCESS ||
-        nriGetInterface(r->device, NRI_INTERFACE(NriHelperInterface), &r->helper) != NriResult_SUCCESS ||
-        r->core.GetQueue(r->device, NriQueueType_GRAPHICS, 0, &r->graphics_queue) != NriResult_SUCCESS) {
+        nriGetInterface(r->device, NRI_INTERFACE(NriHelperInterface), &r->helper) != NriResult_SUCCESS || !acquire_queues(r)) {
         bake_worker_deinit(r);
-
         return false;
     }
 
-    if (!create_descriptor_pool(r) || !create_pipeline_layouts(r)) {
+    if (!create_pipeline_cache(r) || !create_gpu_timestamps(r) || !create_descriptor_pool(r) || !create_work_contexts(r) || !create_pipeline_layouts(r)) {
         bake_worker_deinit(r);
 
         return false;
@@ -3514,9 +4100,12 @@ void bake_worker_deinit(renderer *r) {
         if (r->graphics_queue) r->core.QueueWaitIdle(r->graphics_queue);
 
         destroy_upload_context(r);
+        destroy_work_contexts(r);
         clear_temporary(r);
 
+        probe_wavefront_scratch_destroy(r);
         release_bake_resources(r);
+        destroy_gpu_timestamps(r);
         release_buffer(r, r->volume_probe_buffer);
         release_buffer(r, r->beam_buffer);
         release_texture(r, r->lightmap_texture);
@@ -3526,6 +4115,7 @@ void bake_worker_deinit(renderer *r) {
         destroy_pipeline_layouts(r);
 
         if (r->descriptor_pool) r->core.DestroyDescriptorPool(r->descriptor_pool);
+        destroy_pipeline_cache(r);
 
         nriDestroyDevice(r->device);
     }
@@ -3549,8 +4139,11 @@ void r_deinit(renderer *r) {
         if (r->graphics_queue) r->core.QueueWaitIdle(r->graphics_queue);
 
         destroy_upload_context(r);
+        destroy_work_contexts(r);
         clear_temporary(r);
         destroy_frame_contexts(r);
+        probe_wavefront_scratch_destroy(r);
+        destroy_gpu_timestamps(r);
 
         fx_deinit(&r->fx);
 
@@ -3586,6 +4179,7 @@ void r_deinit(renderer *r) {
         destroy_pipeline_layouts(r);
 
         if (r->descriptor_pool) r->core.DestroyDescriptorPool(r->descriptor_pool);
+        destroy_pipeline_cache(r);
 
         nriDestroyDevice(r->device);
     }
@@ -3601,5 +4195,4 @@ void r_deinit(renderer *r) {
     if (r->window) SDL_DestroyWindow(r->window);
 
     memset(r, 0, sizeof(*r));
-    SDL_ShaderCross_Quit();
 }
