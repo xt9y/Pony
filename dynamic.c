@@ -5,9 +5,11 @@
 #include <string.h>
 
 #define DYNAMIC_MAX_CELLS (1u << 20u)
+#define DYNAMIC_GI_JOB_SLICE 64u
 
 typedef struct DYNAMIC_CELL {
     uint32_t first, count, generation;
+    bool pending, rerun;
 } DYNAMIC_CELL;
 
 typedef struct DYNAMIC_CELL_JOB {
@@ -31,7 +33,7 @@ struct DYNAMIC_STATE {
     uint32_t *sample_ids;
     DYNAMIC_CELL *cells;
     DYNAMIC_CELL_JOB *jobs;
-    uint32_t job_count, job_capacity;
+    uint32_t job_count, job_capacity, job_cursor;
     DYNAMIC_CELL_UPDATE *updates;
     uint32_t update_count, update_capacity;
     DYNAMIC_OBJECT_ENTRY *objects;
@@ -229,20 +231,29 @@ static bool build_grid(DYNAMIC_STATE *s, const LIGHTMAP *lm) {
     return true;
 }
 
-static bool queue_cell(DYNAMIC_STATE *s, uint32_t cell) {
-    if (!s->cells[cell].count) return true;
+static bool queue_cell(DYNAMIC_STATE *s, uint32_t cell, bool force_generation) {
+    DYNAMIC_CELL *entry = &s->cells[cell];
+    if (!entry->count) return true;
+
+    if (entry->pending && !force_generation) {
+        entry->rerun = true;
+        return true;
+    }
+
     if (!grow((void **)&s->jobs, &s->job_capacity, s->job_count + 1u, sizeof(*s->jobs), 64u) ||
         !grow((void **)&s->updates, &s->update_capacity, s->update_count + 1u, sizeof(*s->updates), 64u))
         return false;
 
-    uint32_t generation = ++s->cells[cell].generation;
-    if (!generation) generation = s->cells[cell].generation = 1u;
+    uint32_t generation = ++entry->generation;
+    if (!generation) generation = entry->generation = 1u;
+    entry->pending = true;
+    entry->rerun = false;
     s->jobs[s->job_count++] = (DYNAMIC_CELL_JOB){cell, generation, 0u, 0u};
     s->updates[s->update_count++] = (DYNAMIC_CELL_UPDATE){cell, generation};
     return true;
 }
 
-static bool invalidate(DYNAMIC_STATE *s, AABB b) {
+static bool invalidate(DYNAMIC_STATE *s, AABB b, bool force_generation) {
     const VEC3 grid_max = {
         s->origin.x + s->dims[0] * s->cell_size,
         s->origin.y + s->dims[1] * s->cell_size,
@@ -266,7 +277,7 @@ static bool invalidate(DYNAMIC_STATE *s, AABB b) {
     for (int z = min_z; z <= max_z; ++z)
         for (int y = min_y; y <= max_y; ++y)
             for (int x = min_x; x <= max_x; ++x)
-                if (!queue_cell(s, (uint32_t)x + s->dims[0] * ((uint32_t)y + s->dims[1] * (uint32_t)z)))
+                if (!queue_cell(s, (uint32_t)x + s->dims[0] * ((uint32_t)y + s->dims[1] * (uint32_t)z), force_generation))
                     return false;
     return true;
 }
@@ -275,6 +286,18 @@ static void erase_job(DYNAMIC_STATE *s, uint32_t index) {
     if (index + 1u < s->job_count)
         memmove(s->jobs + index, s->jobs + index + 1u, (size_t)(s->job_count - index - 1u) * sizeof(*s->jobs));
     s->job_count--;
+    if (!s->job_count) s->job_cursor = 0u;
+    else if (s->job_cursor >= s->job_count) s->job_cursor = 0u;
+}
+
+static void clear_pending_jobs(DYNAMIC_STATE *s) {
+    if (!s) return;
+    for (uint32_t i = 0; i < s->cell_count; ++i) {
+        s->cells[i].pending = false;
+        s->cells[i].rerun = false;
+    }
+    s->job_count = 0u;
+    s->job_cursor = 0u;
 }
 
 void dynamic_deinit(RENDERER *r) {
@@ -335,7 +358,7 @@ bool r_add_dynamic_object(RENDERER *r, OBJECT *object) {
 
     s->objects[s->object_count++] = entry;
     AABB expanded = swept(entry.bounds, entry.bounds, s->settings.gi_radius);
-    if (!invalidate(s, expanded)) {
+    if (!invalidate(s, expanded, false)) {
         s->object_count--;
         gpu_dynamic_unregister_model(r, object->data);
         return false;
@@ -350,12 +373,12 @@ void r_remove_dynamic_object(RENDERER *r, OBJECT *object) {
     for (uint32_t i = 0; i < s->object_count; ++i) {
         if (s->objects[i].object != object) continue;
         AABB expanded = swept(s->objects[i].bounds, s->objects[i].bounds, s->settings.gi_radius);
-        (void)invalidate(s, expanded);
+        (void)invalidate(s, expanded, true);
         struct MODEL *model = object->data;
         s->objects[i] = s->objects[--s->object_count];
         if (model) gpu_dynamic_unregister_model(r, model);
         s->object_generation++;
-        if (!s->object_count) s->job_count = 0u;
+        if (!s->object_count) clear_pending_jobs(s);
         return;
     }
 }
@@ -371,7 +394,7 @@ bool dynamic_sync(RENDERER *r) {
 
         DYNAMIC_OBJECT_ENTRY current = {0};
         if (!fill_entry(&current, object) ||
-            !invalidate(s, swept(entry->bounds, current.bounds, s->settings.gi_radius)))
+            !invalidate(s, swept(entry->bounds, current.bounds, s->settings.gi_radius), false))
             return false;
         *entry = current;
         s->object_generation++;
@@ -382,23 +405,25 @@ bool dynamic_sync(RENDERER *r) {
 uint32_t dynamic_take_gi_jobs(RENDERER *r, DYNAMIC_GI_JOB *out, uint32_t capacity) {
     if (!r || !r->dynamic || !out || !capacity) return 0u;
     DYNAMIC_STATE *s = r->dynamic;
-    if (!s->object_count) { s->job_count = 0u; return 0u; }
+    if (!s->object_count) { clear_pending_jobs(s); return 0u; }
 
     uint32_t limit = capacity < s->settings.texels_per_frame ? capacity : s->settings.texels_per_frame;
     uint32_t count = 0u;
-    uint32_t index = s->job_count;
 
-    while (index && count < limit) {
-        uint32_t j = --index;
+    while (s->job_count && count < limit) {
+        if (s->job_cursor >= s->job_count) s->job_cursor = 0u;
+        const uint32_t j = s->job_cursor;
         DYNAMIC_CELL_JOB *job = &s->jobs[j];
         if (job->cell >= s->cell_count || job->generation != s->cells[job->cell].generation) {
             erase_job(s, j);
-            if (index > s->job_count) index = s->job_count;
             continue;
         }
 
         DYNAMIC_CELL *cell = &s->cells[job->cell];
-        while (job->cursor < cell->count && count < limit) {
+        uint32_t slice_end = count + DYNAMIC_GI_JOB_SLICE;
+        if (slice_end > limit) slice_end = limit;
+
+        while (job->cursor < cell->count && count < slice_end) {
             uint32_t sample_index = s->sample_ids[cell->first + job->cursor++];
             const LMAP_SAMPLE *sample = &s->samples[sample_index];
             DYNAMIC_GI_JOB *dst = &out[count++];
@@ -410,11 +435,23 @@ uint32_t dynamic_take_gi_jobs(RENDERER *r, DYNAMIC_GI_JOB *out, uint32_t capacit
             dst->_pad = 0u;
         }
 
+        bool removed = false;
         if (job->cursor == cell->count) {
             job->cursor = 0u;
-            job->pass++;
-            if (job->pass >= s->settings.target_samples) erase_job(s, j);
+            if (cell->rerun) {
+                cell->rerun = false;
+                job->pass = 0u;
+            } else {
+                job->pass++;
+                if (job->pass >= s->settings.target_samples) {
+                    cell->pending = false;
+                    erase_job(s, j);
+                    removed = true;
+                }
+            }
         }
+
+        if (!removed && s->job_count) s->job_cursor = (j + 1u) % s->job_count;
     }
     return count;
 }
