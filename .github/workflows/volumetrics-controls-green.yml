@@ -14,6 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Correct patch helper target
+        run: python3 .github/volumetrics_controls_patch_fix.py
+
       - name: Apply implementation
         run: python3 .github/volumetrics_controls_patch.py
 
@@ -64,6 +67,6 @@ jobs:
         run: |
           git config user.name xt9y
           git config user.email felix@xt9y.de
-          git add game.h main.c gpu.c shaders/vision_compute.hlsl shaders/probe_wavefront.hlsl shaders/compute.hlsl
+          git add game.h main.c gpu.c shaders/vision_compute.hlsl shaders/probe_wavefront.hlsl shaders/compute.hlsl shaders/compute_base.hlsl
           git commit -m "Smooth volumetric quality transitions"
           git push origin HEAD:volumetrics-controls-work
