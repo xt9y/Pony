@@ -16,8 +16,7 @@ typedef struct SHADER_JOB {
 
 #if !defined(_WIN32)
 static const char *prepare_shadercross(void) {
-    if (system("command -v shadercross >/dev/null 2>&1") == 0)
-        return "shadercross";
+    if (system("command -v shadercross >/dev/null 2>&1") == 0) return "shadercross";
 
     if (system("pkg-config --exists sdl3-shadercross sdl3 >/dev/null 2>&1") != 0) {
         fprintf(stderr, "SDL_shadercross is installed as a library but pkg-config cannot find sdl3-shadercross\n");
@@ -55,11 +54,13 @@ static const char *prepare_shadercross(void) {
         "}\n";
 
     FILE *file = fopen("/tmp/pony_shadercross.c", "wb");
+
     if (!file || fwrite(helper_source, 1, sizeof(helper_source) - 1u, file) != sizeof(helper_source) - 1u) {
         if (file) fclose(file);
         fprintf(stderr, "failed to write temporary SDL_shadercross helper\n");
         exit(1);
     }
+
     fclose(file);
 
     if (system("cc -std=c11 /tmp/pony_shadercross.c -o /tmp/pony_shadercross $(pkg-config --cflags --libs sdl3-shadercross sdl3)") != 0) {
@@ -74,14 +75,17 @@ static const char *prepare_shadercross(void) {
 static void compile_nri_shaders(void) {
 #if defined(_WIN32)
     if (system("if not exist build\\shaders mkdir build\\shaders") != 0) exit(1);
+
     const int dxc_available = system("where dxc >NUL 2>NUL") == 0;
     const char *shadercross = "shadercross";
+
     if (system("where shadercross >NUL 2>NUL") != 0) {
         fprintf(stderr, "shadercross CLI not found; install SDL_shadercross with its CLI enabled\n");
         exit(1);
     }
 #else
     if (system("mkdir -p build/shaders") != 0) exit(1);
+
     const int dxc_available = system("command -v dxc >/dev/null 2>&1") == 0;
     const char *shadercross = prepare_shadercross();
 #endif
@@ -121,14 +125,11 @@ static void compile_nri_shaders(void) {
         int written;
 
         if (job->wave && dxc_available) {
-            written = snprintf(command, sizeof(command),
-                "dxc -spirv -fspv-target-env=vulkan1.2 -T cs_6_6 -E %s -I shaders -D%s %s -Fo build/shaders/%s.spv",
-                job->entry, job->define, job->path, job->define);
+            written = snprintf(command, sizeof(command), "dxc -spirv -fspv-target-env=vulkan1.2 -T cs_6_6 -E %s -I shaders -D%s %s -Fo build/shaders/%s.spv", job->entry,
+                               job->define, job->path, job->define);
         } else {
             const char *define = job->wave ? job->fallback_define : job->define;
-            written = snprintf(command, sizeof(command),
-                "%s %s %s %s %s build/shaders/%s.spv",
-                shadercross, job->path, job->entry, define, job->stage, job->define);
+            written = snprintf(command, sizeof(command), "%s %s %s %s %s build/shaders/%s.spv", shadercross, job->path, job->entry, define, job->stage, job->define);
         }
 
         if (written < 0 || (size_t)written >= sizeof(command) || system(command) != 0) {
@@ -140,6 +141,7 @@ static void compile_nri_shaders(void) {
 
 void build(C_Build *b) {
     C_Target *app = c_executable(b, "game");
+
     compile_nri_shaders();
 
     c_sources(app, "main.c");
