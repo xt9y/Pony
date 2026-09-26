@@ -8,7 +8,8 @@ Usage:
   felix-format < file.c            # stdin -> stdout
 
 Pipeline per file: dependency-safe include normalization -> clang-format with
-Felix's built-in style -> airy blank-line pass.
+Felix's built-in style -> designated-initializer expansion -> airy blank-line
+pass.
 
 The formatter is intentionally self-contained: it does not depend on a repo
 .clang-format file, and clang-format is never allowed to sort includes.
@@ -46,15 +47,15 @@ UseTab: Never,
 BreakBeforeBraces: Attach,
 AllowShortIfStatementsOnASingleLine: AllIfsAndElse,
 AllowShortFunctionsOnASingleLine: Empty,
-AllowShortBlocksOnASingleLine: Empty,
+AllowShortBlocksOnASingleLine: Never,
 AllowAllParametersOfDeclarationOnNextLine: true,
 AllowAllArgumentsOnNextLine: true,
-BinPackParameters: true,
-BinPackArguments: true,
+BinPackParameters: false,
+BinPackArguments: false,
 DerivePointerAlignment: false,
 PointerAlignment: Right,
 ReferenceAlignment: Right,
-AlignAfterOpenBracket: Align,
+AlignAfterOpenBracket: BlockIndent,
 AlignOperands: Align,
 SpaceBeforeParens: ControlStatements,
 SpaceAfterCStyleCast: false,
@@ -132,6 +133,17 @@ def is_decl(s):
 def decl_name(s):
     m = DECL_RE.match(s)
     return m.group("name") if m else None
+
+
+def is_designated_initializer_start(s):
+    """True for declaration lines like `OBJECT object = {`."""
+    code = strip_code(s).rstrip()
+    return is_decl(s) and code.endswith("{") and "=" in code
+
+
+def is_data_alias(s):
+    """Keep `struct TYPE *x = object.data;` attached to the object above it."""
+    return bool(re.search(r"=\s*[A-Za-z_]\w*\.data\s*;\s*$", strip_code(s)))
 
 
 def depths(lines):
@@ -272,7 +284,16 @@ def needs_blank_before(lines, i, dlist, glued=False):
         return False
     if continuation_blocked(prev, cur, dlist[j], dlist[i]):
         return False
+
+    # Give object-style / designated aggregate initializers their own paragraph.
+    # This turns a compact declaration run into the more open style used by Pony.
+    if is_designated_initializer_start(cur):
+        return True
+
     if pt.startswith("}"):
+        # Keep the typed alias to `object.data` directly under the object it belongs to.
+        if pt.startswith("};") and is_data_alias(cur):
+            return False
         return True
     if is_control(cur):
         if glued:
@@ -330,6 +351,388 @@ def normalize_dependency_includes(text):
     return "".join(lines)
 
 
+def _find_matching_brace(text, open_index):
+    """Find the matching } while ignoring comments and string/char literals."""
+    depth = 0
+    quote = None
+    in_line_comment = False
+    in_block_comment = False
+    i = open_index
+
+    while i < len(text):
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+
+        if in_line_comment:
+            if c == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+
+        if in_block_comment:
+            if c == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+
+        if c in ("'", '"'):
+            quote = c
+            i += 1
+            continue
+        if c == "/" and nxt == "/":
+            in_line_comment = True
+            i += 2
+            continue
+        if c == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+
+    return None
+
+
+def _split_top_level_initializer_items(content):
+    """Split `{ .a = ..., .b = ... }` at commas belonging to that brace only."""
+    items = []
+    start = 0
+    paren = bracket = brace = 0
+    quote = None
+    in_line_comment = False
+    in_block_comment = False
+    i = 0
+
+    while i < len(content):
+        c = content[i]
+        nxt = content[i + 1] if i + 1 < len(content) else ""
+
+        if in_line_comment:
+            if c == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+
+        if in_block_comment:
+            if c == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+
+        if c in ("'", '"'):
+            quote = c
+            i += 1
+            continue
+        if c == "/" and nxt == "/":
+            in_line_comment = True
+            i += 2
+            continue
+        if c == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+
+        if c == "(":
+            paren += 1
+        elif c == ")":
+            paren -= 1
+        elif c == "[":
+            bracket += 1
+        elif c == "]":
+            bracket -= 1
+        elif c == "{":
+            brace += 1
+        elif c == "}":
+            brace -= 1
+        elif c == "," and paren == 0 and bracket == 0 and brace == 0:
+            item = content[start:i]
+            j = i + 1
+            while j < len(content) and content[j] in " \t":
+                j += 1
+
+            # Preserve a same-line trailing // comment on the field before it.
+            trailing_comment = ""
+            if content.startswith("//", j):
+                end = content.find("\n", j)
+                if end == -1:
+                    trailing_comment = content[j:]
+                    start = len(content)
+                    i = len(content)
+                else:
+                    trailing_comment = content[j:end]
+                    start = end + 1
+                    i = end
+            else:
+                start = i + 1
+
+            items.append((item, True, trailing_comment))
+
+        i += 1
+
+    if start < len(content):
+        items.append((content[start:], False, ""))
+
+    return items
+
+
+def _item_begins_with_designator(item):
+    """Ignore comment-only lines and look for `.field =` at item scope."""
+    for line in item.splitlines():
+        t = line.strip()
+        if not t or t.startswith("//") or t.startswith("/*") or t.startswith("*"):
+            continue
+        return bool(re.match(r"^\.[A-Za-z_]\w*\s*=", t))
+    return False
+
+
+def _has_direct_designator(content):
+    return any(
+        _item_begins_with_designator(item)
+        for item, _had_comma, _comment in _split_top_level_initializer_items(content)
+    )
+
+
+def _normalize_initializer_item(item):
+    """Undo clang's opening-brace alignment for fields we are about to block-indent."""
+    lines = item.strip().splitlines()
+    if len(lines) <= 1:
+        return item.strip()
+    return "\n".join(line.strip() if line.strip() else "" for line in lines)
+
+
+def _format_nested_initializer_braces(text, base_indent):
+    """Expand designated braces nested in one initializer field."""
+    out = []
+    i = 0
+
+    while i < len(text):
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+
+        if c in ("'", '"'):
+            quote = c
+            j = i + 1
+            while j < len(text):
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == quote:
+                    j += 1
+                    break
+                j += 1
+            out.append(text[i:j])
+            i = j
+            continue
+
+        if c == "/" and nxt == "/":
+            end = text.find("\n", i)
+            if end == -1:
+                out.append(text[i:])
+                break
+            out.append(text[i : end + 1])
+            i = end + 1
+            continue
+
+        if c == "/" and nxt == "*":
+            end = text.find("*/", i + 2)
+            if end == -1:
+                out.append(text[i:])
+                break
+            out.append(text[i : end + 2])
+            i = end + 2
+            continue
+
+        if c == "{":
+            close = _find_matching_brace(text, i)
+            if close is None:
+                out.append(text[i:])
+                break
+
+            content = text[i + 1 : close]
+            if _has_direct_designator(content):
+                out.append(_render_designated_brace(content, base_indent))
+            else:
+                # Keep scalar/vector lists compact, but still inspect deeper compound literals.
+                inner = _format_nested_initializer_braces(content, base_indent)
+                out.append("{" + inner + "}")
+            i = close + 1
+            continue
+
+        out.append(c)
+        i += 1
+
+    return "".join(out)
+
+
+def _render_designated_brace(content, base_indent):
+    """Render one designated initializer as an indented block."""
+    item_indent = base_indent + "    "
+    rendered = []
+
+    for raw, had_comma, trailing_comment in _split_top_level_initializer_items(content):
+        raw = raw.strip()
+        if not raw:
+            continue
+
+        item = _normalize_initializer_item(raw)
+        item = _format_nested_initializer_braces(item, item_indent)
+        lines = item.splitlines() or [item]
+
+        block = item_indent + lines[0].strip()
+        for line in lines[1:]:
+            if not line.strip():
+                block += "\n"
+            elif line.startswith(item_indent):
+                block += "\n" + line
+            else:
+                block += "\n" + item_indent + line.strip()
+
+        if had_comma:
+            block += ","
+        if trailing_comment:
+            block += " " + trailing_comment.strip()
+        rendered.append(block)
+
+    return "{\n" + "\n".join(rendered) + "\n" + base_indent + "}"
+
+
+def _format_designated_chunk(text):
+    """Format designated initializers in text that contains no preprocessor directives."""
+    out = []
+    i = 0
+
+    while i < len(text):
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+
+        if c in ("'", '"'):
+            quote = c
+            j = i + 1
+            while j < len(text):
+                if text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == quote:
+                    j += 1
+                    break
+                j += 1
+            out.append(text[i:j])
+            i = j
+            continue
+
+        if c == "/" and nxt == "/":
+            end = text.find("\n", i)
+            if end == -1:
+                out.append(text[i:])
+                break
+            out.append(text[i : end + 1])
+            i = end + 1
+            continue
+
+        if c == "/" and nxt == "*":
+            end = text.find("*/", i + 2)
+            if end == -1:
+                out.append(text[i:])
+                break
+            out.append(text[i : end + 2])
+            i = end + 2
+            continue
+
+        if c == "{":
+            close = _find_matching_brace(text, i)
+            if close is None:
+                out.append(text[i:])
+                break
+
+            content = text[i + 1 : close]
+            if _has_direct_designator(content):
+                line_start = text.rfind("\n", 0, i) + 1
+                prefix = text[line_start:i]
+                base_indent = re.match(r"[ \t]*", prefix).group(0)
+                out.append(_render_designated_brace(content, base_indent))
+            else:
+                inner = _format_designated_chunk(content)
+                out.append("{" + inner + "}")
+            i = close + 1
+            continue
+
+        out.append(c)
+        i += 1
+
+    return "".join(out)
+
+
+def expand_designated_initializers(text):
+    """Force C designated initializers into a readable block form.
+
+    Examples:
+      OBJECT x = {.state = STATIC, .type = MODEL};
+
+    becomes:
+      OBJECT x = {
+          .state = STATIC,
+          .type = MODEL
+      };
+
+    Short scalar/vector braces such as `{0}` and `{1.0f, 2.0f, 3.0f}` remain
+    compact. Preprocessor directives are passed through untouched so multiline
+    macros cannot be broken by this pass.
+    """
+    lines = text.splitlines(True)
+    out = []
+    normal = []
+    i = 0
+
+    def flush_normal():
+        if normal:
+            out.append(_format_designated_chunk("".join(normal)))
+            normal.clear()
+
+    while i < len(lines):
+        line = lines[i]
+        if line.lstrip().startswith("#"):
+            flush_normal()
+            directive = [line]
+            while directive[-1].rstrip("\r\n").endswith("\\") and i + 1 < len(lines):
+                i += 1
+                directive.append(lines[i])
+            out.extend(directive)
+        else:
+            normal.append(line)
+        i += 1
+
+    flush_normal()
+    return "".join(out)
+
+
 def run_clang_format(text, filename, exe="clang-format"):
     cmd = [
         exe,
@@ -355,6 +758,7 @@ def format_text(text, filename, use_clang=True, clang_exe="clang-format"):
     text = normalize_dependency_includes(text)
     if use_clang:
         text = run_clang_format(text, filename, clang_exe)
+    text = expand_designated_initializers(text)
     return airy_pass(text)
 
 
@@ -363,7 +767,7 @@ def main(argv=None):
     ap.add_argument("-i", "--in-place", action="store_true", help="edit files in place")
     ap.add_argument("--check", action="store_true", help="exit 1 if any file would change")
     ap.add_argument("--diff", action="store_true", help="show unified diffs")
-    ap.add_argument("--no-clang", action="store_true", help="skip clang-format, airy pass only")
+    ap.add_argument("--no-clang", action="store_true", help="skip clang-format, custom passes only")
     ap.add_argument("--clang-format", default="clang-format", help="clang-format binary")
     ap.add_argument("files", nargs="*", help="C files (shell expands *.c)")
     args = ap.parse_args(argv)
@@ -414,3 +818,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.exit(main())
+
