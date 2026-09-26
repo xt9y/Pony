@@ -1,0 +1,24 @@
+name: volumetrics-controls-red
+
+on:
+  push:
+    paths:
+      - '.github/workflows/volumetrics-controls-red.yml'
+
+jobs:
+  red:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify regression test is red before implementation
+        shell: bash
+        run: |
+          set +e
+          python3 .github/volumetrics_controls_test.py
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "Regression test unexpectedly passed before implementation"
+            exit 1
+          fi
+          echo "RED confirmed: missing volumetrics controls/smoothing"
