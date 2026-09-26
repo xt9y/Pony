@@ -9,10 +9,51 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Confirm RED before implementation
+      - name: Apply implementation if needed
         run: |
           if python3 .github/peripheral_vision_split_test.py; then
-            echo "expected regression test to fail before implementation"
-            exit 1
+            echo "source already satisfies the contract"
+          else
+            python3 .github/peripheral_vision_split_patch.py
           fi
-          echo "RED confirmed"
+      - name: Run source regression contract
+        run: python3 .github/peripheral_vision_split_test.py
+      - name: Check source diff
+        run: git diff --check
+      - name: Install HLSL validator
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+      - name: Compile affected HLSL variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          validate() {
+            local source="$1"
+            local define="$2"
+            local entry="$3"
+            cat > __validate.hlsl <<EOF
+          #define GPU_BIND_S(n,s)
+          #define GPU_BIND_T(n,s)
+          #define GPU_BIND_B(n,s)
+          #define GPU_BIND_U(n,s)
+          #define GPU_STORAGE_RGBA16F
+          #define ${define}
+          #include "${source}"
+          EOF
+            glslangValidator -D -V --target-env vulkan1.2 -S comp -e "$entry" -I. __validate.hlsl -o /tmp/${entry}_${define}.spv
+          }
+          validate shaders/vision_compute.hlsl BUILD_VISION_VOLUME_CS volume_cs
+          validate shaders/vision_compute.hlsl BUILD_VISION_COMPOSE_CS volume_compose_cs
+          validate shaders/compute.hlsl BUILD_VOLUME_CS volume_cs
+          rm -f __validate.hlsl
+      - name: Commit verified source implementation
+        shell: bash
+        run: |
+          if git diff --quiet -- game.h gpu.h main.c render.c gpu.c shaders/compute.hlsl shaders/vision_compute.hlsl; then
+            echo "no source changes to commit"
+            exit 0
+          fi
+          git config user.name xt9y
+          git config user.email felix@xt9y.de
+          git add game.h gpu.h main.c render.c gpu.c shaders/compute.hlsl shaders/vision_compute.hlsl
+          git commit -m "Split peripheral vision controls"
+          git push origin HEAD:peripheral-vision-split-work
