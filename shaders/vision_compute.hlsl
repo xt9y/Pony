@@ -67,16 +67,16 @@ float3 integrate_probe_quality(uint probe_steps, uint2 pixel_id, float3 directio
                                float3 surface_position, float3 surface_normal,
                                bool has_surface)
 {
-    probe_steps = min(max(probe_steps, 1u), 4u);
+    probe_steps = max(probe_steps, 1u);
     float step_size = (leave - enter) / float(probe_steps);
     float probe_transmission = exp(-volume_params.x * step_size);
     float probe_remaining = 1.0f;
     float3 sum = 0.0f;
     float jitter = vision_jitter(pixel_id);
+    float jitter_strength = max(volume_filter.x, 0.0f);
 
-    [loop] for (uint i = 0u; i < 4u; ++i) {
-        if (i >= probe_steps) break;
-        float t = enter + (float(i) + 0.5f + (jitter - 0.5f) * 0.65f) * step_size;
+    [loop] for (uint i = 0u; i < probe_steps; ++i) {
+        float t = enter + (float(i) + 0.5f + (jitter - 0.5f) * jitter_strength) * step_size;
         t = clamp(t, enter + 1.0e-5f, leave - 1.0e-5f);
         float integral = probe_remaining * (1.0f - probe_transmission);
         sum += volume_radiance(eye_density.xyz + direction * t, direction,
@@ -188,6 +188,7 @@ GPU_BIND_B(0, 2) cbuffer VolumeComposeData : register(b0, space2)
     uint debug_view;
     uint bypass_volume;
     float4 volume_radii;
+    float4 volume_filter;
     uint4 volume_strides;
 };
 
@@ -295,6 +296,9 @@ float4 reconstructed_volume(float2 uv, float center_depth)
 
 float4 edge_aware_volume_blur(float2 uv, float center_depth, float4 center_fog)
 {
+    float blur_strength = max(volume_filter.y, 0.0f);
+    if (blur_strength <= 1.0e-5f) return center_fog;
+
     int2 offsets[5] = {
         int2(0, 0), int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1)
     };
@@ -305,7 +309,7 @@ float4 edge_aware_volume_blur(float2 uv, float center_depth, float4 center_fog)
     [unroll] for (uint i = 1u; i < 5u; ++i) {
         float2 sample_uv = saturate(uv + float2(offsets[i]) * texel);
         float sample_depth = NormalDepth.SampleLevel(DepthSampler, sample_uv, 0.0f).w;
-        float weight = 0.35f * depth_similarity(center_depth, sample_depth);
+        float weight = blur_strength * depth_similarity(center_depth, sample_depth);
         if (weight <= 1.0e-4f) continue;
         float4 sample_fog = reconstructed_volume(sample_uv, sample_depth);
         sum += sample_fog * weight;

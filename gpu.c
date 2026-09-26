@@ -93,13 +93,14 @@ typedef struct VOLUME_UNIFORMS {
     float sun_intensity[4], sun_color[4], grid_origin_spacing[4];
     Uint32 grid_dims_width[4], height_debug[4];
     float beam_origin[4], beam_step[4];
-    float volume_params[4], volume_radii[4];
+    float volume_params[4], volume_radii[4], volume_filter[4];
     Uint32 volume_quality[4], volume_strides[4];
 } VOLUME_UNIFORMS;
 
 typedef struct VOLUME_COMPOSE_UNIFORMS {
     Uint32 width, height, debug_view, bypass_volume;
     float volume_radii[4];
+    float volume_filter[4];
     Uint32 volume_strides[4];
 } VOLUME_COMPOSE_UNIFORMS;
 
@@ -3798,9 +3799,10 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
                                .beam_origin = {beam_grid->origin.x, beam_grid->origin.y, beam_grid->origin.z, 0},
                                .beam_step = {beam_grid->step.x, beam_grid->step.y, beam_grid->step.z, 0},
                                .volume_params = {frame->volumetrics.density, frame->volumetrics.anisotropy, frame->volumetrics.probe_intensity, frame->volumetrics.max_distance},
-                               .volume_radii = {frame->volumetrics.center_radius, frame->volumetrics.middle_radius, frame->volumetrics.center_transition_width, frame->volumetrics.middle_transition_width},
-                               .volume_quality = {frame->volumetrics.center_steps, frame->volumetrics.middle_steps, frame->volumetrics.peripheral_steps, 0u},
-                               .volume_strides = {frame->volumetrics.center_stride, frame->volumetrics.middle_stride, frame->volumetrics.peripheral_stride, 0u}};
+                               .volume_radii = {frame->vision.center_radius, frame->vision.middle_radius, frame->vision.center_transition_width, frame->vision.middle_transition_width},
+                               .volume_filter = {frame->vision.jitter_strength, frame->vision.volume_blur_strength, 0.0f, 0.0f},
+                               .volume_quality = {frame->vision.center_steps, frame->vision.middle_steps, frame->vision.peripheral_steps, 0u},
+                               .volume_strides = {frame->vision.center_stride, frame->vision.middle_stride, frame->vision.peripheral_stride, 0u}};
 
     if (!bind_volume_resources(r, cmd, fx->normal_depth, fx->depth_sampler, probes, beams, fx->volume, &u, sizeof(u))) return false;
 
@@ -3813,8 +3815,9 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
         .height = fx->height,
         .debug_view = fx->debug_view,
         .bypass_volume = 0u,
-        .volume_radii = {frame->volumetrics.center_radius, frame->volumetrics.middle_radius, frame->volumetrics.center_transition_width, frame->volumetrics.middle_transition_width},
-        .volume_strides = {frame->volumetrics.center_stride, frame->volumetrics.middle_stride, frame->volumetrics.peripheral_stride, 0u},
+        .volume_radii = {frame->vision.center_radius, frame->vision.middle_radius, frame->vision.center_transition_width, frame->vision.middle_transition_width},
+        .volume_filter = {frame->vision.jitter_strength, frame->vision.volume_blur_strength, 0.0f, 0.0f},
+        .volume_strides = {frame->vision.center_stride, frame->vision.middle_stride, frame->vision.peripheral_stride, 0u},
     };
 
     if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, &compose, sizeof(compose))) return false;
