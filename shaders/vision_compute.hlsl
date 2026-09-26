@@ -15,11 +15,56 @@ float vision_eccentricity(float2 uv)
     return saturate(length(uv * 2.0f - 1.0f));
 }
 
+float vision_transition(float eccentricity, float radius, float width)
+{
+    if (width <= 1.0e-5f)
+        return eccentricity < radius ? 0.0f : 1.0f;
+    float half_width = 0.5f * width;
+    return smoothstep(radius - half_width, radius + half_width, eccentricity);
+}
+
+float3 vision_quality_weights(float eccentricity)
+{
+    float center_to_middle = vision_transition(eccentricity, volume_radii.x, volume_radii.z);
+    float middle_to_peripheral = vision_transition(eccentricity, volume_radii.y, volume_radii.w);
+    float3 weights = float3(1.0f - center_to_middle,
+                            center_to_middle * (1.0f - middle_to_peripheral),
+                            middle_to_peripheral);
+    return weights / max(weights.x + weights.y + weights.z, 1.0e-5f);
+}
+
 uint vision_stride(float eccentricity)
 {
-    if (eccentricity < volume_radii.x) return max(volume_strides.x, 1u);
-    if (eccentricity < volume_radii.y) return max(volume_strides.y, 1u);
-    return max(volume_strides.z, 1u);
+    float3 quality = vision_quality_weights(eccentricity);
+    uint stride = 0xffffffffu;
+    if (quality.x > 1.0e-4f) stride = min(stride, max(volume_strides.x, 1u));
+    if (quality.y > 1.0e-4f) stride = min(stride, max(volume_strides.y, 1u));
+    if (quality.z > 1.0e-4f) stride = min(stride, max(volume_strides.z, 1u));
+    return stride == 0xffffffffu ? 1u : stride;
+}
+
+float3 integrate_probe_quality(uint probe_steps, float3 direction,
+                               float enter, float leave,
+                               float3 surface_position, float3 surface_normal,
+                               bool has_surface)
+{
+    probe_steps = min(max(probe_steps, 1u), 4u);
+    float step_size = (leave - enter) / float(probe_steps);
+    float probe_transmission = exp(-volume_params.x * step_size);
+    float probe_remaining = 1.0f;
+    float3 sum = 0.0f;
+
+    [loop] for (uint i = 0u; i < 4u; ++i) {
+        if (i >= probe_steps) break;
+        float t = enter + (float(i) + 0.5f) * step_size;
+        float integral = probe_remaining * (1.0f - probe_transmission);
+        sum += volume_radiance(eye_density.xyz + direction * t, direction,
+                               surface_position, surface_normal, has_surface) *
+               integral * volume_params.z;
+        probe_remaining *= probe_transmission;
+    }
+
+    return sum;
 }
 
 [numthreads(8, 8, 1)]
@@ -82,24 +127,18 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     if (dot(eye_density.xyz - surface_position, surface_normal) < 0.0f)
         surface_normal = -surface_normal;
 
-    uint probe_steps = eccentricity < volume_radii.x ? volume_quality.x :
-        (eccentricity < volume_radii.y ? volume_quality.y : volume_quality.z);
-    probe_steps = max(probe_steps, 1u);
-    float step_size = (leave - enter) / float(probe_steps);
+    float3 quality = vision_quality_weights(eccentricity);
     float3 sum = 0.0f;
+    if (quality.x > 1.0e-4f)
+        sum += quality.x * integrate_probe_quality(volume_quality.x, direction, enter, leave,
+                                                   surface_position, surface_normal, depth > 0.0f);
+    if (quality.y > 1.0e-4f)
+        sum += quality.y * integrate_probe_quality(volume_quality.y, direction, enter, leave,
+                                                   surface_position, surface_normal, depth > 0.0f);
+    if (quality.z > 1.0e-4f)
+        sum += quality.z * integrate_probe_quality(volume_quality.z, direction, enter, leave,
+                                                   surface_position, surface_normal, depth > 0.0f);
     float sun_fraction = 0.0f;
-    float probe_transmission = exp(-volume_params.x * step_size);
-    float probe_remaining = 1.0f;
-
-    [loop] for (uint i = 0u; i < 4u; ++i) {
-        if (i >= probe_steps) break;
-        float t = enter + (float(i) + 0.5f) * step_size;
-        float integral = probe_remaining * (1.0f - probe_transmission);
-        sum += volume_radiance(eye_density.xyz + direction * t, direction,
-                               surface_position, surface_normal, depth > 0.0f) *
-               integral * volume_params.z;
-        probe_remaining *= probe_transmission;
-    }
 
     float g = volume_params.y;
     float cosine = dot(direction, normalize(sun_intensity.xyz));
@@ -136,11 +175,32 @@ float vision_eccentricity(float2 uv)
     return saturate(length(uv * 2.0f - 1.0f));
 }
 
+float vision_transition(float eccentricity, float radius, float width)
+{
+    if (width <= 1.0e-5f)
+        return eccentricity < radius ? 0.0f : 1.0f;
+    float half_width = 0.5f * width;
+    return smoothstep(radius - half_width, radius + half_width, eccentricity);
+}
+
+float3 vision_quality_weights(float eccentricity)
+{
+    float center_to_middle = vision_transition(eccentricity, volume_radii.x, volume_radii.z);
+    float middle_to_peripheral = vision_transition(eccentricity, volume_radii.y, volume_radii.w);
+    float3 weights = float3(1.0f - center_to_middle,
+                            center_to_middle * (1.0f - middle_to_peripheral),
+                            middle_to_peripheral);
+    return weights / max(weights.x + weights.y + weights.z, 1.0e-5f);
+}
+
 uint vision_stride(float eccentricity)
 {
-    if (eccentricity < volume_radii.x) return max(volume_strides.x, 1u);
-    if (eccentricity < volume_radii.y) return max(volume_strides.y, 1u);
-    return max(volume_strides.z, 1u);
+    float3 quality = vision_quality_weights(eccentricity);
+    uint stride = 0xffffffffu;
+    if (quality.x > 1.0e-4f) stride = min(stride, max(volume_strides.x, 1u));
+    if (quality.y > 1.0e-4f) stride = min(stride, max(volume_strides.y, 1u));
+    if (quality.z > 1.0e-4f) stride = min(stride, max(volume_strides.z, 1u));
+    return stride == 0xffffffffu ? 1u : stride;
 }
 
 float depth_similarity(float center_depth, float sample_depth)
@@ -151,11 +211,11 @@ float depth_similarity(float center_depth, float sample_depth)
                max(0.025f, center_depth * 0.025f));
 }
 
-float4 reconstructed_volume(float2 uv, float center_depth)
+float4 reconstructed_volume_stride(float2 uv, float center_depth, uint stride)
 {
     uint volume_width, volume_height;
     Volume.GetDimensions(volume_width, volume_height);
-    uint stride = vision_stride(vision_eccentricity(uv));
+    stride = max(stride, 1u);
 
     float2 volume_size = float2(volume_width, volume_height);
     float2 position = uv * volume_size - 0.5f;
@@ -197,6 +257,19 @@ float4 reconstructed_volume(float2 uv, float center_depth)
     }
 
     return weight_sum > 1.0e-5f ? fog / weight_sum : closest_fog;
+}
+
+float4 reconstructed_volume(float2 uv, float center_depth)
+{
+    float3 quality = vision_quality_weights(vision_eccentricity(uv));
+    float4 fog = 0.0f;
+    if (quality.x > 1.0e-4f)
+        fog += quality.x * reconstructed_volume_stride(uv, center_depth, volume_strides.x);
+    if (quality.y > 1.0e-4f)
+        fog += quality.y * reconstructed_volume_stride(uv, center_depth, volume_strides.y);
+    if (quality.z > 1.0e-4f)
+        fog += quality.z * reconstructed_volume_stride(uv, center_depth, volume_strides.z);
+    return fog;
 }
 
 float3 vision_hdr(float2 uv, float center_depth, float eccentricity)

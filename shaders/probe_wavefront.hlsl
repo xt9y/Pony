@@ -96,6 +96,7 @@ GPU_BIND_B(0, 2) cbuffer ProbeBakeData : register(b0, space2)
     float4 sky_zenith;
     float4 sky_horizon;
     float4 bake_params;
+    float4 emissive_params;
     float4 probe_beam_origin;
     float4 probe_beam_step;
 };
@@ -556,7 +557,7 @@ void probe_emissive_cs(uint3 id : SV_DispatchThreadID)
         if (pdf_solid_angle <= 1.0e-12f)
             continue;
 
-        float3 contribution = max(tri.emissive.rgb, 0.0f) / pdf_solid_angle;
+        float3 contribution = max(tri.emissive.rgb, 0.0f) * max(emissive_params.x, 0.0f) / pdf_solid_angle;
         float basis[9];
         probe_sh_basis(direction, basis);
         [unroll] for (uint coefficient = 0u; coefficient < 9u; ++coefficient)
@@ -658,7 +659,7 @@ void probe_primary_cs(uint3 id : SV_DispatchThreadID)
     state.position = float4(ray.origin + ray.direction * hit.t, 0.0f);
     state.normal = float4(hit.normal, 0.0f);
     state.throughput = float4(hit.albedo / PROBE_PI, 0.0f);
-    state.radiance = emissive_samples == 0u ? float4(hit.emissive, 0.0f) : 0.0f;
+    state.radiance = emissive_samples == 0u ? float4(hit.emissive * max(emissive_params.x, 0.0f), 0.0f) : 0.0f;
     state.meta = uint4(result_index, seed, 0u, 0u);
 
     uint slot;
@@ -788,7 +789,7 @@ float3 probe_direct_emissive(float3 position, float3 normal, inout uint seed)
     if (pdf_area <= 1.0e-12f)
         return 0.0f;
 
-    return max(tri.emissive.rgb, 0.0f) *
+    return max(tri.emissive.rgb, 0.0f) * max(emissive_params.x, 0.0f) *
         (receiver_cosine * emitter_cosine / max(distance2 * pdf_area, 1.0e-8f));
 }
 
