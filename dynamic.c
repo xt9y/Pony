@@ -454,8 +454,6 @@ bool dynamic_instance_data(RENDERER *r, uint32_t index, DYNAMIC_INSTANCE_DATA *o
     if (!r || !r->dynamic || !out || index >= r->dynamic->object_count) return false;
     const DYNAMIC_OBJECT_ENTRY *entry = &r->dynamic->objects[index];
     if (!entry->object || !entry->object->data) return false;
-    memset(out, 0, sizeof(*out));
-    out->object = entry->object;
     out->model = entry->object->data;
     out->world_bounds = entry->bounds;
     memcpy(out->world, entry->world, sizeof(out->world));

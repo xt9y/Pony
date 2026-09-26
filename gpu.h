@@ -112,7 +112,6 @@ typedef struct DYNAMIC_CELL_UPDATE {
 } DYNAMIC_CELL_UPDATE;
 
 typedef struct DYNAMIC_INSTANCE_DATA {
-    OBJECT *object;
     struct MODEL *model;
     AABB world_bounds;
     float world[16];
