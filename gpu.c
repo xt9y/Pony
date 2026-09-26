@@ -97,6 +97,12 @@ typedef struct VOLUME_UNIFORMS {
     Uint32 volume_quality[4], volume_strides[4];
 } VOLUME_UNIFORMS;
 
+typedef struct VOLUME_COMPOSE_UNIFORMS {
+    Uint32 width, height, debug_view, bypass_volume;
+    float volume_radii[4];
+    Uint32 volume_strides[4];
+} VOLUME_COMPOSE_UNIFORMS;
+
 struct RENDER_MATERIAL {
     GLTF_MATERIAL data;
     NriTexture *base_color;
@@ -3800,9 +3806,16 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
 
     r->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (fx->ao_width + 7u) / 8u, .workGroupNumY = (fx->ao_height + 7u) / 8u, .workGroupNumZ = 1});
 
-    const Uint32 dimensions[4] = {fx->width, fx->height, fx->debug_view, 0};
+    const VOLUME_COMPOSE_UNIFORMS compose = {
+        .width = fx->width,
+        .height = fx->height,
+        .debug_view = fx->debug_view,
+        .bypass_volume = 0u,
+        .volume_radii = {frame->volumetrics.center_radius, frame->volumetrics.middle_radius, 0.0f, 0.0f},
+        .volume_strides = {frame->volumetrics.center_stride, frame->volumetrics.middle_stride, frame->volumetrics.peripheral_stride, 0u},
+    };
 
-    if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, dimensions, sizeof(dimensions))) return false;
+    if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, &compose, sizeof(compose))) return false;
 
     r->core.CmdSetPipeline(cmd, fx->volume_compose_pipeline);
 
@@ -3817,9 +3830,14 @@ static bool run_vision_only(FX_STATE *fx, NriCommandBuffer *cmd) {
     if (!fx || !fx->owner || !cmd) return false;
 
     RENDERER *r = fx->owner;
-    const Uint32 dimensions[4] = {fx->width, fx->height, fx->debug_view, 1u};
+    const VOLUME_COMPOSE_UNIFORMS compose = {
+        .width = fx->width,
+        .height = fx->height,
+        .debug_view = fx->debug_view,
+        .bypass_volume = 1u,
+    };
 
-    if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, dimensions, sizeof(dimensions))) return false;
+    if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, &compose, sizeof(compose))) return false;
 
     r->core.CmdSetPipeline(cmd, fx->volume_compose_pipeline);
 
