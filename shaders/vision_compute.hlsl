@@ -127,6 +127,8 @@ GPU_BIND_B(0, 2) cbuffer VolumeComposeData : register(b0, space2)
     uint height;
     uint debug_view;
     uint bypass_volume;
+    float4 volume_radii;
+    uint4 volume_strides;
 };
 
 float vision_eccentricity(float2 uv)
