@@ -99,7 +99,13 @@ static int tok_add(GLB_DOC *d, GLB_TOKEN_TYPE type, uint32_t start, int parent) 
 
     int idx = (int)d->token_count++;
 
-    d->tokens[idx] = (GLB_TOKEN){.start = start, .end = start, .parent = parent, .children = 0, .type = type};
+    d->tokens[idx] = (GLB_TOKEN){
+        .start = start,
+        .end = start,
+        .parent = parent,
+        .children = 0,
+        .type = type
+    };
 
     if (parent >= 0) d->tokens[parent].children++;
 

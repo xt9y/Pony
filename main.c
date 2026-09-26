@@ -64,36 +64,68 @@ int main(int argc, char **argv) {
     GLB_DOC model = {0};
     MESH scene = {0};
     GLTF_SCENE visual = {0};
-    struct MODEL scene_model = {.geometry = &scene, .visual = &visual};
-    OBJECT scene_object = {.state = STATIC, .type = MODEL, .data = &scene_model};
+
+    struct MODEL scene_model = {
+        .geometry = &scene,
+        .visual = &visual
+    };
+
+    OBJECT scene_object = {
+        .state = STATIC,
+        .type = MODEL,
+        .data = &scene_model
+    };
     struct MODEL *scene_data = scene_object.data;
-    DIRECTIONAL_LIGHT directional_sun = {.direction = {0.38f, 0.30f, 0.32f},
-                                         .color = {1.00f, 0.94f, 0.84f},
-                                         .intensity = 1.0f,
-                                         .angular_radius = 0.00465f};
-    SKY sky = {.zenith = {0.22f, 0.42f, 0.78f}, .horizon = {0.68f, 0.76f, 0.88f}, .intensity = 1.0f};
-    VOLUMETRICS_LIGHTING volumetrics = {.density = 0.045f,
-                                         .anisotropy = 0.55f,
-                                         .probe_intensity = 0.15f,
-                                         .emissive_probe_intensity = 1.0f,
-                                         .max_distance = 10000.0f,
-                                         .probe_spacing = 4.0f,
-                                         .probe_samples = 1024u,
-                                         .emissive_samples = 128u};
-    PERIPHERAL_VISION vision = {.center_radius = 0.50f,
-                                .middle_radius = 0.82f,
-                                .center_transition_width = 0.08f,
-                                .middle_transition_width = 0.08f,
-                                .jitter_strength = 0.65f,
-                                .volume_blur_strength = 0.35f,
-                                .center_steps = 4u,
-                                .middle_steps = 2u,
-                                .peripheral_steps = 1u,
-                                .center_stride = 1u,
-                                .middle_stride = 8u,
-                                .peripheral_stride = 24u};
-    struct LIGHT sun = {.type = LIGHT_DIRECTIONAL, .directional = directional_sun};
-    OBJECT light_object = {.state = STATIC, .type = LIGHT, .data = &sun};
+
+    DIRECTIONAL_LIGHT directional_sun = {
+        .direction = {0.38f, 0.30f, 0.32f},
+        .color = {1.00f, 0.94f, 0.84f},
+        .intensity = 1.0f,
+        .angular_radius = 0.00465f
+    };
+
+    SKY sky = {
+        .zenith = {0.22f, 0.42f, 0.78f},
+        .horizon = {0.68f, 0.76f, 0.88f},
+        .intensity = 1.0f
+    };
+
+    VOLUMETRICS_LIGHTING volumetrics = {
+        .density = 0.045f,
+        .anisotropy = 0.55f,
+        .probe_intensity = 0.15f,
+        .emissive_probe_intensity = 1.0f,
+        .max_distance = 10000.0f,
+        .probe_spacing = 4.0f,
+        .probe_samples = 1024u,
+        .emissive_samples = 128u
+    };
+
+    PERIPHERAL_VISION vision = {
+        .center_radius = 0.50f,
+        .middle_radius = 0.82f,
+        .center_transition_width = 0.08f,
+        .middle_transition_width = 0.08f,
+        .jitter_strength = 0.65f,
+        .volume_blur_strength = 0.35f,
+        .center_steps = 4u,
+        .middle_steps = 2u,
+        .peripheral_steps = 1u,
+        .center_stride = 1u,
+        .middle_stride = 8u,
+        .peripheral_stride = 24u
+    };
+
+    struct LIGHT sun = {
+        .type = LIGHT_DIRECTIONAL,
+        .directional = directional_sun
+    };
+
+    OBJECT light_object = {
+        .state = STATIC,
+        .type = LIGHT,
+        .data = &sun
+    };
     struct LIGHT *light_data = light_object.data;
     LIGHTMAP lm = {0};
     RENDERER r = {0};
@@ -181,18 +213,30 @@ int main(int argc, char **argv) {
 
     layout_hash = hash_bytes(layout_hash, bake_settings, sizeof(bake_settings));
 
-    const float lighting_settings[] = {light_data->directional.direction.x, light_data->directional.direction.y, light_data->directional.direction.z,
-                                     light_data->directional.intensity, light_data->directional.color.x, light_data->directional.color.y,
-                                     light_data->directional.color.z, light_data->directional.angular_radius, sky.zenith.x, sky.zenith.y,
-                                     sky.zenith.z, sky.horizon.x, sky.horizon.y, sky.horizon.z, sky.intensity};
+    const float lighting_settings[] = {
+        light_data->directional.direction.x,
+        light_data->directional.direction.y,
+        light_data->directional.direction.z,
+        light_data->directional.intensity,
+        light_data->directional.color.x,
+        light_data->directional.color.y,
+        light_data->directional.color.z,
+        light_data->directional.angular_radius,
+        sky.zenith.x,
+        sky.zenith.y,
+        sky.zenith.z,
+        sky.horizon.x,
+        sky.horizon.y,
+        sky.horizon.z,
+        sky.intensity
+    };
 
     layout_hash = hash_bytes(layout_hash, lighting_settings, sizeof(lighting_settings));
 
-    const float volume_bake_settings[] = {volumetrics.probe_spacing,
-                                          (float)volumetrics.probe_samples,
-                                          (float)volumetrics.emissive_samples,
-                                          volumetrics.emissive_probe_intensity,
-                                          9.0f};
+    const float volume_bake_settings[] = {
+        volumetrics.probe_spacing, (float)volumetrics.probe_samples, (float)volumetrics.emissive_samples, volumetrics.emissive_probe_intensity, 9.0f
+    };
+
     uint64_t volume_hash = hash_bytes(scene_hash, volume_bake_settings, sizeof(volume_bake_settings));
 
     volume_hash = hash_bytes(volume_hash, lighting_settings, sizeof(lighting_settings));
@@ -206,17 +250,29 @@ int main(int argc, char **argv) {
 
     SDL_SetWindowTitle(r.window, cached ? "READY" : "UNBAKED");
 
-    printf("%s: %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n", model_path, load_ms, scene.vertices.count, scene.faces.count,
-           (double)model.bin_size / (1024.0 * 1024.0));
+    printf(
+        "%s: %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n", model_path, load_ms, scene.vertices.count, scene.faces.count, (double)model.bin_size / (1024.0 * 1024.0)
+    );
     printf("Visual: %zu vertices | %u materials | %u textures | %u images\n", visual.vertex_count, visual.material_count, visual.texture_count, visual.image_count);
-    printf("Lightmap: %.2f ms atlas | %ux%u | %u charts | %.2f texels/unit | %u "
-           "valid texels\n",
-           atlas_ms, lm.width, lm.height, lm.chart_count, lm.texel_density, lm.sample_count);
+    printf(
+        "Lightmap: %.2f ms atlas | %ux%u | %u charts | %.2f texels/unit | %u "
+        "valid texels\n",
+        atlas_ms,
+        lm.width,
+        lm.height,
+        lm.chart_count,
+        lm.texel_density,
+        lm.sample_count
+    );
     printf("Lighting: %s. Press B to rebake this scene in the renderer.\n", cached ? "loaded saved bake" : "unbaked fallback");
-    printf("Runtime: PBR + sun beams + volume probes -> HDR -> bloom -> ACES + "
-           "GPU LUT\n");
-    printf("LMB drag: orbit | wheel: zoom | B: rebake | F5: fog on/off | Tab: "
-           "wireframe | F11: fullscreen | Esc: quit\n");
+    printf(
+        "Runtime: PBR + sun beams + volume probes -> HDR -> bloom -> ACES + "
+        "GPU LUT\n"
+    );
+    printf(
+        "LMB drag: orbit | wheel: zoom | B: rebake | F5: fog on/off | Tab: "
+        "wireframe | F11: fullscreen | Esc: quit\n"
+    );
 
     bool running = true;
     Uint64 last_frame_print = SDL_GetTicks();
@@ -237,7 +293,9 @@ int main(int argc, char **argv) {
                 if (event.key.scancode == SDL_SCANCODE_B || event.key.key == SDLK_B) {
                     SDL_ClearError();
 
-                    if (!bake_start(&r, scene_data->geometry, scene_data->visual, &lm, light_data, &sky, &volumetrics, bake_path, scene_hash, layout_hash, volume_hash, beam_hash)) {
+                    if (!bake_start(
+                            &r, scene_data->geometry, scene_data->visual, &lm, light_data, &sky, &volumetrics, bake_path, scene_hash, layout_hash, volume_hash, beam_hash
+                        )) {
                         SDL_Log("B: could not start rebake: %s", *SDL_GetError() ? SDL_GetError() : "unknown error");
                     }
                 }
