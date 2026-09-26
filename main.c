@@ -300,7 +300,12 @@ int main(int argc, char **argv) {
     layout_hash = hash_bytes(layout_hash, lighting_settings, sizeof(lighting_settings));
 
     const float volume_bake_settings[] = {
-        volumetrics.probe_spacing, (float)volumetrics.probe_samples, (float)volumetrics.emissive_samples, volumetrics.emissive_probe_intensity, 9.0f
+        volumetrics.probe_spacing,
+        (float)volumetrics.probe_samples,
+        (float)volumetrics.emissive_samples,
+        volumetrics.emissive_probe_intensity,
+        9.0f,
+        2.0f // probe grid placement version
     };
 
     uint64_t volume_hash = hash_bytes(scene_hash, volume_bake_settings, sizeof(volume_bake_settings));
