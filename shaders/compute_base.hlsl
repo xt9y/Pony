@@ -914,7 +914,11 @@ float3 direct_emissive(float3 position, float3 normal, inout uint seed)
     if (pdf_area <= 1.0e-12f)
         return 0.0f;
 
-    return max(tri.emissive.rgb, 0.0f) *
+    float emissive_scale = 1.0f;
+#if defined(BUILD_PROBE_CS)
+    emissive_scale = max(emissive_data.z, 0.0f);
+#endif
+    return max(tri.emissive.rgb, 0.0f) * emissive_scale *
         (receiver_cosine * emitter_cosine / max(distance2 * pdf_area, 1.0e-8f));
 }
 

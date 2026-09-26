@@ -188,10 +188,13 @@ typedef struct SKY {
 typedef struct VOLUMETRICS_LIGHTING {
     float density;
     float anisotropy;
-    float indirect_intensity;
+    float probe_intensity;
+    float emissive_probe_intensity;
     float max_distance;
     float center_radius;
     float middle_radius;
+    float center_transition_width;
+    float middle_transition_width;
     float probe_spacing;
     uint32_t center_steps;
     uint32_t middle_steps;
