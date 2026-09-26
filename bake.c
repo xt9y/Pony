@@ -267,6 +267,7 @@ static bool bake_write_fast_seed(BAKE_JOB *job, PROBE_GRID *probes, BEAM_GRID *b
     seed.width = 1u;
     seed.height = 1u;
     seed.pixels = black_pixel;
+    seed.direct_pixels = black_pixel;
     seed.volume_probes = *probes;
     seed.beams = *beams;
 
