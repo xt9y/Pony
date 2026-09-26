@@ -1,0 +1,48 @@
+name: vision-jitter-blur-green
+on:
+  push:
+    branches: [volumetrics-jitter-blur-work]
+permissions:
+  contents: write
+jobs:
+  green:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply implementation
+        run: python3 .github/vision_jitter_blur_patch.py
+      - name: Run source regression contract
+        run: python3 .github/vision_jitter_blur_test.py
+      - name: Check source diff
+        run: git diff --check
+      - name: Install HLSL validator
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+      - name: Compile affected HLSL variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          validate() {
+            local define="$1"
+            local entry="$2"
+            cat > __validate.hlsl <<EOF
+          #define GPU_BIND_S(n,s)
+          #define GPU_BIND_T(n,s)
+          #define GPU_BIND_B(n,s)
+          #define GPU_BIND_U(n,s)
+          #define GPU_STORAGE_RGBA16F
+          #define ${define}
+          #include "shaders/vision_compute.hlsl"
+          EOF
+            glslangValidator -D -V --target-env vulkan1.2 -S comp -e "$entry" -I. __validate.hlsl -o /tmp/${entry}_${define}.spv
+          }
+          validate BUILD_VISION_VOLUME_CS volume_cs
+          validate BUILD_VISION_COMPOSE_CS volume_compose_cs
+          rm -f __validate.hlsl
+      - name: Commit verified source implementation
+        shell: bash
+        run: |
+          git config user.name xt9y
+          git config user.email felix@xt9y.de
+          git add shaders/vision_compute.hlsl
+          git commit -m "Smooth volumetric sampling"
+          git push origin HEAD:volumetrics-jitter-blur-work
