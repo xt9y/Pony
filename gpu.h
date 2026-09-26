@@ -90,10 +90,19 @@ typedef struct PROBE_WAVEFRONT_SCRATCH PROBE_WAVEFRONT_SCRATCH;
 typedef struct DYNAMIC_STATE DYNAMIC_STATE;
 typedef struct DYNAMIC_MODEL_RESOURCE DYNAMIC_MODEL_RESOURCE;
 
+typedef struct DYNAMIC_GRID_INFO {
+    float origin_cell[4];
+    uint32_t dims[4];
+    uint32_t lightmap[2];
+    uint32_t _pad[2];
+} DYNAMIC_GRID_INFO;
+
 typedef struct DYNAMIC_GI_JOB {
-    uint32_t sample_index;
+    float position[4];
+    float normal[4];
     uint32_t cell_index;
     uint32_t generation;
+    uint32_t flags;
     uint32_t _pad;
 } DYNAMIC_GI_JOB;
 
@@ -169,6 +178,10 @@ struct RENDERER {
     NriDescriptor *dynamic_shadow_sampler;
     uint32_t dynamic_shadow_size;
     bool dynamic_shadow_ready;
+    NriTexture *dynamic_overlay;
+    NriBuffer *dynamic_cell_generation;
+    NriBuffer *dynamic_overlay_generation;
+    uint32_t dynamic_overlay_width, dynamic_overlay_height;
 
     uint32_t swapchain_width, swapchain_height, current_swap_index;
 
@@ -187,6 +200,8 @@ struct RENDERER {
 
     NriPipelineLayout *surface_layout;
     NriPipelineLayout *dynamic_shadow_layout;
+    NriPipelineLayout *dynamic_cell_layout;
+    NriPipelineLayout *dynamic_gi_layout;
     NriPipelineLayout *line_layout;
     NriPipelineLayout *sky_layout;
     NriPipelineLayout *bake_layout;
@@ -205,6 +220,8 @@ struct RENDERER {
     NriPipeline *sky_pipeline;
     NriPipeline *solid_pipeline;
     NriPipeline *dynamic_shadow_pipeline;
+    NriPipeline *dynamic_cell_pipeline;
+    NriPipeline *dynamic_gi_pipeline;
     NriPipeline *line_pipeline;
     NriPipeline *bake_pipeline;
     NriPipeline *lightmap_queue_reset_pipeline;
@@ -310,11 +327,13 @@ bool bake_worker_init(RENDERER *r);
 void bake_worker_deinit(RENDERER *r);
 void dynamic_deinit(RENDERER *r);
 bool dynamic_sync(RENDERER *r);
+bool dynamic_grid_info(const RENDERER *r, DYNAMIC_GRID_INFO *out);
 uint32_t dynamic_instance_generation(const RENDERER *r);
 uint32_t dynamic_instance_count(const RENDERER *r);
 bool dynamic_instance_data(RENDERER *r, uint32_t index, DYNAMIC_INSTANCE_DATA *out);
 uint32_t dynamic_take_gi_jobs(RENDERER *r, DYNAMIC_GI_JOB *out, uint32_t capacity);
 uint32_t dynamic_take_cell_updates(RENDERER *r, DYNAMIC_CELL_UPDATE *out, uint32_t capacity);
+bool gpu_dynamic_runtime_init(RENDERER *r);
 bool gpu_dynamic_register_model(RENDERER *r, struct MODEL *model);
 void gpu_dynamic_unregister_model(RENDERER *r, struct MODEL *model);
 bool gpu_dynamic_prepare_instances(RENDERER *r);

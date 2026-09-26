@@ -538,6 +538,11 @@ bool r_build_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const L
 
     if (!upload_scene(r, visual)) return false;
 
+    BVH runtime_tree = {0};
+    const bool runtime_bvh = bvh_build(&runtime_tree, m, visual) && upload_bvh(r, &runtime_tree);
+    bvh_free(&runtime_tree);
+    if (!runtime_bvh) return false;
+
     r->has_bake = false;
     SDL_Log("materials: %u | material draw ranges: %u | embedded images: %u", r->material_count, r->draw_count, r->image_texture_count);
 

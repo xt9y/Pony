@@ -82,6 +82,8 @@ typedef struct MATERIAL_UNIFORMS {
     float shadow_sun_max[4];
     float shadow_extent_bias[4];
     float shadow_texel_enabled[4];
+    float dynamic_grid_origin_cell[4];
+    Uint32 dynamic_grid_dims_target[4];
 } MATERIAL_UNIFORMS;
 
 typedef struct DYNAMIC_SHADOW_UNIFORMS {
@@ -91,6 +93,19 @@ typedef struct DYNAMIC_SHADOW_UNIFORMS {
     float shadow_sun_max[4];
     float shadow_extent[4];
 } DYNAMIC_SHADOW_UNIFORMS;
+
+typedef struct DYNAMIC_CELL_UNIFORMS {
+    Uint32 count, _pad0, _pad1, _pad2;
+} DYNAMIC_CELL_UNIFORMS;
+
+typedef struct DYNAMIC_GI_UNIFORMS {
+    Uint32 job_count, dynamic_instance_count, lightmap_width, lightmap_height;
+    Uint32 rays_per_texel, frame_index, _pad0, _pad1;
+    float sky_zenith[4], sky_horizon[4];
+    float sun_direction_intensity[4], sun_color_epsilon[4];
+    float probe_origin_spacing[4];
+    Uint32 probe_dims[4];
+} DYNAMIC_GI_UNIFORMS;
 
 typedef struct SSAO_UNIFORMS {
     Uint32 width, height, ao_width, ao_height;
@@ -615,13 +630,16 @@ static bool create_surface_layout(RENDERER *r) {
         NriDescriptorType_SAMPLER,
         NriDescriptorType_SAMPLER,
         NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_TEXTURE,
+        NriDescriptorType_STRUCTURED_BUFFER,
         NriDescriptorType_STRUCTURED_BUFFER
     };
 
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
 
     const NriDescriptorType *sets[4] = {NULL, camera, material, uniform};
-    const uint8_t counts[4] = {0, 1, 18, 1};
+    const uint8_t counts[4] = {0, 1, 21, 1};
 
     return create_pipeline_layout(r, &r->surface_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
@@ -630,8 +648,26 @@ static bool create_dynamic_shadow_layout(RENDERER *r) {
     static const NriDescriptorType object[] = {NriDescriptorType_CONSTANT_BUFFER};
     const NriDescriptorType *sets[4] = {NULL, object, NULL, NULL};
     const uint8_t counts[4] = {0, 1, 0, 0};
-
     return create_pipeline_layout(r, &r->dynamic_shadow_layout, sets, counts, NriStageBits_VERTEX_SHADER);
+}
+
+static bool create_dynamic_runtime_layouts(RENDERER *r) {
+    static const NriDescriptorType cell_src[] = {NriDescriptorType_STRUCTURED_BUFFER};
+    static const NriDescriptorType cell_dst[] = {NriDescriptorType_STORAGE_STRUCTURED_BUFFER};
+    static const NriDescriptorType gi_src[] = {
+        NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER
+    };
+    static const NriDescriptorType gi_dst[] = {NriDescriptorType_STORAGE_TEXTURE, NriDescriptorType_STORAGE_STRUCTURED_BUFFER};
+    static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
+    const NriDescriptorType *cell_sets[4] = {cell_src, cell_dst, uniform, NULL};
+    const uint8_t cell_counts[4] = {1, 1, 1, 0};
+    const NriDescriptorType *gi_sets[4] = {gi_src, gi_dst, uniform, NULL};
+    const uint8_t gi_counts[4] = {8, 2, 1, 0};
+    return create_pipeline_layout(r, &r->dynamic_cell_layout, cell_sets, cell_counts, NriStageBits_COMPUTE_SHADER) &&
+           create_pipeline_layout(r, &r->dynamic_gi_layout, gi_sets, gi_counts, NriStageBits_COMPUTE_SHADER);
 }
 
 static bool create_line_layout(RENDERER *r) {
@@ -1451,6 +1487,7 @@ static bool bind_surface_resources(
     const void *uniforms,
     size_t size
 ) {
+    if (r->dynamic_overlay && !transition_texture(r, cmd, r->dynamic_overlay, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_FRAGMENT_SHADER)) return false;
     NriDescriptor *src[] = {
         create_texture_view(r, material->base_color, NriTextureView_TEXTURE),
         create_texture_view(r, material->metallic_roughness, NriTextureView_TEXTURE),
@@ -1469,10 +1506,13 @@ static bool bind_surface_resources(
         lightmap_sampler,
         r->dynamic_shadow_sampler ? r->dynamic_shadow_sampler : lightmap_sampler,
         create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
-        create_buffer_view(r, r->beam_buffer ? r->beam_buffer : r->default_beam_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(float))
+        create_buffer_view(r, r->beam_buffer ? r->beam_buffer : r->default_beam_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
+        create_texture_view(r, r->dynamic_overlay ? r->dynamic_overlay : lightmap, NriTextureView_TEXTURE),
+        create_buffer_view(r, r->dynamic_cell_generation ? r->dynamic_cell_generation : r->default_beam_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32)),
+        create_buffer_view(r, r->dynamic_overlay_generation ? r->dynamic_overlay_generation : r->default_beam_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32))
     };
 
-    return bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 18) &&
+    return bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 21) &&
            bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
 }
 
@@ -2303,6 +2343,18 @@ fail:
     return NULL;
 }
 
+static NriBuffer *frame_buffer(RENDERER *r, const void *data, size_t bytes, uint32_t stride, NriBufferUsageBits usage) {
+    if (!r || !data || !bytes) return NULL;
+    const NriBufferDesc desc = {.size = bytes, .structureStride = stride, .usage = usage};
+    NriBuffer *buffer = NULL;
+    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_UPLOAD, 0.0f, &desc, &buffer) != NriResult_SUCCESS) return NULL;
+    void *mapped = r->core.MapBuffer(buffer, 0u, bytes);
+    if (!mapped) { r->core.DestroyBuffer(buffer); return NULL; }
+    memcpy(mapped, data, bytes);
+    r->core.UnmapBuffer(buffer);
+    return track_buffer(r, buffer) ? buffer : NULL;
+}
+
 static bool
 upload_texture_data(RENDERER *r, NriTexture *texture, const void *data, uint32_t row_pitch, uint32_t slice_pitch, NriAccessBits access, NriLayout layout, NriStageBits stages) {
     if (!r || !texture || !data || !row_pitch || !slice_pitch || slice_pitch % row_pitch) return false;
@@ -2899,13 +2951,43 @@ void gpu_dynamic_deinit(RENDERER *r) {
     r->dynamic_instance_buffer_count = 0u;
     r->dynamic_instance_uploaded_generation = 0u;
     release_texture(r, r->dynamic_shadow_texture);
+    release_texture(r, r->dynamic_overlay);
+    release_buffer(r, r->dynamic_cell_generation);
+    release_buffer(r, r->dynamic_overlay_generation);
     r->dynamic_shadow_texture = NULL;
+    r->dynamic_overlay = NULL;
+    r->dynamic_cell_generation = NULL;
+    r->dynamic_overlay_generation = NULL;
     r->dynamic_shadow_size = 0u;
+    r->dynamic_overlay_width = r->dynamic_overlay_height = 0u;
     r->dynamic_shadow_ready = false;
 }
 
 static NriTexture *create_lightmap_texture(RENDERER *r, Uint32 width, Uint32 height) {
     return create_texture(r, NriFormat_RGBA16_SFLOAT, NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE, width, height);
+}
+
+bool gpu_dynamic_runtime_init(RENDERER *r) {
+    DYNAMIC_GRID_INFO grid = {0};
+    if (!r || !dynamic_grid_info(r, &grid) || !grid.dims[3] || !grid.lightmap[0] || !grid.lightmap[1]) return false;
+    if (r->dynamic_overlay && r->dynamic_cell_generation && r->dynamic_overlay_generation) return true;
+
+    uint32_t *zero = calloc(grid.dims[3], sizeof(*zero));
+    if (!zero) return false;
+    NriBufferUsageBits usage = NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE;
+    r->dynamic_cell_generation = upload_buffer(r, usage, zero, (size_t)grid.dims[3] * sizeof(*zero), sizeof(*zero));
+    r->dynamic_overlay_generation = upload_buffer(r, usage, zero, (size_t)grid.dims[3] * sizeof(*zero), sizeof(*zero));
+    free(zero);
+    r->dynamic_overlay = create_lightmap_texture(r, grid.lightmap[0], grid.lightmap[1]);
+    if (!r->dynamic_cell_generation || !r->dynamic_overlay_generation || !r->dynamic_overlay) {
+        release_buffer(r, r->dynamic_cell_generation); r->dynamic_cell_generation = NULL;
+        release_buffer(r, r->dynamic_overlay_generation); r->dynamic_overlay_generation = NULL;
+        release_texture(r, r->dynamic_overlay); r->dynamic_overlay = NULL;
+        return false;
+    }
+    r->dynamic_overlay_width = grid.lightmap[0];
+    r->dynamic_overlay_height = grid.lightmap[1];
+    return true;
 }
 
 static bool transfer_size(uint32_t width, uint32_t height, Uint32 *out) {
@@ -4921,7 +5003,7 @@ static bool fx_apply(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *swap, floa
  * never learns about NRI descriptor sets/views.
  */
 static bool create_pipeline_layouts(RENDERER *r) {
-    return create_surface_layout(r) && create_dynamic_shadow_layout(r) && create_line_layout(r) && create_sky_layout(r) && create_bake_layout(r) && create_lightmap_queue_layouts(r) && create_probe_layout(r) &&
+    return create_surface_layout(r) && create_dynamic_shadow_layout(r) && create_dynamic_runtime_layouts(r) && create_line_layout(r) && create_sky_layout(r) && create_bake_layout(r) && create_lightmap_queue_layouts(r) && create_probe_layout(r) &&
            create_ssao_layout(r) && create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) && create_volume_compose_layout(r) && create_compose_layout(r);
 }
 
@@ -4930,6 +5012,8 @@ static void destroy_pipeline_layouts(RENDERER *r) {
 
     NriPipelineLayout **layouts[] = {&r->surface_layout,
                                      &r->dynamic_shadow_layout,
+                                     &r->dynamic_cell_layout,
+                                     &r->dynamic_gi_layout,
                                      &r->line_layout,
                                      &r->sky_layout,
                                      &r->bake_layout,
@@ -5050,6 +5134,8 @@ bool r_init(RENDERER *r, const char *title, int width, int height) {
 
     r->solid_pipeline = make_surface_pipeline(r, &r->core, r->surface_layout, &surface_vs, &surface_ps);
     r->dynamic_shadow_pipeline = make_dynamic_shadow_pipeline(r, r->dynamic_shadow_layout, &dynamic_shadow_vs);
+    r->dynamic_cell_pipeline = compile_compute(r, r->dynamic_cell_layout, "shaders/dynamic.hlsl", "dynamic_cell_cs", "BUILD_DYNAMIC_CELL_CS");
+    r->dynamic_gi_pipeline = compile_compute(r, r->dynamic_gi_layout, "shaders/dynamic.hlsl", "dynamic_gi_cs", "BUILD_DYNAMIC_GI_CS");
     r->line_pipeline = make_line_pipeline(r, r->line_layout, &line_vs, &line_ps);
     r->sky_pipeline = make_sky_pipeline(r, r->sky_layout, &sky_vs, &sky_ps);
 
@@ -5063,7 +5149,7 @@ bool r_init(RENDERER *r, const char *title, int width, int height) {
 
     r->dynamic_shadow_sampler = sampler(r, NriFilter_NEAREST, NriFilter_NEAREST, NriAddressMode_CLAMP_TO_EDGE);
 
-    if (!r->solid_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_shadow_sampler || !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
+    if (!r->solid_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_cell_pipeline || !r->dynamic_gi_pipeline || !r->dynamic_shadow_sampler || !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
         r_deinit(r);
 
         return false;
@@ -5135,6 +5221,14 @@ static MATERIAL_UNIFORMS surface_material_uniforms(RENDERER *r, const RENDER_MAT
     result.shadow_texel_enabled[1] = texel;
     result.shadow_texel_enabled[2] = projection_valid && r->dynamic_shadow_ready ? 1.0f : 0.0f;
     result.shadow_texel_enabled[3] = 0.0f;
+    DYNAMIC_GRID_INFO grid = {0};
+    if (r->dynamic_overlay && r->dynamic_cell_generation && r->dynamic_overlay_generation && dynamic_grid_info(r, &grid)) {
+        memcpy(result.dynamic_grid_origin_cell, grid.origin_cell, sizeof(result.dynamic_grid_origin_cell));
+        result.dynamic_grid_dims_target[0] = grid.dims[0];
+        result.dynamic_grid_dims_target[1] = grid.dims[1];
+        result.dynamic_grid_dims_target[2] = grid.dims[2];
+        result.dynamic_grid_dims_target[3] = r->dynamic_lighting.target_samples;
+    }
     return result;
 }
 
@@ -5173,6 +5267,94 @@ static bool render_dynamic_shadow_map(RENDERER *r, NriCommandBuffer *cmd, const 
     if (!transition_texture(r, cmd, r->dynamic_shadow_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_FRAGMENT_SHADER)) return false;
     r->dynamic_shadow_ready = true;
     return true;
+}
+
+static bool record_dynamic_cell_updates(RENDERER *r, NriCommandBuffer *cmd) {
+    if (!r->dynamic_cell_generation) return true;
+    DYNAMIC_CELL_UPDATE updates[256];
+    bool wrote = false;
+    for (;;) {
+        uint32_t count = dynamic_take_cell_updates(r, updates, 256u);
+        if (!count) break;
+        NriBuffer *input = frame_buffer(r, updates, (size_t)count * sizeof(*updates), sizeof(*updates), NriBufferUsageBits_SHADER_RESOURCE);
+        if (!input) return false;
+        lightmap_buffer_barrier(r, cmd, input, NriAccessBits_NONE, NriStageBits_NONE, NriAccessBits_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER);
+        if (!wrote)
+            lightmap_buffer_barrier(r, cmd, r->dynamic_cell_generation, NriAccessBits_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER | NriStageBits_FRAGMENT_SHADER,
+                                    NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER);
+        NriDescriptor *src = create_buffer_view(r, input, NriBufferView_STRUCTURED_BUFFER, sizeof(*updates));
+        NriDescriptor *dst = create_buffer_view(r, r->dynamic_cell_generation, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32));
+        DYNAMIC_CELL_UNIFORMS uniforms = {.count = count};
+        if (!src || !dst || !bind_descriptor_set(r, cmd, r->dynamic_cell_layout, NriBindPoint_COMPUTE, 0, &src, 1) ||
+            !bind_descriptor_set(r, cmd, r->dynamic_cell_layout, NriBindPoint_COMPUTE, 1, &dst, 1) ||
+            !bind_uniform_data(r, cmd, r->dynamic_cell_layout, NriBindPoint_COMPUTE, 2, &uniforms, sizeof(uniforms))) return false;
+        r->core.CmdSetPipeline(cmd, r->dynamic_cell_pipeline);
+        r->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+        wrote = true;
+    }
+    if (wrote)
+        lightmap_buffer_barrier(r, cmd, r->dynamic_cell_generation, NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER,
+                                NriAccessBits_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER | NriStageBits_FRAGMENT_SHADER);
+    return true;
+}
+
+static bool record_dynamic_gi(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame) {
+    if (!r->dynamic_overlay) return true;
+    uint32_t capacity = r->dynamic_lighting.texels_per_frame;
+    DYNAMIC_GI_JOB *jobs = capacity ? malloc((size_t)capacity * sizeof(*jobs)) : NULL;
+    if (capacity && !jobs) return false;
+    uint32_t count = capacity ? dynamic_take_gi_jobs(r, jobs, capacity) : 0u;
+    if (!count) {
+        free(jobs);
+        return transition_texture(r, cmd, r->dynamic_overlay, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_FRAGMENT_SHADER);
+    }
+
+    NriBuffer *job_buffer = frame_buffer(r, jobs, (size_t)count * sizeof(*jobs), sizeof(*jobs), NriBufferUsageBits_SHADER_RESOURCE);
+    free(jobs);
+    if (!job_buffer || !r->bvh_node_buffer || !r->bvh_triangle_buffer || !r->dynamic_instance_buffer ||
+        !r->dynamic_bvh_node_buffer || !r->dynamic_bvh_triangle_buffer) return false;
+    lightmap_buffer_barrier(r, cmd, job_buffer, NriAccessBits_NONE, NriStageBits_NONE, NriAccessBits_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER);
+    lightmap_buffer_barrier(r, cmd, r->dynamic_overlay_generation, NriAccessBits_SHADER_RESOURCE, NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER,
+                            NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER);
+    if (!transition_texture(r, cmd, r->dynamic_overlay, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER)) return false;
+
+    NriBuffer *probes = r->volume_probe_buffer ? r->volume_probe_buffer : r->default_probe_buffer;
+    NriDescriptor *src[] = {
+        create_buffer_view(r, job_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(DYNAMIC_GI_JOB)),
+        create_buffer_view(r, r->bvh_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
+        create_buffer_view(r, r->bvh_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
+        create_buffer_view(r, r->dynamic_instance_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(DYNAMIC_GPU_INSTANCE)),
+        create_buffer_view(r, r->dynamic_bvh_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
+        create_buffer_view(r, r->dynamic_bvh_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
+        create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
+        create_buffer_view(r, r->dynamic_cell_generation, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32))
+    };
+    NriDescriptor *dst[] = {
+        create_texture_view(r, r->dynamic_overlay, NriTextureView_STORAGE_TEXTURE),
+        create_buffer_view(r, r->dynamic_overlay_generation, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32))
+    };
+    const DYNAMIC_GI_UNIFORMS uniforms = {
+        .job_count = count,
+        .dynamic_instance_count = dynamic_instance_count(r),
+        .lightmap_width = r->dynamic_overlay_width,
+        .lightmap_height = r->dynamic_overlay_height,
+        .rays_per_texel = r->dynamic_lighting.rays_per_texel,
+        .frame_index = (Uint32)r->frame_index,
+        .sky_zenith = {frame->sky.zenith.x, frame->sky.zenith.y, frame->sky.zenith.z, frame->sky.intensity},
+        .sky_horizon = {frame->sky.horizon.x, frame->sky.horizon.y, frame->sky.horizon.z, 1.0f},
+        .sun_direction_intensity = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, frame->sun.intensity},
+        .sun_color_epsilon = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, fmaxf(1.0e-4f, r->scene_radius * 1.0e-5f)},
+        .probe_origin_spacing = {r->volume_probes.origin.x, r->volume_probes.origin.y, r->volume_probes.origin.z, r->volume_probes.spacing},
+        .probe_dims = {r->volume_probes.count_x, r->volume_probes.count_y, r->volume_probes.count_z, 0u}
+    };
+    if (!bind_descriptor_set(r, cmd, r->dynamic_gi_layout, NriBindPoint_COMPUTE, 0, src, 8) ||
+        !bind_descriptor_set(r, cmd, r->dynamic_gi_layout, NriBindPoint_COMPUTE, 1, dst, 2) ||
+        !bind_uniform_data(r, cmd, r->dynamic_gi_layout, NriBindPoint_COMPUTE, 2, &uniforms, sizeof(uniforms))) return false;
+    r->core.CmdSetPipeline(cmd, r->dynamic_gi_pipeline);
+    r->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+    lightmap_buffer_barrier(r, cmd, r->dynamic_overlay_generation, NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER,
+                            NriAccessBits_SHADER_RESOURCE, NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER);
+    return transition_texture(r, cmd, r->dynamic_overlay, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_FRAGMENT_SHADER);
 }
 
 static bool draw_dynamic_surfaces(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame, const CAMERA_UNIFORMS *base_camera) {
@@ -5245,8 +5427,10 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     NriCommandBuffer *cmd = NULL;
 
     if (!begin_frame_commands(r, &queued_frame, &cmd)) goto failed_frame;
+    if (!record_dynamic_cell_updates(r, cmd)) goto failed_frame;
     if (!gpu_dynamic_prepare_instances(r)) goto failed_frame;
     if (!render_dynamic_shadow_map(r, cmd, frame)) goto failed_frame;
+    if (!record_dynamic_gi(r, cmd, frame)) goto failed_frame;
 
     CAMERA_UNIFORMS camera = {0};
 
@@ -5491,6 +5675,8 @@ void r_deinit(RENDERER *r) {
         if (r->solid_pipeline) r->core.DestroyPipeline(r->solid_pipeline);
 
         if (r->dynamic_shadow_pipeline) r->core.DestroyPipeline(r->dynamic_shadow_pipeline);
+        if (r->dynamic_cell_pipeline) r->core.DestroyPipeline(r->dynamic_cell_pipeline);
+        if (r->dynamic_gi_pipeline) r->core.DestroyPipeline(r->dynamic_gi_pipeline);
 
         if (r->dynamic_shadow_sampler) r->core.DestroyDescriptor(r->dynamic_shadow_sampler);
 
