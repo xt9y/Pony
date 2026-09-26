@@ -2,6 +2,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -78,6 +79,24 @@ int main(int argc, char **argv) {
         .data = &scene_model
     };
     struct MODEL *scene_data = scene_object.data;
+
+    GLB_DOC cube_doc = {0};
+    MESH cube_mesh = {0};
+    GLTF_SCENE cube_visual = {0};
+
+    struct MODEL cube_model = {
+        .geometry = &cube_mesh,
+        .visual = &cube_visual
+    };
+
+    OBJECT cube_object = {
+        .state = DYNAMIC,
+        .type = MODEL,
+        .transform = {.scale = {1.0f, 1.0f, 1.0f}},
+        .previous_transform = {.scale = {1.0f, 1.0f, 1.0f}},
+        .data = &cube_model
+    };
+    bool cube_registered = false;
 
     DIRECTIONAL_LIGHT directional_sun = {
         .direction = {0.38f, 0.30f, 0.32f},
@@ -156,6 +175,15 @@ int main(int argc, char **argv) {
         startup_stage = "visual glTF extraction";
     }
 
+    if (!startup_stage && !glb_load(&cube_doc, "cube.glb")) {
+        startup_stage = "dynamic cube GLB load";
+        startup_detail = glb_error(&cube_doc);
+    } else if (!startup_stage && !glb_extract_mesh(&cube_doc, cube_model.geometry)) {
+        startup_stage = "dynamic cube mesh extraction";
+    } else if (!startup_stage && !gltf_extract(&cube_doc, cube_model.visual)) {
+        startup_stage = "dynamic cube visual extraction";
+    }
+
     const double load_ms = elapsed_ms(load_begin);
 
     const Uint64 atlas_begin = SDL_GetPerformanceCounter();
@@ -178,6 +206,14 @@ int main(int argc, char **argv) {
 
     if (!startup_stage && !r_dynamic_init(&r, scene_data->geometry, &lm, &dynamic_lighting)) {
         startup_stage = "dynamic lighting initialization";
+        startup_detail = SDL_GetError();
+    }
+
+    if (!startup_stage && !r_add_dynamic_object(&r, &cube_object)) {
+        startup_stage = "dynamic cube registration";
+        startup_detail = SDL_GetError();
+    } else if (!startup_stage) {
+        cube_registered = true;
     }
 
     if (startup_stage) {
@@ -187,7 +223,11 @@ int main(int argc, char **argv) {
         fputc('\n', stderr);
 
         bake_cancel(&r);
+        if (cube_registered) r_remove_dynamic_object(&r, &cube_object);
         r_deinit(&r);
+        gltf_free(cube_model.visual);
+        mesh_free(cube_model.geometry);
+        glb_free(&cube_doc);
         lmap_free(&lm);
         gltf_free(scene_data->visual);
         mesh_free(scene_data->geometry);
@@ -271,6 +311,7 @@ int main(int argc, char **argv) {
         "%s: %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n", model_path, load_ms, scene.vertices.count, scene.faces.count, (double)model.bin_size / (1024.0 * 1024.0)
     );
     printf("Visual: %zu vertices | %u materials | %u textures | %u images\n", visual.vertex_count, visual.material_count, visual.texture_count, visual.image_count);
+    printf("Dynamic cube: %zu vertices | %zu triangles | moving x = +/-2.0 around origin\n", cube_mesh.vertices.count, cube_mesh.faces.count);
     printf(
         "Lightmap: %.2f ms atlas | %ux%u | %u charts | %.2f texels/unit | %u "
         "valid texels\n",
@@ -295,6 +336,7 @@ int main(int argc, char **argv) {
     Uint64 last_frame_print = SDL_GetTicks();
     Uint64 last_input = SDL_GetTicks();
     Uint64 last_render = 0u;
+    const Uint64 motion_start = SDL_GetTicks();
 
     while (running) {
         SDL_Event event;
@@ -324,6 +366,10 @@ int main(int argc, char **argv) {
         if (!running) break;
 
         const Uint64 now = SDL_GetTicks();
+        const float motion_seconds = (float)(now - motion_start) * 0.001f;
+
+        cube_object.transform.position.x = sinf(motion_seconds) * 2.0f;
+
         const bool idle_bake = bake_active(&r) && now - last_input >= BAKE_IDLE_GRACE_MS;
 
         const bool render_due = !idle_bake || now - last_render >= BAKE_IDLE_RENDER_MS;
@@ -358,7 +404,11 @@ int main(int argc, char **argv) {
     }
 
     bake_cancel(&r);
+    if (cube_registered) r_remove_dynamic_object(&r, &cube_object);
     r_deinit(&r);
+    gltf_free(cube_model.visual);
+    mesh_free(cube_model.geometry);
+    glb_free(&cube_doc);
     gltf_free(scene_data->visual);
     lmap_free(&lm);
     mesh_free(scene_data->geometry);
