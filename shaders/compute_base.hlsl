@@ -1084,10 +1084,10 @@ void lightmap_cs(uint3 dispatch_id : SV_DispatchThreadID)
         uint pixel = asuint(sample.position.w);
         float3 normal = normalize(sample.normal.xyz);
         uint seed = hash_u32(pixel ^ 0x4f03d2b1u);
-        float3 a = direct_lighting(sample.position.xyz, normal, seed);
-        float3 b = direct_lighting(sample.position.xyz, normal, seed);
-        float3 c = direct_lighting(sample.position.xyz, normal, seed);
-        float3 d = direct_lighting(sample.position.xyz, normal, seed);
+        float3 a = direct_sun(sample.position.xyz, normal, seed);
+        float3 b = direct_sun(sample.position.xyz, normal, seed);
+        float3 c = direct_sun(sample.position.xyz, normal, seed);
+        float3 d = direct_sun(sample.position.xyz, normal, seed);
         float3 sum = a + b + c + d;
         uint count = 4u;
         float3 mean = sum * 0.25f;
@@ -1095,7 +1095,7 @@ void lightmap_cs(uint3 dispatch_id : SV_DispatchThreadID)
             length(c - mean) + length(d - mean) > 0.02f)
         {
             for (uint i = 0u; i < 12u; ++i)
-                sum += direct_lighting(sample.position.xyz, normal, seed);
+                sum += direct_sun(sample.position.xyz, normal, seed);
             count = 16u;
         }
         Output[uint2(pixel % lightmap_width, pixel / lightmap_width)] =
@@ -1151,7 +1151,7 @@ void lightmap_cs(uint3 dispatch_id : SV_DispatchThreadID)
         {
             uint current = iteration + offset;
             uint seed = hash_u32(pixel ^ hash_u32(current + 0x51f2e91du));
-            float3 value = trace_path_core(position, normal, seed, false);
+            float3 value = direct_emissive(position, normal, seed) + trace_path_core(position, normal, seed, false);
             float n = (float)current;
             float3 mean = (previous.rgb * n + value) / (n + 1.0f);
             float old_luma = dot(previous.rgb, float3(0.2126f, 0.7152f, 0.0722f));

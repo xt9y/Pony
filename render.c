@@ -211,6 +211,7 @@ bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, 
     if (!cache_read(path, scene_hash, layout_hash, volume_hash, beam_hash, &cached)) return false;
 
     NriTexture *replacement = NULL;
+    NriTexture *direct_replacement = NULL;
     NriBuffer *volume_buffer = NULL;
     NriBuffer *beam_buffer = NULL;
 
@@ -218,7 +219,8 @@ bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, 
 
     if (good) {
         replacement = upload_lightmap(r, &cached);
-        good = replacement != NULL;
+        direct_replacement = upload_direct_lightmap(r, &cached);
+        good = replacement && direct_replacement;
     }
 
     if (good) {
@@ -233,10 +235,12 @@ bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, 
 
     if (good) {
         NriTexture *old = r->lightmap_texture;
+        NriTexture *old_direct = r->lightmap_direct;
         NriBuffer *old_volume = r->volume_probe_buffer;
         NriBuffer *old_beam = r->beam_buffer;
 
         r->lightmap_texture = replacement;
+        r->lightmap_direct = direct_replacement;
         r->volume_probe_buffer = volume_buffer;
         r->beam_buffer = beam_buffer;
         r->lightmap_width = cached.width;
@@ -253,10 +257,12 @@ bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, 
 
         r->has_bake = true;
         release_texture(r, old);
+        release_texture(r, old_direct);
         release_buffer(r, old_volume);
         release_buffer(r, old_beam);
     } else {
         release_texture(r, replacement);
+        release_texture(r, direct_replacement);
         release_buffer(r, volume_buffer);
         release_buffer(r, beam_buffer);
     }
@@ -344,19 +350,22 @@ bool r_rebake_current_scene(
     bake_progress(r, "lightmap shader", 0u, 0u);
 
     NriTexture *old = r->lightmap_texture;
+    NriTexture *old_direct = r->lightmap_direct;
     const Uint32 old_width = r->lightmap_width;
     const Uint32 old_height = r->lightmap_height;
     const bool had_bake = r->has_bake;
 
     r->lightmap_texture = NULL;
+    r->lightmap_direct = NULL;
 
     started = SDL_GetPerformanceCounter();
     bool good = false;
 
     if (reuse_lightmap) {
         r->lightmap_texture = upload_lightmap(r, &previous);
+        r->lightmap_direct = upload_direct_lightmap(r, &previous);
 
-        good = r->lightmap_texture && upload_bvh(r, &tree);
+        good = r->lightmap_texture && r->lightmap_direct && upload_bvh(r, &tree);
 
         if (good) {
             r->lightmap_width = previous.width;
@@ -412,9 +421,11 @@ bool r_rebake_current_scene(
 
         if (reuse_lightmap) {
             candidate.pixels = previous.pixels;
+            candidate.direct_pixels = previous.direct_pixels;
             candidate.width = previous.width;
             candidate.height = previous.height;
             previous.pixels = NULL;
+            previous.direct_pixels = NULL;
         } else {
             good = download_lightmap(r, &candidate);
         }
@@ -453,6 +464,7 @@ bool r_rebake_current_scene(
 
         r->has_bake = true;
         release_texture(r, old);
+        release_texture(r, old_direct);
         release_buffer(r, old_volume);
         release_buffer(r, old_beam);
     } else {
@@ -461,7 +473,9 @@ bool r_rebake_current_scene(
         beam_free(&beam_candidate);
         free_probe_grid(&volume_candidate);
         release_texture(r, r->lightmap_texture);
+        release_texture(r, r->lightmap_direct);
         r->lightmap_texture = old;
+        r->lightmap_direct = old_direct;
         r->lightmap_width = old_width;
         r->lightmap_height = old_height;
         r->has_bake = had_bake;

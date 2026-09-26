@@ -534,6 +534,8 @@ static bool create_surface_layout(RENDERER *r) {
         NriDescriptorType_TEXTURE,
         NriDescriptorType_TEXTURE,
         NriDescriptorType_TEXTURE,
+        NriDescriptorType_TEXTURE,
+        NriDescriptorType_SAMPLER,
         NriDescriptorType_SAMPLER,
         NriDescriptorType_SAMPLER,
         NriDescriptorType_SAMPLER,
@@ -545,7 +547,7 @@ static bool create_surface_layout(RENDERER *r) {
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
 
     const NriDescriptorType *sets[4] = {NULL, camera, material, uniform};
-    const uint8_t counts[4] = {0, 1, 12, 1};
+    const uint8_t counts[4] = {0, 1, 14, 1};
 
     return create_pipeline_layout(r, &r->surface_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
@@ -1360,6 +1362,7 @@ static bool bind_surface_resources(
     NriCommandBuffer *cmd,
     const RENDER_MATERIAL *material,
     NriTexture *lightmap,
+    NriTexture *direct_lightmap,
     NriDescriptor *material_sampler,
     NriDescriptor *lightmap_sampler,
     const void *uniforms,
@@ -1372,15 +1375,17 @@ static bool bind_surface_resources(
         create_texture_view(r, material->occlusion, NriTextureView_TEXTURE),
         create_texture_view(r, material->emissive, NriTextureView_TEXTURE),
         create_texture_view(r, lightmap, NriTextureView_TEXTURE),
+        create_texture_view(r, direct_lightmap, NriTextureView_TEXTURE),
         material_sampler,
         material_sampler,
         material_sampler,
         material_sampler,
         material_sampler,
+        lightmap_sampler,
         lightmap_sampler
     };
 
-    return bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 12) &&
+    return bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 14) &&
            bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
 }
 
@@ -2420,6 +2425,7 @@ static void release_scene_resources(RENDERER *r) {
     if (r->material_sampler) r->core.DestroyDescriptor(r->material_sampler);
     release_buffer(r, r->vertex_buffer);
     release_texture(r, r->lightmap_texture);
+    release_texture(r, r->lightmap_direct);
 
     if (r->lightmap_sampler) r->core.DestroyDescriptor(r->lightmap_sampler);
 
@@ -2428,6 +2434,7 @@ static void release_scene_resources(RENDERER *r) {
     r->material_sampler = NULL;
     r->vertex_buffer = NULL;
     r->lightmap_texture = NULL;
+    r->lightmap_direct = NULL;
     r->lightmap_sampler = NULL;
 }
 
@@ -2471,8 +2478,9 @@ bool upload_scene(RENDERER *r, const GLTF_SCENE *visual) {
 
     r->lightmap_sampler = sampler(r, NriFilter_LINEAR, NriFilter_LINEAR, NriAddressMode_CLAMP_TO_EDGE);
     r->lightmap_texture = pixel_texture(r, 0, 0, 0, 255);
+    r->lightmap_direct = pixel_texture(r, 0, 0, 0, 255);
 
-    return r->lightmap_sampler && r->lightmap_texture;
+    return r->lightmap_sampler && r->lightmap_texture && r->lightmap_direct;
 }
 
 static NriTexture *create_lightmap_texture(RENDERER *r, Uint32 width, Uint32 height) {
@@ -2487,24 +2495,32 @@ static bool transfer_size(uint32_t width, uint32_t height, Uint32 *out) {
     return true;
 }
 
-NriTexture *upload_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached) {
-    if (!r || !r->device || !cached || !cached->pixels) return NULL;
+static NriTexture *upload_lightmap_pixels(RENDERER *r, Uint32 width, Uint32 height, const unsigned char *pixels) {
+    if (!r || !r->device || !pixels) return NULL;
 
     Uint32 bytes = 0;
 
-    if (!transfer_size(cached->width, cached->height, &bytes)) return NULL;
+    if (!transfer_size(width, height, &bytes)) return NULL;
 
-    NriTexture *result = create_lightmap_texture(r, cached->width, cached->height);
+    NriTexture *result = create_lightmap_texture(r, width, height);
 
     if (!result) return NULL;
 
-    if (!upload_texture_data(r, result, cached->pixels, cached->width * 8u, bytes, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_ALL)) {
+    if (!upload_texture_data(r, result, pixels, width * 8u, bytes, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_ALL)) {
         release_texture(r, result);
 
         return NULL;
     }
 
     return result;
+}
+
+NriTexture *upload_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached) {
+    return cached ? upload_lightmap_pixels(r, cached->width, cached->height, cached->pixels) : NULL;
+}
+
+NriTexture *upload_direct_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached) {
+    return cached ? upload_lightmap_pixels(r, cached->width, cached->height, cached->direct_pixels) : NULL;
 }
 
 static bool read_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width, Uint32 height, Uint8 **pixels) {
@@ -2599,9 +2615,17 @@ bool download_lightmap(RENDERER *r, CACHED_LIGHTMAP *out) {
     if (!r || !out) return false;
 
     Uint8 *pixels = NULL;
+    Uint8 *direct_pixels = NULL;
 
-    if (!read_rgba16f_texture(r, r->lightmap_texture, r->lightmap_width, r->lightmap_height, &pixels)) return false;
+    if (!read_rgba16f_texture(r, r->lightmap_texture, r->lightmap_width, r->lightmap_height, &pixels) ||
+        !read_rgba16f_texture(r, r->lightmap_direct, r->lightmap_width, r->lightmap_height, &direct_pixels)) {
+        free(pixels);
+        free(direct_pixels);
+        return false;
+    }
+
     out->pixels = pixels;
+    out->direct_pixels = direct_pixels;
     out->width = r->lightmap_width;
     out->height = r->lightmap_height;
 
@@ -2847,6 +2871,13 @@ static void swap_lightmaps(RENDERER *r) {
     NriTexture *tmp = r->lightmap_texture;
 
     r->lightmap_texture = r->lightmap_scratch;
+    r->lightmap_scratch = tmp;
+}
+
+static void swap_direct_lightmaps(RENDERER *r) {
+    NriTexture *tmp = r->lightmap_direct;
+
+    r->lightmap_direct = r->lightmap_scratch;
     r->lightmap_scratch = tmp;
 }
 
@@ -3120,14 +3151,6 @@ static bool bake_lightmap_once(RENDERER *r, const LIGHTMAP *lm) {
         swap_lightmaps(r);
     }
 
-    if (!record_bake_pass(r, cmd, r->lightmap_texture, r->lightmap_scratch, PHASE_COMBINE, 0, pixels, 0)) {
-        abort_commands(r, allocator, cmd);
-
-        return false;
-    }
-
-    swap_lightmaps(r);
-
     if (!record_bake_pass(r, cmd, r->lightmap_texture, r->lightmap_scratch, PHASE_FILTER, 0, pixels, 0)) {
         abort_commands(r, allocator, cmd);
 
@@ -3144,6 +3167,24 @@ static bool bake_lightmap_once(RENDERER *r, const LIGHTMAP *lm) {
         }
 
         swap_lightmaps(r);
+    }
+
+    if (!record_bake_pass(r, cmd, r->lightmap_direct, r->lightmap_scratch, PHASE_FILTER, 0, pixels, 0)) {
+        abort_commands(r, allocator, cmd);
+
+        return false;
+    }
+
+    swap_direct_lightmaps(r);
+
+    for (Uint32 i = 0; i < BAKE_DILATION_PASSES; ++i) {
+        if (!record_bake_pass(r, cmd, r->lightmap_direct, r->lightmap_scratch, PHASE_DILATE, 0, pixels, 0)) {
+            abort_commands(r, allocator, cmd);
+
+            return false;
+        }
+
+        swap_direct_lightmaps(r);
     }
 
     if (!submit_commands(r, allocator, cmd)) return false;
@@ -4074,7 +4115,6 @@ void release_bake_resources(RENDERER *r) {
 
     release_buffer(r, r->lightmap_dispatch_args);
     release_texture(r, r->lightmap_scratch);
-    release_texture(r, r->lightmap_direct);
 
     if (r->bake_pipeline) r->core.DestroyPipeline(r->bake_pipeline);
 
@@ -4101,7 +4141,6 @@ void release_bake_resources(RENDERER *r) {
     r->lightmap_dispatch_args = NULL;
     r->lightmap_active_capacity = 0u;
     r->lightmap_scratch = NULL;
-    r->lightmap_direct = NULL;
     r->bake_pipeline = NULL;
     r->lightmap_queue_reset_pipeline = NULL;
     r->lightmap_queue_args_pipeline = NULL;
@@ -4610,7 +4649,8 @@ bool r_init(RENDERER *r, const char *title, int width, int height) {
 }
 
 bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
-    if (!r || !frame || !r->device || !r->solid_pipeline || !r->sky_pipeline || !r->vertex_buffer || !r->lightmap_texture || !r->lightmap_sampler) return false;
+    if (!r || !frame || !r->device || !r->solid_pipeline || !r->sky_pipeline || !r->vertex_buffer || !r->lightmap_texture || !r->lightmap_direct || !r->lightmap_sampler)
+        return false;
 
     uint32_t width = 0;
     uint32_t height = 0;
@@ -4697,7 +4737,8 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
             .camera_position = {frame->eye.x, frame->eye.y, frame->eye.z, r->debug_view == 1u ? 2.0f : (r->has_bake ? 1.0f : 0.0f)}
         };
 
-        if (!bind_surface_resources(r, cmd, m, r->lightmap_texture, r->material_sampler, r->lightmap_sampler, &material, sizeof(material))) goto failed_frame;
+        if (!bind_surface_resources(r, cmd, m, r->lightmap_texture, r->lightmap_direct, r->material_sampler, r->lightmap_sampler, &material, sizeof(material)))
+            goto failed_frame;
 
         r->core.CmdDraw(cmd, &(NriDrawDesc){
             .vertexNum = draw->count,
@@ -4811,6 +4852,7 @@ void bake_worker_deinit(RENDERER *r) {
         release_buffer(r, r->volume_probe_buffer);
         release_buffer(r, r->beam_buffer);
         release_texture(r, r->lightmap_texture);
+        release_texture(r, r->lightmap_direct);
 
         if (r->lightmap_sampler) r->core.DestroyDescriptor(r->lightmap_sampler);
 
@@ -4869,6 +4911,7 @@ void r_deinit(RENDERER *r) {
         release_buffer(r, r->beam_buffer);
         release_texture(r, r->depth_texture);
         release_texture(r, r->lightmap_texture);
+        release_texture(r, r->lightmap_direct);
 
         if (r->lightmap_sampler) r->core.DestroyDescriptor(r->lightmap_sampler);
 

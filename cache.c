@@ -7,7 +7,7 @@
 #include <string.h>
 
 #define DM_CACHE_MAGIC 0x4b424d44u
-#define DM_CACHE_VERSION 8u
+#define DM_CACHE_VERSION 9u
 #define DM_CACHE_MAX_DIMENSION 16384u
 #define DM_CACHE_BEAM_WIDTH 64u
 #define DM_CACHE_BEAM_HEIGHT 64u
@@ -63,6 +63,7 @@ void cache_free(CACHED_LIGHTMAP *data) {
     if (!data) return;
 
     free(data->pixels);
+    free(data->direct_pixels);
     free(data->object_probes.probes);
     free(data->volume_probes.probes);
     beam_free(&data->beams);
@@ -170,6 +171,7 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, CACHED_LIGHTMAP *
     if (good) {
 
         out->pixels = malloc((size_t)expected);
+        out->direct_pixels = malloc((size_t)expected);
 
         const uint64_t object_count = (uint64_t)header.object_dims[0] * header.object_dims[1] * header.object_dims[2];
 
@@ -182,12 +184,14 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, CACHED_LIGHTMAP *
 
         const size_t depth_bytes = depth_count * sizeof(float);
 
-        good = out->pixels && fread(out->pixels, (size_t)expected, 1, file) == 1 && (!object_bytes || fread(out->object_probes.probes, object_bytes, 1, file) == 1) &&
+        good = out->pixels && out->direct_pixels && fread(out->pixels, (size_t)expected, 1, file) == 1 &&
+               fread(out->direct_pixels, (size_t)expected, 1, file) == 1 && (!object_bytes || fread(out->object_probes.probes, object_bytes, 1, file) == 1) &&
                fread(out->volume_probes.probes, volume_bytes, 1, file) == 1 && (!beam_bytes || fread(out->beams.cells, beam_bytes, 1, file) == 1) &&
                fread(out->beams.shadow_depth, depth_bytes, 1, file) == 1 && fgetc(file) == EOF && !ferror(file);
 
         if (good) {
             uint64_t hash = hash_bytes(0, out->pixels, (size_t)expected);
+            hash = hash_bytes(hash, out->direct_pixels, (size_t)expected);
 
             if (object_bytes) hash = hash_bytes(hash, out->object_probes.probes, object_bytes);
 
@@ -242,7 +246,7 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
 
     uint64_t bytes = 0;
 
-    if (!path || !data || !data->pixels || !valid_dimensions(data->width, data->height, &bytes)) return false;
+    if (!path || !data || !data->pixels || !data->direct_pixels || !valid_dimensions(data->width, data->height, &bytes)) return false;
 
     const uint64_t object_count = grid_count(&data->object_probes);
     const uint64_t volume_count = grid_count(&data->volume_probes);
@@ -275,6 +279,7 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
     const size_t beam_bytes = (size_t)beams->count * sizeof(BEAM_CELL);
     const Uint64 hash_started = SDL_GetPerformanceCounter();
     uint64_t payload_hash = hash_bytes(0, data->pixels, (size_t)bytes);
+    payload_hash = hash_bytes(payload_hash, data->direct_pixels, (size_t)bytes);
 
     if (object_bytes) payload_hash = hash_bytes(payload_hash, data->object_probes.probes, object_bytes);
 
@@ -330,8 +335,9 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
 
     const Uint64 write_started = SDL_GetPerformanceCounter();
     bool good = fwrite(&header, sizeof(header), 1, file) == 1 && fwrite(data->pixels, (size_t)bytes, 1, file) == 1 &&
-                (!object_bytes || fwrite(data->object_probes.probes, object_bytes, 1, file) == 1) && fwrite(data->volume_probes.probes, volume_bytes, 1, file) == 1 &&
-                (!beam_bytes || fwrite(beams->cells, beam_bytes, 1, file) == 1) && fwrite(beams->shadow_depth, depth_bytes, 1, file) == 1 && fflush(file) == 0;
+                fwrite(data->direct_pixels, (size_t)bytes, 1, file) == 1 && (!object_bytes || fwrite(data->object_probes.probes, object_bytes, 1, file) == 1) &&
+                fwrite(data->volume_probes.probes, volume_bytes, 1, file) == 1 && (!beam_bytes || fwrite(beams->cells, beam_bytes, 1, file) == 1) &&
+                fwrite(beams->shadow_depth, depth_bytes, 1, file) == 1 && fflush(file) == 0;
 
     if (fclose(file) != 0) good = false;
 

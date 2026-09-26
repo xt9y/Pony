@@ -261,6 +261,7 @@ typedef bool (*PROBE_BAKE_PROGRESS_FN)(Uint32 done, Uint32 total, Uint32 active)
 bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const BEAM_GRID *beams, PROBE_BAKE_PROGRESS_FN progress);
 bool bake_probe_grid(RENDERER *r, PROBE_GRID *grid, Uint32 samples);
 NriTexture *upload_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached);
+NriTexture *upload_direct_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached);
 NriBuffer *upload_probes(RENDERER *r, const PROBE_GRID *grid);
 NriBuffer *upload_beams(RENDERER *r, const BEAM_GRID *grid);
 bool download_lightmap(RENDERER *r, CACHED_LIGHTMAP *out);

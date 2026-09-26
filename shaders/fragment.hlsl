@@ -17,8 +17,10 @@ GPU_BIND_T(3, 2) Texture2D<float4> Occlusion : register(t3, space2);
 GPU_BIND_S(3, 2) SamplerState OcclusionSampler : register(s3, space2);
 GPU_BIND_T(4, 2) Texture2D<float4> Emissive : register(t4, space2);
 GPU_BIND_S(4, 2) SamplerState EmissiveSampler : register(s4, space2);
-GPU_BIND_T(5, 2) Texture2D<float4> Lightmap : register(t5, space2);
-GPU_BIND_S(5, 2) SamplerState LightmapSampler : register(s5, space2);
+GPU_BIND_T(5, 2) Texture2D<float4> IndirectLightmap : register(t5, space2);
+GPU_BIND_S(5, 2) SamplerState IndirectLightmapSampler : register(s5, space2);
+GPU_BIND_T(6, 2) Texture2D<float4> DirectSunLightmap : register(t6, space2);
+GPU_BIND_S(6, 2) SamplerState DirectSunLightmapSampler : register(s6, space2);
 
 GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3)
 {
@@ -191,10 +193,14 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace)
     float g = geometry_schlick(n_dot_v, roughness) * geometry_schlick(n_dot_l, roughness);
     float3 specular = d * g * f / max(4.0f * n_dot_v * max(n_dot_l, 0.001f), 1.0e-4f);
 
-    float3 baked = camera_position.w > 0.5f
-        ? max(Lightmap.Sample(LightmapSampler,
-                              front_face ? input.lightmap_uv : input.back_lightmap_uv).rgb, 0.0f)
+    float2 baked_uv = front_face ? input.lightmap_uv : input.back_lightmap_uv;
+    float3 indirect = camera_position.w > 0.5f
+        ? max(IndirectLightmap.Sample(IndirectLightmapSampler, baked_uv).rgb, 0.0f)
         : float3(0.12f, 0.12f, 0.12f);
+    float3 direct_sun = camera_position.w > 0.5f
+        ? max(DirectSunLightmap.Sample(DirectSunLightmapSampler, baked_uv).rgb, 0.0f)
+        : float3(0.0f, 0.0f, 0.0f);
+    float3 baked = indirect + direct_sun;
     if (camera_position.w > 1.5f) {
         output.hdr=float4(baked,1.0f);
         output.normal_depth=float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f,

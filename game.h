@@ -365,7 +365,8 @@ typedef struct CACHED_LIGHTMAP {
     uint64_t layout_hash;
     uint64_t volume_hash;
     uint64_t beam_hash;
-    unsigned char *pixels; /* tightly packed RGBA16F, width * height * 8 bytes */
+    unsigned char *pixels; /* indirect/base RGBA16F, width * height * 8 bytes */
+    unsigned char *direct_pixels; /* direct-sun RGBA16F, width * height * 8 bytes */
     PROBE_GRID object_probes;
     PROBE_GRID volume_probes;
     BEAM_GRID beams;
