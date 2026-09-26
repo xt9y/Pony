@@ -192,6 +192,8 @@ static void transform_matrices(const TRANSFORM *transform, float world[16], floa
     matrix_transpose(inverse_world, normal_world);
 }
 
+static AABB dynamic_transform_bounds(AABB local, const TRANSFORM *transform);
+
 static bool fill_object_entry(DYNAMIC_OBJECT_ENTRY *entry, OBJECT *object) {
     if (!entry || !object || !object->data || !transform_valid(&object->transform)) return false;
     struct MODEL *model = object->data;
