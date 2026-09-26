@@ -77,19 +77,21 @@ int main(int argc, char **argv) {
                                          .probe_intensity = 0.15f,
                                          .emissive_probe_intensity = 1.0f,
                                          .max_distance = 10000.0f,
-                                         .center_radius = 0.50f,
-                                         .middle_radius = 0.82f,
-                                         .center_transition_width = 0.08f,
-                                         .middle_transition_width = 0.08f,
                                          .probe_spacing = 4.0f,
-                                         .center_steps = 4u,
-                                         .middle_steps = 3u,
-                                         .peripheral_steps = 2u,
-                                         .center_stride = 1u,
-                                         .middle_stride = 2u,
-                                         .peripheral_stride = 4u,
                                          .probe_samples = 1024u,
                                          .emissive_samples = 128u};
+    PERIPHERAL_VISION vision = {.center_radius = 0.50f,
+                                .middle_radius = 0.82f,
+                                .center_transition_width = 0.08f,
+                                .middle_transition_width = 0.08f,
+                                .jitter_strength = 0.65f,
+                                .volume_blur_strength = 0.35f,
+                                .center_steps = 4u,
+                                .middle_steps = 2u,
+                                .peripheral_steps = 1u,
+                                .center_stride = 1u,
+                                .middle_stride = 8u,
+                                .peripheral_stride = 24u};
     struct LIGHT sun = {.type = LIGHT_DIRECTIONAL, .directional = directional_sun};
     OBJECT light_object = {.state = STATIC, .type = LIGHT, .data = &sun};
     struct LIGHT *light_data = light_object.data;
@@ -254,7 +256,7 @@ int main(int argc, char **argv) {
         if (render_due) {
             const Uint64 frame_begin = SDL_GetPerformanceCounter();
 
-            if (!r_draw(&r, light_data, &sky, &volumetrics)) {
+            if (!r_draw(&r, light_data, &sky, &volumetrics, &vision)) {
                 SDL_Log("draw failed: %s", SDL_GetError());
 
                 running = false;

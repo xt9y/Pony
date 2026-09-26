@@ -560,8 +560,8 @@ void r_event(RENDERER *r, const SDL_Event *event) {
     }
 }
 
-bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics) {
-    if (!r || !r->window || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics) return false;
+bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const PERIPHERAL_VISION *vision) {
+    if (!r || !r->window || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics || !vision) return false;
 
     DIRECTIONAL_LIGHT sun = light->directional;
     sun.direction = v3_normalize(sun.direction);
@@ -590,7 +590,7 @@ bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky, const VOLUME
     const MAT4 proj = m4_perspective(fov, aspect, znear, zfar);
     const MAT4 mvp = m4_mul(proj, view);
 
-    RENDER_FRAME frame = {.eye = eye, .right = right, .up = up, .forward = forward, .sun = sun, .sky = *sky, .volumetrics = *volumetrics, .tan_half_fov = tan_half, .aspect = aspect};
+    RENDER_FRAME frame = {.eye = eye, .right = right, .up = up, .forward = forward, .sun = sun, .sky = *sky, .volumetrics = *volumetrics, .vision = *vision, .tan_half_fov = tan_half, .aspect = aspect};
 
     memcpy(frame.mvp, mvp.m, sizeof(frame.mvp));
     memcpy(frame.view, view.m, sizeof(frame.view));

@@ -191,20 +191,25 @@ typedef struct VOLUMETRICS_LIGHTING {
     float probe_intensity;
     float emissive_probe_intensity;
     float max_distance;
+    float probe_spacing;
+    uint32_t probe_samples;
+    uint32_t emissive_samples;
+} VOLUMETRICS_LIGHTING;
+
+typedef struct PERIPHERAL_VISION {
     float center_radius;
     float middle_radius;
     float center_transition_width;
     float middle_transition_width;
-    float probe_spacing;
+    float jitter_strength;
+    float volume_blur_strength;
     uint32_t center_steps;
     uint32_t middle_steps;
     uint32_t peripheral_steps;
     uint32_t center_stride;
     uint32_t middle_stride;
     uint32_t peripheral_stride;
-    uint32_t probe_samples;
-    uint32_t emissive_samples;
-} VOLUMETRICS_LIGHTING;
+} PERIPHERAL_VISION;
 
 typedef struct POINT_LIGHT {
     VEC3 position;
@@ -364,7 +369,7 @@ bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, 
 bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const char *path, uint64_t scene_hash, uint64_t layout_hash,
                             uint64_t volume_hash, uint64_t beam_hash);
 void r_event(RENDERER *r, const SDL_Event *event);
-bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics);
+bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const PERIPHERAL_VISION *vision);
 void r_deinit(RENDERER *r);
 
 void bake_progress(RENDERER *r, const char *stage, Uint32 done, Uint32 total);
