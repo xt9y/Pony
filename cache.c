@@ -7,12 +7,14 @@
 #include <string.h>
 
 #define DM_CACHE_MAGIC 0x4b424d44u
-#define DM_CACHE_VERSION 9u
+#define DM_CACHE_VERSION 10u
 #define DM_CACHE_MAX_DIMENSION 16384u
 #define DM_CACHE_BEAM_WIDTH 64u
 #define DM_CACHE_BEAM_HEIGHT 64u
 #define DM_CACHE_MIN_BEAM_DEPTH 16u
 #define DM_CACHE_MAX_BEAM_DEPTH 128u
+#define DM_CACHE_RGBA16F_BYTES 8u
+#define DM_CACHE_RGB16F_BYTES 6u
 
 typedef struct CACHE_HEADER {
     uint32_t magic;
@@ -22,6 +24,7 @@ typedef struct CACHE_HEADER {
     uint32_t width;
     uint32_t height;
     uint64_t bytes;
+    uint64_t surface_texels;
     uint64_t payload_hash;
     uint32_t object_dims[3];
     uint32_t volume_dims[3];
@@ -54,8 +57,138 @@ static bool valid_dimensions(uint32_t width, uint32_t height, uint64_t *bytes) {
 
     if (!width || !height || width > DM_CACHE_MAX_DIMENSION || height > DM_CACHE_MAX_DIMENSION) return false;
 
-    *bytes = (uint64_t)width * height * 8u;
+    *bytes = (uint64_t)width * height * DM_CACHE_RGBA16F_BYTES;
     return *bytes <= SIZE_MAX;
+}
+
+static size_t surface_mask_bytes(uint64_t pixels) {
+    return (size_t)((pixels + 7u) / 8u);
+}
+
+static bool surface_mask_get(const unsigned char *mask, size_t pixel) {
+    return (mask[pixel >> 3u] & (unsigned char)(1u << (pixel & 7u))) != 0u;
+}
+
+static unsigned char *surface_mask_build(const CACHED_LIGHTMAP *data, size_t pixel_count, uint64_t *occupied) {
+    const size_t mask_bytes = surface_mask_bytes(pixel_count);
+    unsigned char *mask = calloc(mask_bytes, 1u);
+
+    if (!mask) return NULL;
+    *occupied = 0;
+
+    for (size_t pixel = 0; pixel < pixel_count; ++pixel) {
+        const unsigned char *indirect = data->pixels + pixel * DM_CACHE_RGBA16F_BYTES;
+        const unsigned char *direct = data->direct_pixels + pixel * DM_CACHE_RGBA16F_BYTES;
+
+        if (!(indirect[6] || indirect[7] || direct[6] || direct[7])) continue;
+
+        mask[pixel >> 3u] |= (unsigned char)(1u << (pixel & 7u));
+        ++*occupied;
+    }
+
+    return mask;
+}
+
+static uint64_t surface_mask_count(const unsigned char *mask, size_t mask_bytes) {
+    uint64_t count = 0;
+
+    for (size_t i = 0; i < mask_bytes; ++i) {
+        unsigned char bits = mask[i];
+
+        while (bits) {
+            bits &= (unsigned char)(bits - 1u);
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+static size_t pack_surface_row(
+    const unsigned char *pixels, const unsigned char *mask, uint32_t width, uint32_t y, unsigned char *packed
+) {
+    size_t bytes = 0;
+    const size_t first = (size_t)y * width;
+
+    for (uint32_t x = 0; x < width; ++x) {
+        const size_t pixel = first + x;
+
+        if (!surface_mask_get(mask, pixel)) continue;
+
+        memcpy(packed + bytes, pixels + pixel * DM_CACHE_RGBA16F_BYTES, DM_CACHE_RGB16F_BYTES);
+        bytes += DM_CACHE_RGB16F_BYTES;
+    }
+
+    return bytes;
+}
+
+static uint64_t hash_surface(
+    uint64_t hash, const unsigned char *pixels, const unsigned char *mask, uint32_t width, uint32_t height, unsigned char *row
+) {
+    for (uint32_t y = 0; y < height; ++y) {
+        const size_t bytes = pack_surface_row(pixels, mask, width, y, row);
+
+        if (bytes) hash = hash_bytes(hash, row, bytes);
+    }
+
+    return hash;
+}
+
+static bool write_surface(
+    FILE *file, const unsigned char *pixels, const unsigned char *mask, uint32_t width, uint32_t height, unsigned char *row
+) {
+    for (uint32_t y = 0; y < height; ++y) {
+        const size_t bytes = pack_surface_row(pixels, mask, width, y, row);
+
+        if (bytes && fwrite(row, bytes, 1, file) != 1) return false;
+    }
+
+    return true;
+}
+
+static size_t surface_row_bytes(const unsigned char *mask, uint32_t width, uint32_t y) {
+    size_t occupied = 0;
+    const size_t first = (size_t)y * width;
+
+    for (uint32_t x = 0; x < width; ++x)
+        occupied += surface_mask_get(mask, first + x) ? 1u : 0u;
+
+    return occupied * DM_CACHE_RGB16F_BYTES;
+}
+
+static bool read_surface(
+    FILE *file,
+    unsigned char *pixels,
+    const unsigned char *mask,
+    uint32_t width,
+    uint32_t height,
+    unsigned char *row,
+    uint64_t *hash
+) {
+    const uint16_t alpha_one = 0x3c00u;
+
+    for (uint32_t y = 0; y < height; ++y) {
+        const size_t bytes = surface_row_bytes(mask, width, y);
+
+        if (bytes && fread(row, bytes, 1, file) != 1) return false;
+        if (bytes) *hash = hash_bytes(*hash, row, bytes);
+
+        size_t offset = 0;
+        const size_t first = (size_t)y * width;
+
+        for (uint32_t x = 0; x < width; ++x) {
+            const size_t pixel = first + x;
+
+            if (!surface_mask_get(mask, pixel)) continue;
+
+            unsigned char *destination = pixels + pixel * DM_CACHE_RGBA16F_BYTES;
+            memcpy(destination, row + offset, DM_CACHE_RGB16F_BYTES);
+            memcpy(destination + DM_CACHE_RGB16F_BYTES, &alpha_one, sizeof(alpha_one));
+            offset += DM_CACHE_RGB16F_BYTES;
+        }
+    }
+
+    return true;
 }
 
 void cache_free(CACHED_LIGHTMAP *data) {
@@ -111,8 +244,15 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, CACHED_LIGHTMAP *
 
     CACHE_HEADER header = {0};
     uint64_t expected = 0;
+    unsigned char *mask = NULL;
+    unsigned char *row = NULL;
     bool good = fread(&header, sizeof(header), 1, file) == 1 && header.magic == DM_CACHE_MAGIC && header.version == DM_CACHE_VERSION && header.scene_hash == scene_hash &&
                 valid_dimensions(header.width, header.height, &expected) && expected == header.bytes;
+
+    const uint64_t pixel_count = good ? expected / DM_CACHE_RGBA16F_BYTES : 0;
+    const size_t mask_bytes = good ? surface_mask_bytes(pixel_count) : 0;
+
+    good = good && header.surface_texels > 0 && header.surface_texels <= pixel_count && mask_bytes > 0;
 
     if (good) {
 
@@ -169,10 +309,34 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, CACHED_LIGHTMAP *
     }
 
     if (good) {
+        mask = malloc(mask_bytes);
+        row = malloc((size_t)header.width * DM_CACHE_RGB16F_BYTES);
 
-        out->pixels = malloc((size_t)expected);
-        out->direct_pixels = malloc((size_t)expected);
+        good = mask && row && fread(mask, mask_bytes, 1, file) == 1;
+    }
 
+    if (good && (pixel_count & 7u)) {
+        const unsigned char valid = (unsigned char)((1u << (pixel_count & 7u)) - 1u);
+        good = (mask[mask_bytes - 1u] & (unsigned char)~valid) == 0u;
+    }
+
+    if (good) good = surface_mask_count(mask, mask_bytes) == header.surface_texels;
+
+    if (good) {
+        out->pixels = calloc(1u, (size_t)expected);
+        out->direct_pixels = calloc(1u, (size_t)expected);
+        good = out->pixels && out->direct_pixels;
+    }
+
+    uint64_t hash = 0;
+
+    if (good) {
+        hash = hash_bytes(0, mask, mask_bytes);
+        good = read_surface(file, out->pixels, mask, header.width, header.height, row, &hash) &&
+               read_surface(file, out->direct_pixels, mask, header.width, header.height, row, &hash);
+    }
+
+    if (good) {
         const uint64_t object_count = (uint64_t)header.object_dims[0] * header.object_dims[1] * header.object_dims[2];
 
         const uint64_t volume_count = (uint64_t)header.volume_dims[0] * header.volume_dims[1] * header.volume_dims[2];
@@ -184,15 +348,10 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, CACHED_LIGHTMAP *
 
         const size_t depth_bytes = depth_count * sizeof(float);
 
-        good = out->pixels && out->direct_pixels && fread(out->pixels, (size_t)expected, 1, file) == 1 &&
-               fread(out->direct_pixels, (size_t)expected, 1, file) == 1 && (!object_bytes || fread(out->object_probes.probes, object_bytes, 1, file) == 1) &&
-               fread(out->volume_probes.probes, volume_bytes, 1, file) == 1 && (!beam_bytes || fread(out->beams.cells, beam_bytes, 1, file) == 1) &&
-               fread(out->beams.shadow_depth, depth_bytes, 1, file) == 1 && fgetc(file) == EOF && !ferror(file);
+        good = (!object_bytes || fread(out->object_probes.probes, object_bytes, 1, file) == 1) && fread(out->volume_probes.probes, volume_bytes, 1, file) == 1 &&
+               (!beam_bytes || fread(out->beams.cells, beam_bytes, 1, file) == 1) && fread(out->beams.shadow_depth, depth_bytes, 1, file) == 1 && fgetc(file) == EOF && !ferror(file);
 
         if (good) {
-            uint64_t hash = hash_bytes(0, out->pixels, (size_t)expected);
-            hash = hash_bytes(hash, out->direct_pixels, (size_t)expected);
-
             if (object_bytes) hash = hash_bytes(hash, out->object_probes.probes, object_bytes);
 
             hash = hash_bytes(hash, out->volume_probes.probes, volume_bytes);
@@ -215,6 +374,9 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, CACHED_LIGHTMAP *
             }
         }
     }
+
+    free(row);
+    free(mask);
 
     if (fclose(file) != 0) good = false;
 
@@ -248,17 +410,39 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
 
     if (!path || !data || !data->pixels || !data->direct_pixels || !valid_dimensions(data->width, data->height, &bytes)) return false;
 
+    const uint64_t pixel_count = bytes / DM_CACHE_RGBA16F_BYTES;
+    const size_t mask_bytes = surface_mask_bytes(pixel_count);
+    uint64_t surface_texels = 0;
+    unsigned char *mask = surface_mask_build(data, (size_t)pixel_count, &surface_texels);
+    unsigned char *row = malloc((size_t)data->width * DM_CACHE_RGB16F_BYTES);
+
+    if (!mask || !row || !surface_texels) {
+        free(row);
+        free(mask);
+
+        return false;
+    }
+
     const uint64_t object_count = grid_count(&data->object_probes);
     const uint64_t volume_count = grid_count(&data->volume_probes);
 
-    if (!volume_count) return false;
+    if (!volume_count) {
+        free(row);
+        free(mask);
+
+        return false;
+    }
 
     const BEAM_GRID *beams = &data->beams;
     const uint64_t beam_capacity = (uint64_t)beams->width * beams->height * beams->depth;
 
     if (beams->width != DM_CACHE_BEAM_WIDTH || beams->height != DM_CACHE_BEAM_HEIGHT || beams->depth < DM_CACHE_MIN_BEAM_DEPTH || beams->depth > DM_CACHE_MAX_BEAM_DEPTH ||
-        beams->count > beam_capacity || (beams->count && !beams->cells) || !beams->shadow_depth)
+        beams->count > beam_capacity || (beams->count && !beams->cells) || !beams->shadow_depth) {
+        free(row);
+        free(mask);
+
         return false;
+    }
 
     const size_t depth_count = (size_t)beams->width * beams->height;
     const size_t depth_bytes = depth_count * sizeof(float);
@@ -266,20 +450,31 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
     for (size_t i = 0; i < depth_count; ++i) {
         const float depth = beams->shadow_depth[i];
 
-        if (!(isfinite(depth) || depth == -INFINITY)) return false;
+        if (!(isfinite(depth) || depth == -INFINITY)) {
+            free(row);
+            free(mask);
+
+            return false;
+        }
     }
 
     float *expanded = beam_expand(beams);
 
-    if (!expanded) return false;
+    if (!expanded) {
+        free(row);
+        free(mask);
+
+        return false;
+    }
     free(expanded);
 
     const size_t object_bytes = (size_t)object_count * sizeof(PROBE);
     const size_t volume_bytes = (size_t)volume_count * sizeof(PROBE);
     const size_t beam_bytes = (size_t)beams->count * sizeof(BEAM_CELL);
     const Uint64 hash_started = SDL_GetPerformanceCounter();
-    uint64_t payload_hash = hash_bytes(0, data->pixels, (size_t)bytes);
-    payload_hash = hash_bytes(payload_hash, data->direct_pixels, (size_t)bytes);
+    uint64_t payload_hash = hash_bytes(0, mask, mask_bytes);
+    payload_hash = hash_surface(payload_hash, data->pixels, mask, data->width, data->height, row);
+    payload_hash = hash_surface(payload_hash, data->direct_pixels, mask, data->width, data->height, row);
 
     if (object_bytes) payload_hash = hash_bytes(payload_hash, data->object_probes.probes, object_bytes);
 
@@ -290,14 +485,30 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
     payload_hash = hash_bytes(payload_hash, beams->shadow_depth, depth_bytes);
 
     SDL_Log("B: cache hashing took %.2f ms", (double)(SDL_GetPerformanceCounter() - hash_started) * 1000.0 / (double)SDL_GetPerformanceFrequency());
+    SDL_Log(
+        "B: cache surface %llu/%llu texels | %.2f MiB packed",
+        (unsigned long long)surface_texels,
+        (unsigned long long)pixel_count,
+        (double)((uint64_t)mask_bytes + surface_texels * DM_CACHE_RGB16F_BYTES * 2u) / (1024.0 * 1024.0)
+    );
 
     const size_t path_length = strlen(path);
 
-    if (path_length > SIZE_MAX - 5) return false;
+    if (path_length > SIZE_MAX - 5) {
+        free(row);
+        free(mask);
+
+        return false;
+    }
 
     char *temporary = malloc(path_length + 5);
 
-    if (!temporary) return false;
+    if (!temporary) {
+        free(row);
+        free(mask);
+
+        return false;
+    }
     memcpy(temporary, path, path_length);
     memcpy(temporary + path_length, ".tmp", 5);
 
@@ -306,6 +517,8 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
     if (!file) {
         SDL_SetError("could not write %s: %s", temporary, strerror(errno));
         free(temporary);
+        free(row);
+        free(mask);
 
         return false;
     }
@@ -320,6 +533,7 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
         .width = data->width,
         .height = data->height,
         .bytes = bytes,
+        .surface_texels = surface_texels,
         .payload_hash = payload_hash,
         .object_dims = {data->object_probes.count_x, data->object_probes.count_y, data->object_probes.count_z},
         .volume_dims = {data->volume_probes.count_x, data->volume_probes.count_y, data->volume_probes.count_z},
@@ -334,10 +548,10 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
     };
 
     const Uint64 write_started = SDL_GetPerformanceCounter();
-    bool good = fwrite(&header, sizeof(header), 1, file) == 1 && fwrite(data->pixels, (size_t)bytes, 1, file) == 1 &&
-                fwrite(data->direct_pixels, (size_t)bytes, 1, file) == 1 && (!object_bytes || fwrite(data->object_probes.probes, object_bytes, 1, file) == 1) &&
-                fwrite(data->volume_probes.probes, volume_bytes, 1, file) == 1 && (!beam_bytes || fwrite(beams->cells, beam_bytes, 1, file) == 1) &&
-                fwrite(beams->shadow_depth, depth_bytes, 1, file) == 1 && fflush(file) == 0;
+    bool good = fwrite(&header, sizeof(header), 1, file) == 1 && fwrite(mask, mask_bytes, 1, file) == 1 &&
+                write_surface(file, data->pixels, mask, data->width, data->height, row) && write_surface(file, data->direct_pixels, mask, data->width, data->height, row) &&
+                (!object_bytes || fwrite(data->object_probes.probes, object_bytes, 1, file) == 1) && fwrite(data->volume_probes.probes, volume_bytes, 1, file) == 1 &&
+                (!beam_bytes || fwrite(beams->cells, beam_bytes, 1, file) == 1) && fwrite(beams->shadow_depth, depth_bytes, 1, file) == 1 && fflush(file) == 0;
 
     if (fclose(file) != 0) good = false;
 
@@ -355,6 +569,8 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
     }
 
     free(temporary);
+    free(row);
+    free(mask);
 
     return good;
 }
