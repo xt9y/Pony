@@ -36,6 +36,9 @@ typedef struct DYNAMIC_CELL_JOB {
 typedef struct DYNAMIC_OBJECT_ENTRY {
     OBJECT *object;
     AABB world_bounds;
+    float world[16];
+    float inverse_world[16];
+    float normal_world[16];
 } DYNAMIC_OBJECT_ENTRY;
 
 struct DYNAMIC_STATE {
@@ -63,6 +66,7 @@ struct DYNAMIC_STATE {
     DYNAMIC_OBJECT_ENTRY *objects;
     uint32_t object_count;
     uint32_t object_capacity;
+    uint32_t object_generation;
 };
 
 static bool finite_v3(VEC3 v) {
@@ -96,6 +100,109 @@ static VEC3 transform_point(const TRANSFORM *transform, VEC3 p) {
     const VEC3 rz = {ry.x * cz - ry.y * sz, ry.x * sz + ry.y * cz, ry.z};
 
     return (VEC3){rz.x + transform->position.x, rz.y + transform->position.y, rz.z + transform->position.z};
+}
+
+
+static void matrix_identity(float out[16]) {
+    memset(out, 0, 16u * sizeof(*out));
+    out[0] = out[5] = out[10] = out[15] = 1.0f;
+}
+
+static void matrix_mul(const float a[16], const float b[16], float out[16]) {
+    float result[16] = {0};
+    for (uint32_t c = 0; c < 4u; ++c) {
+        for (uint32_t row = 0; row < 4u; ++row) {
+            result[c * 4u + row] = a[row] * b[c * 4u] + a[4u + row] * b[c * 4u + 1u] + a[8u + row] * b[c * 4u + 2u] + a[12u + row] * b[c * 4u + 3u];
+        }
+    }
+    memcpy(out, result, sizeof(result));
+}
+
+static void matrix_translation(VEC3 t, float out[16]) {
+    matrix_identity(out);
+    out[12] = t.x;
+    out[13] = t.y;
+    out[14] = t.z;
+}
+
+static void matrix_scale(VEC3 scale, float out[16]) {
+    matrix_identity(out);
+    out[0] = scale.x;
+    out[5] = scale.y;
+    out[10] = scale.z;
+}
+
+static void matrix_rotation_x(float angle, float out[16]) {
+    const float c = cosf(angle), s = sinf(angle);
+    matrix_identity(out);
+    out[5] = c;
+    out[6] = s;
+    out[9] = -s;
+    out[10] = c;
+}
+
+static void matrix_rotation_y(float angle, float out[16]) {
+    const float c = cosf(angle), s = sinf(angle);
+    matrix_identity(out);
+    out[0] = c;
+    out[2] = -s;
+    out[8] = s;
+    out[10] = c;
+}
+
+static void matrix_rotation_z(float angle, float out[16]) {
+    const float c = cosf(angle), s = sinf(angle);
+    matrix_identity(out);
+    out[0] = c;
+    out[1] = s;
+    out[4] = -s;
+    out[5] = c;
+}
+
+static void matrix_transpose(const float in[16], float out[16]) {
+    float result[16];
+    for (uint32_t c = 0; c < 4u; ++c)
+        for (uint32_t row = 0; row < 4u; ++row) result[c * 4u + row] = in[row * 4u + c];
+    memcpy(out, result, sizeof(result));
+}
+
+static void transform_matrices(const TRANSFORM *transform, float world[16], float inverse_world[16], float normal_world[16]) {
+    float t[16], rz[16], ry[16], rx[16], scale[16], tmp0[16], tmp1[16];
+    matrix_translation(transform->position, t);
+    matrix_rotation_z(transform->rotation.z, rz);
+    matrix_rotation_y(transform->rotation.y, ry);
+    matrix_rotation_x(transform->rotation.x, rx);
+    matrix_scale(transform->scale, scale);
+    matrix_mul(t, rz, tmp0);
+    matrix_mul(tmp0, ry, tmp1);
+    matrix_mul(tmp1, rx, tmp0);
+    matrix_mul(tmp0, scale, world);
+
+    const VEC3 inverse_scale = {1.0f / transform->scale.x, 1.0f / transform->scale.y, 1.0f / transform->scale.z};
+    const VEC3 inverse_translation = {-transform->position.x, -transform->position.y, -transform->position.z};
+    matrix_scale(inverse_scale, scale);
+    matrix_rotation_x(-transform->rotation.x, rx);
+    matrix_rotation_y(-transform->rotation.y, ry);
+    matrix_rotation_z(-transform->rotation.z, rz);
+    matrix_translation(inverse_translation, t);
+    matrix_mul(scale, rx, tmp0);
+    matrix_mul(tmp0, ry, tmp1);
+    matrix_mul(tmp1, rz, tmp0);
+    matrix_mul(tmp0, t, inverse_world);
+    matrix_transpose(inverse_world, normal_world);
+}
+
+static bool fill_object_entry(DYNAMIC_OBJECT_ENTRY *entry, OBJECT *object) {
+    if (!entry || !object || !object->data || !transform_valid(&object->transform)) return false;
+    struct MODEL *model = object->data;
+    if (!model->geometry || !model->visual) return false;
+    const AABB world_bounds = dynamic_transform_bounds(model->geometry->bounds, &object->transform);
+    if (!finite_v3(world_bounds.min) || !finite_v3(world_bounds.max)) return false;
+    memset(entry, 0, sizeof(*entry));
+    entry->object = object;
+    entry->world_bounds = world_bounds;
+    transform_matrices(&object->transform, entry->world, entry->inverse_world, entry->normal_world);
+    return true;
 }
 
 static AABB bounds_from_min_max(VEC3 min, VEC3 max) {
@@ -412,10 +519,13 @@ bool r_dynamic_init(RENDERER *r, const MESH *static_scene, const LIGHTMAP *lm, c
         static_scene->bounds.min.z > static_scene->bounds.max.z)
         return false;
 
+    if (r->dynamic_model_count && r->graphics_queue && r->core.QueueWaitIdle(r->graphics_queue) != NriResult_SUCCESS) return false;
+    gpu_dynamic_deinit(r);
     dynamic_deinit(r);
 
     DYNAMIC_STATE *state = calloc(1, sizeof(*state));
     if (!state) return false;
+    state->object_generation = 1u;
     state->settings = *settings;
     r->dynamic = state;
     r->dynamic_lighting = *settings;
@@ -437,18 +547,24 @@ bool r_add_dynamic_object(RENDERER *r, OBJECT *object) {
     for (uint32_t i = 0; i < state->object_count; ++i)
         if (state->objects[i].object == object) return false;
 
-    if (!reserve_objects(state, state->object_count + 1u)) return false;
-    const AABB world_bounds = dynamic_transform_bounds(model->geometry->bounds, &object->transform);
-    if (!finite_v3(world_bounds.min) || !finite_v3(world_bounds.max)) return false;
+    if (!reserve_objects(state, state->object_count + 1u) || !gpu_dynamic_register_model(r, model)) return false;
 
-    state->objects[state->object_count++] = (DYNAMIC_OBJECT_ENTRY){.object = object, .world_bounds = world_bounds};
-    object->previous_transform = object->transform;
-
-    if (!invalidate_bounds(state, bounds_expand(world_bounds, state->settings.gi_radius))) {
-        state->object_count--;
+    DYNAMIC_OBJECT_ENTRY entry = {0};
+    if (!fill_object_entry(&entry, object)) {
+        gpu_dynamic_unregister_model(r, model);
         return false;
     }
 
+    state->objects[state->object_count++] = entry;
+    object->previous_transform = object->transform;
+
+    if (!invalidate_bounds(state, bounds_expand(entry.world_bounds, state->settings.gi_radius))) {
+        state->object_count--;
+        gpu_dynamic_unregister_model(r, model);
+        return false;
+    }
+
+    state->object_generation++;
     return true;
 }
 
@@ -458,9 +574,12 @@ void r_remove_dynamic_object(RENDERER *r, OBJECT *object) {
 
     for (uint32_t i = 0; i < state->object_count; ++i) {
         if (state->objects[i].object != object) continue;
+        struct MODEL *model = object->data;
         (void)invalidate_bounds(state, bounds_expand(state->objects[i].world_bounds, state->settings.gi_radius));
         state->objects[i] = state->objects[state->object_count - 1u];
         state->object_count--;
+        if (model) gpu_dynamic_unregister_model(r, model);
+        state->object_generation++;
         return;
     }
 }
@@ -475,13 +594,13 @@ bool dynamic_sync(RENDERER *r) {
         if (!object || !transform_valid(&object->transform)) return false;
         if (transform_equal(&object->transform, &object->previous_transform)) continue;
 
-        struct MODEL *model = object->data;
-        if (!model || !model->geometry || !model->visual) return false;
-        const AABB current = dynamic_transform_bounds(model->geometry->bounds, &object->transform);
-        const AABB swept = bounds_expand(bounds_union(entry->world_bounds, current), state->settings.gi_radius);
+        DYNAMIC_OBJECT_ENTRY current = {0};
+        if (!fill_object_entry(&current, object)) return false;
+        const AABB swept = bounds_expand(bounds_union(entry->world_bounds, current.world_bounds), state->settings.gi_radius);
         if (!invalidate_bounds(state, swept)) return false;
-        entry->world_bounds = current;
+        *entry = current;
         object->previous_transform = object->transform;
+        state->object_generation++;
     }
 
     return true;
@@ -538,4 +657,27 @@ uint32_t dynamic_take_cell_updates(RENDERER *r, DYNAMIC_CELL_UPDATE *out, uint32
     }
 
     return count;
+}
+
+
+uint32_t dynamic_instance_generation(const RENDERER *r) {
+    return r && r->dynamic ? r->dynamic->object_generation : 0u;
+}
+
+uint32_t dynamic_instance_count(const RENDERER *r) {
+    return r && r->dynamic ? r->dynamic->object_count : 0u;
+}
+
+bool dynamic_instance_data(RENDERER *r, uint32_t index, DYNAMIC_INSTANCE_DATA *out) {
+    if (!r || !r->dynamic || !out || index >= r->dynamic->object_count) return false;
+    const DYNAMIC_OBJECT_ENTRY *entry = &r->dynamic->objects[index];
+    if (!entry->object || !entry->object->data) return false;
+    memset(out, 0, sizeof(*out));
+    out->object = entry->object;
+    out->model = entry->object->data;
+    out->world_bounds = entry->world_bounds;
+    memcpy(out->world, entry->world, sizeof(out->world));
+    memcpy(out->inverse_world, entry->inverse_world, sizeof(out->inverse_world));
+    memcpy(out->normal_world, entry->normal_world, sizeof(out->normal_world));
+    return true;
 }

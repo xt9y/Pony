@@ -30,6 +30,10 @@
 typedef struct CAMERA_UNIFORMS {
     float mvp[16];
     float view[16];
+    float model[16];
+    float normal_model[16];
+    Uint32 object_dynamic;
+    Uint32 _pad0, _pad1, _pad2;
 } CAMERA_UNIFORMS;
 
 typedef struct BAKE_UNIFORMS {
@@ -68,6 +72,8 @@ typedef struct MATERIAL_UNIFORMS {
     float sun_direction[4];
     float sun_color[4];
     float camera_position[4];
+    float probe_origin_spacing[4];
+    Uint32 probe_dims[4];
 } MATERIAL_UNIFORMS;
 
 typedef struct SSAO_UNIFORMS {
@@ -112,6 +118,21 @@ struct RENDER_MATERIAL {
     NriTexture *normal;
     NriTexture *occlusion;
     NriTexture *emissive;
+};
+
+struct DYNAMIC_MODEL_RESOURCE {
+    struct MODEL *model;
+    NriBuffer *vertex_buffer;
+    RENDER_MATERIAL *materials;
+    uint32_t material_count;
+    NriTexture **image_textures;
+    uint32_t image_texture_count;
+    DRAW_RANGE *draws;
+    uint32_t draw_count;
+    BVH bvh;
+    uint32_t node_offset;
+    uint32_t triangle_offset;
+    uint32_t ref_count;
 };
 
 struct SWAPCHAIN_TEXTURE {
@@ -541,13 +562,14 @@ static bool create_surface_layout(RENDERER *r) {
         NriDescriptorType_SAMPLER,
         NriDescriptorType_SAMPLER,
         NriDescriptorType_SAMPLER,
-        NriDescriptorType_SAMPLER
+        NriDescriptorType_SAMPLER,
+        NriDescriptorType_STRUCTURED_BUFFER
     };
 
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
 
     const NriDescriptorType *sets[4] = {NULL, camera, material, uniform};
-    const uint8_t counts[4] = {0, 1, 14, 1};
+    const uint8_t counts[4] = {0, 1, 15, 1};
 
     return create_pipeline_layout(r, &r->surface_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
@@ -1363,6 +1385,7 @@ static bool bind_surface_resources(
     const RENDER_MATERIAL *material,
     NriTexture *lightmap,
     NriTexture *direct_lightmap,
+    NriBuffer *probes,
     NriDescriptor *material_sampler,
     NriDescriptor *lightmap_sampler,
     const void *uniforms,
@@ -1382,10 +1405,11 @@ static bool bind_surface_resources(
         material_sampler,
         material_sampler,
         lightmap_sampler,
-        lightmap_sampler
+        lightmap_sampler,
+        create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE))
     };
 
-    return bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 14) &&
+    return bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 15) &&
            bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
 }
 
@@ -2426,6 +2450,7 @@ static void release_scene_resources(RENDERER *r) {
     release_buffer(r, r->vertex_buffer);
     release_texture(r, r->lightmap_texture);
     release_texture(r, r->lightmap_direct);
+    release_buffer(r, r->default_probe_buffer);
 
     if (r->lightmap_sampler) r->core.DestroyDescriptor(r->lightmap_sampler);
 
@@ -2435,6 +2460,7 @@ static void release_scene_resources(RENDERER *r) {
     r->vertex_buffer = NULL;
     r->lightmap_texture = NULL;
     r->lightmap_direct = NULL;
+    r->default_probe_buffer = NULL;
     r->lightmap_sampler = NULL;
 }
 
@@ -2479,8 +2505,285 @@ bool upload_scene(RENDERER *r, const GLTF_SCENE *visual) {
     r->lightmap_sampler = sampler(r, NriFilter_LINEAR, NriFilter_LINEAR, NriAddressMode_CLAMP_TO_EDGE);
     r->lightmap_texture = pixel_texture(r, 0, 0, 0, 255);
     r->lightmap_direct = pixel_texture(r, 0, 0, 0, 255);
+    const PROBE default_probe = {0};
+    r->default_probe_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &default_probe, sizeof(default_probe), sizeof(default_probe));
 
-    return r->lightmap_sampler && r->lightmap_texture && r->lightmap_direct;
+    return r->lightmap_sampler && r->lightmap_texture && r->lightmap_direct && r->default_probe_buffer;
+}
+
+
+static DYNAMIC_MODEL_RESOURCE *dynamic_model_find(RENDERER *r, struct MODEL *model) {
+    if (!r || !model) return NULL;
+    for (uint32_t i = 0; i < r->dynamic_model_count; ++i)
+        if (r->dynamic_models[i].model == model) return &r->dynamic_models[i];
+    return NULL;
+}
+
+static NriTexture *dynamic_resolve_texture(RENDERER *r, DYNAMIC_MODEL_RESOURCE *resource, const GLTF_SCENE *visual, int32_t texture_index, NriTexture *fallback) {
+    if (!r || !resource || !visual || texture_index < 0 || (uint32_t)texture_index >= visual->texture_count) return fallback;
+    const int32_t image = visual->textures[texture_index].image;
+    if (image < 0 || (uint32_t)image >= resource->image_texture_count || !resource->image_textures[image]) return fallback;
+    return resource->image_textures[image];
+}
+
+static void dynamic_model_release(RENDERER *r, DYNAMIC_MODEL_RESOURCE *resource) {
+    if (!r || !resource) return;
+    if (resource->image_textures) {
+        for (uint32_t i = 0; i < resource->image_texture_count; ++i)
+            release_texture(r, resource->image_textures[i]);
+    }
+    free(resource->image_textures);
+    free(resource->materials);
+    free(resource->draws);
+    release_buffer(r, resource->vertex_buffer);
+    bvh_free(&resource->bvh);
+    memset(resource, 0, sizeof(*resource));
+}
+
+static bool dynamic_model_build(RENDERER *r, struct MODEL *model, DYNAMIC_MODEL_RESOURCE *out) {
+    if (!r || !model || !model->geometry || !model->visual || !out) return false;
+    const GLTF_SCENE *visual = model->visual;
+    if (!visual->vertex_count || visual->vertex_count % 3u || !visual->material_count) return false;
+
+    DYNAMIC_MODEL_RESOURCE resource = {0};
+    resource.model = model;
+    resource.ref_count = 1u;
+    resource.material_count = visual->material_count;
+    resource.image_texture_count = visual->image_count;
+    resource.draws = calloc(visual->material_count, sizeof(*resource.draws));
+    resource.materials = calloc(visual->material_count, sizeof(*resource.materials));
+    if (visual->image_count) resource.image_textures = calloc(visual->image_count, sizeof(*resource.image_textures));
+    RENDER_VERTEX *vertices = malloc(visual->vertex_count * sizeof(*vertices));
+    if (!resource.draws || !resource.materials || (visual->image_count && !resource.image_textures) || !vertices) goto fail;
+
+    for (uint32_t i = 0; i < visual->image_count; ++i) {
+        const GLTF_IMAGE *image = &visual->images[i];
+        if (!image->bytes.data || !image->bytes.size) continue;
+        resource.image_textures[i] = load_image(r, image);
+        if (!resource.image_textures[i]) SDL_Log("SDL_image could not decode dynamic GLB image %u (%s): %s", i, image->mime[0] ? image->mime : "unknown", SDL_GetError());
+    }
+
+    for (uint32_t i = 0; i < visual->material_count; ++i) {
+        RENDER_MATERIAL *material = &resource.materials[i];
+        material->data = visual->materials[i];
+        material->base_color = dynamic_resolve_texture(r, &resource, visual, material->data.base_color_texture, r->default_white);
+        material->metallic_roughness = dynamic_resolve_texture(r, &resource, visual, material->data.metallic_roughness_texture, r->default_white);
+        material->normal = dynamic_resolve_texture(r, &resource, visual, material->data.normal_texture, r->default_normal);
+        material->occlusion = dynamic_resolve_texture(r, &resource, visual, material->data.occlusion_texture, r->default_white);
+        material->emissive = dynamic_resolve_texture(r, &resource, visual, material->data.emissive_texture, r->default_white);
+    }
+
+    uint32_t vertex_count = 0u;
+    const size_t triangle_count = visual->vertex_count / 3u;
+    for (uint32_t material = 0; material < visual->material_count; ++material) {
+        const uint32_t first = vertex_count;
+        for (size_t triangle = 0; triangle < triangle_count; ++triangle) {
+            const GLTF_VERTEX *v = &visual->vertices[triangle * 3u];
+            if (v[0].material != material) continue;
+            for (uint32_t j = 0; j < 3u; ++j) {
+                vertices[vertex_count++] = (RENDER_VERTEX){
+                    .x = v[j].position.x, .y = v[j].position.y, .z = v[j].position.z,
+                    .nx = v[j].normal.x, .ny = v[j].normal.y, .nz = v[j].normal.z,
+                    .u = v[j].u, .v = v[j].v,
+                    .lu = 0.0f, .lv = 0.0f,
+                    .r = 1.0f, .g = 1.0f, .b = 1.0f, .a = 1.0f
+                };
+            }
+        }
+        const uint32_t count = vertex_count - first;
+        if (count) resource.draws[resource.draw_count++] = (DRAW_RANGE){first, count, material};
+    }
+    if (vertex_count != visual->vertex_count) goto fail;
+
+    resource.vertex_buffer = upload_buffer(r, NriBufferUsageBits_VERTEX, vertices, (size_t)vertex_count * sizeof(*vertices), 0u);
+    free(vertices);
+    vertices = NULL;
+    if (!resource.vertex_buffer || !bvh_build(&resource.bvh, model->geometry, visual)) goto fail;
+    *out = resource;
+    return true;
+
+fail:
+    free(vertices);
+    (void)upload_drain(r);
+    dynamic_model_release(r, &resource);
+    return false;
+}
+
+static bool dynamic_rebuild_bvh_buffers(RENDERER *r) {
+    if (!r) return false;
+    uint64_t node_count = 0u, triangle_count = 0u;
+    for (uint32_t i = 0; i < r->dynamic_model_count; ++i) {
+        node_count += r->dynamic_models[i].bvh.node_count;
+        triangle_count += r->dynamic_models[i].bvh.triangle_count;
+    }
+    if (node_count > UINT32_MAX || triangle_count > UINT32_MAX) return false;
+    if (!node_count || !triangle_count) return true;
+
+    BVH_NODE *nodes = malloc((size_t)node_count * sizeof(*nodes));
+    BVH_TRIANGLE *triangles = malloc((size_t)triangle_count * sizeof(*triangles));
+    if (!nodes || !triangles) { free(nodes); free(triangles); return false; }
+
+    uint32_t node_offset = 0u, triangle_offset = 0u;
+    for (uint32_t model_index = 0; model_index < r->dynamic_model_count; ++model_index) {
+        DYNAMIC_MODEL_RESOURCE *resource = &r->dynamic_models[model_index];
+        resource->node_offset = node_offset;
+        resource->triangle_offset = triangle_offset;
+        memcpy(triangles + triangle_offset, resource->bvh.triangles, (size_t)resource->bvh.triangle_count * sizeof(*triangles));
+        for (uint32_t i = 0; i < resource->bvh.node_count; ++i) {
+            BVH_NODE node = resource->bvh.nodes[i];
+            if (node.meta[0] != UINT32_MAX) node.meta[0] += node_offset;
+            if (node.meta[1] != UINT32_MAX) node.meta[1] += node_offset;
+            if (node.meta[3]) node.meta[2] += triangle_offset;
+            nodes[node_offset + i] = node;
+        }
+        node_offset += resource->bvh.node_count;
+        triangle_offset += resource->bvh.triangle_count;
+    }
+
+    NriBuffer *new_nodes = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, nodes, (size_t)node_count * sizeof(*nodes), sizeof(BVH_NODE));
+    NriBuffer *new_triangles = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, triangles, (size_t)triangle_count * sizeof(*triangles), sizeof(BVH_TRIANGLE));
+    free(nodes);
+    free(triangles);
+    if (!new_nodes || !new_triangles) {
+        (void)upload_drain(r);
+        release_buffer(r, new_nodes);
+        release_buffer(r, new_triangles);
+        return false;
+    }
+
+    release_buffer(r, r->dynamic_bvh_node_buffer);
+    release_buffer(r, r->dynamic_bvh_triangle_buffer);
+    r->dynamic_bvh_node_buffer = new_nodes;
+    r->dynamic_bvh_triangle_buffer = new_triangles;
+    r->dynamic_bvh_node_count = (uint32_t)node_count;
+    r->dynamic_bvh_triangle_count = (uint32_t)triangle_count;
+    r->dynamic_instance_uploaded_generation = UINT32_MAX;
+    return true;
+}
+
+bool gpu_dynamic_register_model(RENDERER *r, struct MODEL *model) {
+    if (!r || !r->device || !model) return false;
+    DYNAMIC_MODEL_RESOURCE *existing = dynamic_model_find(r, model);
+    if (existing) { existing->ref_count++; return true; }
+
+    if (r->dynamic_model_count == r->dynamic_model_capacity) {
+        uint32_t capacity = r->dynamic_model_capacity ? r->dynamic_model_capacity * 2u : 4u;
+        DYNAMIC_MODEL_RESOURCE *models = realloc(r->dynamic_models, (size_t)capacity * sizeof(*models));
+        if (!models) return false;
+        r->dynamic_models = models;
+        r->dynamic_model_capacity = capacity;
+    }
+
+    if ((r->dynamic_bvh_node_buffer || r->dynamic_bvh_triangle_buffer) && r->graphics_queue && r->frame_index && r->core.QueueWaitIdle(r->graphics_queue) != NriResult_SUCCESS) return false;
+
+    DYNAMIC_MODEL_RESOURCE resource = {0};
+    if (!dynamic_model_build(r, model, &resource)) return false;
+    r->dynamic_models[r->dynamic_model_count++] = resource;
+    if (!dynamic_rebuild_bvh_buffers(r)) {
+        dynamic_model_release(r, &r->dynamic_models[--r->dynamic_model_count]);
+        return false;
+    }
+    return true;
+}
+
+void gpu_dynamic_unregister_model(RENDERER *r, struct MODEL *model) {
+    if (!r || !model) return;
+    for (uint32_t i = 0; i < r->dynamic_model_count; ++i) {
+        DYNAMIC_MODEL_RESOURCE *resource = &r->dynamic_models[i];
+        if (resource->model != model) continue;
+        if (resource->ref_count > 1u) { resource->ref_count--; return; }
+        (void)upload_drain(r);
+        if (r->graphics_queue && r->frame_index) (void)r->core.QueueWaitIdle(r->graphics_queue);
+        dynamic_model_release(r, resource);
+        r->dynamic_models[i] = r->dynamic_models[r->dynamic_model_count - 1u];
+        r->dynamic_model_count--;
+        if (!r->dynamic_model_count) {
+            release_buffer(r, r->dynamic_bvh_node_buffer);
+            release_buffer(r, r->dynamic_bvh_triangle_buffer);
+            r->dynamic_bvh_node_buffer = NULL;
+            r->dynamic_bvh_triangle_buffer = NULL;
+            r->dynamic_bvh_node_count = 0u;
+            r->dynamic_bvh_triangle_count = 0u;
+        }
+        return;
+    }
+}
+
+bool gpu_dynamic_prepare_instances(RENDERER *r) {
+    if (!r || !r->active_frame) return false;
+    const uint32_t count = dynamic_instance_count(r);
+    const uint32_t generation = dynamic_instance_generation(r);
+
+    if (r->dynamic_instance_uploaded_generation == generation && r->dynamic_instance_buffer_count == count && (!count || r->dynamic_instance_buffer)) return true;
+
+    if (!count) {
+        if (r->dynamic_instance_buffer && !track_buffer(r, r->dynamic_instance_buffer)) return false;
+        r->dynamic_instance_buffer = NULL;
+        r->dynamic_instance_buffer_count = 0u;
+        r->dynamic_instance_uploaded_generation = generation;
+        return true;
+    }
+
+    DYNAMIC_GPU_INSTANCE *gpu_instances = calloc(count, sizeof(*gpu_instances));
+    if (!gpu_instances) return false;
+
+    bool good = true;
+    for (uint32_t i = 0; i < count; ++i) {
+        DYNAMIC_INSTANCE_DATA instance = {0};
+        if (!dynamic_instance_data(r, i, &instance)) { good = false; break; }
+        DYNAMIC_MODEL_RESOURCE *resource = dynamic_model_find(r, instance.model);
+        if (!resource) { good = false; break; }
+
+        DYNAMIC_GPU_INSTANCE *gpu = &gpu_instances[i];
+        memcpy(gpu->world, instance.world, sizeof(gpu->world));
+        memcpy(gpu->inverse_world, instance.inverse_world, sizeof(gpu->inverse_world));
+        memcpy(gpu->normal_world, instance.normal_world, sizeof(gpu->normal_world));
+        gpu->bounds_min[0] = instance.world_bounds.min.x;
+        gpu->bounds_min[1] = instance.world_bounds.min.y;
+        gpu->bounds_min[2] = instance.world_bounds.min.z;
+        gpu->bounds_max[0] = instance.world_bounds.max.x;
+        gpu->bounds_max[1] = instance.world_bounds.max.y;
+        gpu->bounds_max[2] = instance.world_bounds.max.z;
+        gpu->indices[0] = resource->node_offset;
+        gpu->indices[1] = resource->triangle_offset;
+        gpu->indices[2] = (uint32_t)(resource - r->dynamic_models);
+    }
+
+    NriBuffer *next = NULL;
+    if (good) next = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, gpu_instances, (size_t)count * sizeof(*gpu_instances), sizeof(*gpu_instances));
+    free(gpu_instances);
+    if (!next) return false;
+
+    if (r->dynamic_instance_buffer && !track_buffer(r, r->dynamic_instance_buffer)) {
+        (void)upload_drain(r);
+        release_buffer(r, next);
+        return false;
+    }
+
+    r->dynamic_instance_buffer = next;
+    r->dynamic_instance_buffer_count = count;
+    r->dynamic_instance_uploaded_generation = generation;
+    return true;
+}
+
+void gpu_dynamic_deinit(RENDERER *r) {
+    if (!r) return;
+    (void)upload_drain(r);
+    for (uint32_t i = 0; i < r->dynamic_model_count; ++i) dynamic_model_release(r, &r->dynamic_models[i]);
+    free(r->dynamic_models);
+    r->dynamic_models = NULL;
+    r->dynamic_model_count = 0u;
+    r->dynamic_model_capacity = 0u;
+    release_buffer(r, r->dynamic_bvh_node_buffer);
+    release_buffer(r, r->dynamic_bvh_triangle_buffer);
+    r->dynamic_bvh_node_buffer = NULL;
+    r->dynamic_bvh_triangle_buffer = NULL;
+    r->dynamic_bvh_node_count = 0u;
+    r->dynamic_bvh_triangle_count = 0u;
+    release_buffer(r, r->dynamic_instance_buffer);
+    r->dynamic_instance_buffer = NULL;
+    r->dynamic_instance_buffer_count = 0u;
+    r->dynamic_instance_uploaded_generation = 0u;
 }
 
 static NriTexture *create_lightmap_texture(RENDERER *r, Uint32 width, Uint32 height) {
@@ -4648,6 +4951,59 @@ bool r_init(RENDERER *r, const char *title, int width, int height) {
     return true;
 }
 
+
+static void matrix_set_identity(float out[16]) {
+    memset(out, 0, 16u * sizeof(*out));
+    out[0] = out[5] = out[10] = out[15] = 1.0f;
+}
+
+static MATERIAL_UNIFORMS surface_material_uniforms(RENDERER *r, const RENDER_MATERIAL *material, const RENDER_FRAME *frame) {
+    return (MATERIAL_UNIFORMS){
+        .base_color_factor = {material->data.base_color[0], material->data.base_color[1], material->data.base_color[2], material->data.base_color[3]},
+        .emissive_metallic = {material->data.emissive[0], material->data.emissive[1], material->data.emissive[2], material->data.metallic},
+        .roughness_normal_ao_sun = {material->data.roughness, material->data.normal_scale, material->data.occlusion_strength, frame->sun.intensity},
+        .sun_direction = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, 0.0f},
+        .sun_color = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, 1.0f},
+        .camera_position = {frame->eye.x, frame->eye.y, frame->eye.z, r->debug_view == 1u ? 2.0f : (r->has_bake ? 1.0f : 0.0f)},
+        .probe_origin_spacing = {r->volume_probes.origin.x, r->volume_probes.origin.y, r->volume_probes.origin.z, r->volume_probes.spacing},
+        .probe_dims = {r->volume_probes.count_x, r->volume_probes.count_y, r->volume_probes.count_z, 0u}
+    };
+}
+
+static bool draw_dynamic_surfaces(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame, const CAMERA_UNIFORMS *base_camera) {
+    const uint32_t count = dynamic_instance_count(r);
+    if (!count) return true;
+    NriBuffer *probes = r->volume_probe_buffer ? r->volume_probe_buffer : r->default_probe_buffer;
+    if (!probes) return false;
+
+    for (uint32_t instance_index = 0; instance_index < count; ++instance_index) {
+        DYNAMIC_INSTANCE_DATA instance = {0};
+        if (!dynamic_instance_data(r, instance_index, &instance)) return false;
+        DYNAMIC_MODEL_RESOURCE *resource = dynamic_model_find(r, instance.model);
+        if (!resource || !resource->vertex_buffer) return false;
+
+        const NriVertexBufferDesc vertex = {.buffer = resource->vertex_buffer, .offset = 0u, .stride = sizeof(RENDER_VERTEX)};
+        r->core.CmdSetVertexBuffers(cmd, 0, &vertex, 1);
+
+        CAMERA_UNIFORMS camera = *base_camera;
+        memcpy(camera.model, instance.world, sizeof(camera.model));
+        memcpy(camera.normal_model, instance.normal_world, sizeof(camera.normal_model));
+        camera.object_dynamic = 1u;
+        if (!bind_camera_resources(r, cmd, &camera, sizeof(camera))) return false;
+
+        for (uint32_t draw_index = 0; draw_index < resource->draw_count; ++draw_index) {
+            const DRAW_RANGE *draw = &resource->draws[draw_index];
+            if (draw->material >= resource->material_count) return false;
+            const RENDER_MATERIAL *material_resource = &resource->materials[draw->material];
+            const MATERIAL_UNIFORMS material = surface_material_uniforms(r, material_resource, frame);
+            if (!bind_surface_resources(r, cmd, material_resource, r->lightmap_texture, r->lightmap_direct, probes, r->material_sampler, r->lightmap_sampler, &material, sizeof(material)))
+                return false;
+            r->core.CmdDraw(cmd, &(NriDrawDesc){.vertexNum = draw->count, .instanceNum = 1u, .baseVertex = draw->first, .baseInstance = instance_index});
+        }
+    }
+    return true;
+}
+
 bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     if (!r || !frame || !r->device || !r->solid_pipeline || !r->sky_pipeline || !r->vertex_buffer || !r->lightmap_texture || !r->lightmap_direct || !r->lightmap_sampler)
         return false;
@@ -4684,11 +5040,15 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     NriCommandBuffer *cmd = NULL;
 
     if (!begin_frame_commands(r, &queued_frame, &cmd)) goto failed_frame;
+    if (!gpu_dynamic_prepare_instances(r)) goto failed_frame;
 
     CAMERA_UNIFORMS camera = {0};
 
     memcpy(camera.mvp, frame->mvp, sizeof(camera.mvp));
     memcpy(camera.view, frame->view, sizeof(camera.view));
+    matrix_set_identity(camera.model);
+    matrix_set_identity(camera.normal_model);
+    camera.object_dynamic = 0u;
 
     const SKY_UNIFORMS sky = {
         .camera_right =
@@ -4728,16 +5088,10 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
         const DRAW_RANGE *draw = &r->draws[i];
         const RENDER_MATERIAL *m = &r->materials[draw->material];
 
-        const MATERIAL_UNIFORMS material = {
-            .base_color_factor = {m->data.base_color[0], m->data.base_color[1], m->data.base_color[2], m->data.base_color[3]},
-            .emissive_metallic = {m->data.emissive[0], m->data.emissive[1], m->data.emissive[2], m->data.metallic},
-            .roughness_normal_ao_sun = {m->data.roughness, m->data.normal_scale, m->data.occlusion_strength, frame->sun.intensity},
-            .sun_direction = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, 0},
-            .sun_color = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, 1},
-            .camera_position = {frame->eye.x, frame->eye.y, frame->eye.z, r->debug_view == 1u ? 2.0f : (r->has_bake ? 1.0f : 0.0f)}
-        };
+        const MATERIAL_UNIFORMS material = surface_material_uniforms(r, m, frame);
+        NriBuffer *surface_probes = r->volume_probe_buffer ? r->volume_probe_buffer : r->default_probe_buffer;
 
-        if (!bind_surface_resources(r, cmd, m, r->lightmap_texture, r->lightmap_direct, r->material_sampler, r->lightmap_sampler, &material, sizeof(material)))
+        if (!bind_surface_resources(r, cmd, m, r->lightmap_texture, r->lightmap_direct, surface_probes, r->material_sampler, r->lightmap_sampler, &material, sizeof(material)))
             goto failed_frame;
 
         r->core.CmdDraw(cmd, &(NriDrawDesc){
@@ -4748,7 +5102,11 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
         });
     }
 
+    if (!draw_dynamic_surfaces(r, cmd, frame, &camera)) goto failed_frame;
+
     if (r->show_debug && r->debug_vertex_count) {
+        const NriVertexBufferDesc static_vertex = {.buffer = r->vertex_buffer, .offset = 0u, .stride = sizeof(RENDER_VERTEX)};
+        r->core.CmdSetVertexBuffers(cmd, 0, &static_vertex, 1);
         r->core.CmdSetPipeline(cmd, r->line_pipeline);
 
         if (!bind_line_resources(r, cmd, camera.mvp, sizeof(camera.mvp))) goto failed_frame;
@@ -4842,6 +5200,7 @@ void bake_worker_deinit(RENDERER *r) {
     if (r->device) {
         if (r->graphics_queue) r->core.QueueWaitIdle(r->graphics_queue);
 
+        gpu_dynamic_deinit(r);
         destroy_upload_context(r);
         destroy_work_contexts(r);
         clear_temporary(r);
@@ -4850,6 +5209,8 @@ void bake_worker_deinit(RENDERER *r) {
         release_bake_resources(r);
         destroy_gpu_timestamps(r);
         release_buffer(r, r->volume_probe_buffer);
+        release_buffer(r, r->default_probe_buffer);
+        r->default_probe_buffer = NULL;
         release_buffer(r, r->beam_buffer);
         release_texture(r, r->lightmap_texture);
         release_texture(r, r->lightmap_direct);
@@ -4883,6 +5244,8 @@ void r_deinit(RENDERER *r) {
     if (r->device) {
         if (r->graphics_queue) r->core.QueueWaitIdle(r->graphics_queue);
 
+        gpu_dynamic_deinit(r);
+
         destroy_upload_context(r);
         destroy_work_contexts(r);
         clear_temporary(r);
@@ -4908,6 +5271,7 @@ void r_deinit(RENDERER *r) {
         release_buffer(r, r->vertex_buffer);
         release_bake_resources(r);
         release_buffer(r, r->volume_probe_buffer);
+        release_buffer(r, r->default_probe_buffer);
         release_buffer(r, r->beam_buffer);
         release_texture(r, r->depth_texture);
         release_texture(r, r->lightmap_texture);

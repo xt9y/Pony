@@ -106,6 +106,7 @@ static void compile_nri_shaders(void) {
         {"shaders/compute.hlsl", "grade_cs", "BUILD_GRADE_CS", NULL, "compute", 0},
         {"shaders/vision_compute.hlsl", "volume_cs", "BUILD_VISION_VOLUME_CS", NULL, "compute", 0},
         {"shaders/vision_compute.hlsl", "volume_compose_cs", "BUILD_VISION_COMPOSE_CS", NULL, "compute", 0},
+        {"shaders/dynamic.hlsl", "dynamic_trace_cs", "BUILD_DYNAMIC_TRACE_CS", NULL, "compute", 0},
         {"shaders/lightmap_queue.hlsl", "lightmap_queue_reset_cs", "BUILD_LIGHTMAP_QUEUE_RESET_CS", NULL, "compute", 0},
         {"shaders/lightmap_queue.hlsl", "lightmap_queue_args_cs", "BUILD_LIGHTMAP_QUEUE_ARGS_CS", NULL, "compute", 0},
         {"shaders/probe_wavefront.hlsl", "probe_prepare_cs", "BUILD_PROBE_PREP_CS", NULL, "compute", 0},

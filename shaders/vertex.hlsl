@@ -11,6 +11,10 @@ GPU_BIND_B(0, 1) cbuffer Camera : register(b0, space1)
 {
     float4x4 mvp;
     float4x4 view;
+    float4x4 model;
+    float4x4 normal_model;
+    uint object_dynamic;
+    uint3 _camera_pad;
 };
 
 struct SurfaceInput
@@ -35,16 +39,17 @@ struct SurfaceOutput
 
 SurfaceOutput surface_vs(SurfaceInput input)
 {
-    SurfaceOutput output; 
-    float4 world = float4(input.position, 1.0f);
+    SurfaceOutput output;
+    float4 world = mul(model, float4(input.position, 1.0f));
+    float3 world_normal = normalize(mul((float3x3)normal_model, input.normal));
     float4 view_position = mul(view, world);
     output.position = mul(mvp, world);
-    output.world_position = input.position;
-    output.world_normal = normalize(input.normal);
+    output.world_position = world.xyz;
+    output.world_normal = world_normal;
     output.uv = input.uv;
     output.lightmap_uv = input.lightmap_uv;
     output.back_lightmap_uv = input.lightmap_uv + float2(0.0f, 0.5f);
-    output.view_normal = normalize(mul((float3x3)view, input.normal));
+    output.view_normal = normalize(mul((float3x3)view, world_normal));
     // output.view_depth = max(-view_position.z, 0.0f);
     // output.view_depth = max(dot(input.position - camera_eye.xyz, camera_forward.xyz), 0.0f);
     // output.view_depth = dot(input.position - camera_eye.xyz, camera_forward.xyz);

@@ -88,6 +88,7 @@ typedef struct UPLOAD_CONTEXT UPLOAD_CONTEXT;
 typedef struct TEXTURE_STATE TEXTURE_STATE;
 typedef struct PROBE_WAVEFRONT_SCRATCH PROBE_WAVEFRONT_SCRATCH;
 typedef struct DYNAMIC_STATE DYNAMIC_STATE;
+typedef struct DYNAMIC_MODEL_RESOURCE DYNAMIC_MODEL_RESOURCE;
 
 typedef struct DYNAMIC_GI_JOB {
     uint32_t sample_index;
@@ -100,6 +101,24 @@ typedef struct DYNAMIC_CELL_UPDATE {
     uint32_t cell_index;
     uint32_t generation;
 } DYNAMIC_CELL_UPDATE;
+
+typedef struct DYNAMIC_INSTANCE_DATA {
+    OBJECT *object;
+    struct MODEL *model;
+    AABB world_bounds;
+    float world[16];
+    float inverse_world[16];
+    float normal_world[16];
+} DYNAMIC_INSTANCE_DATA;
+
+typedef struct DYNAMIC_GPU_INSTANCE {
+    float world[16];
+    float inverse_world[16];
+    float normal_world[16];
+    float bounds_min[4];
+    float bounds_max[4];
+    uint32_t indices[4]; /* node offset, triangle offset, model resource, padding */
+} DYNAMIC_GPU_INSTANCE;
 
 struct RENDERER {
     SDL_Window *window;
@@ -136,6 +155,16 @@ struct RENDERER {
     PROBE_WAVEFRONT_SCRATCH *probe_scratch;
     DYNAMIC_STATE *dynamic;
     DYNAMIC_LIGHTING dynamic_lighting;
+    DYNAMIC_MODEL_RESOURCE *dynamic_models;
+    uint32_t dynamic_model_count;
+    uint32_t dynamic_model_capacity;
+    NriBuffer *dynamic_bvh_node_buffer;
+    NriBuffer *dynamic_bvh_triangle_buffer;
+    uint32_t dynamic_bvh_node_count;
+    uint32_t dynamic_bvh_triangle_count;
+    NriBuffer *dynamic_instance_buffer;
+    uint32_t dynamic_instance_buffer_count;
+    uint32_t dynamic_instance_uploaded_generation;
 
     uint32_t swapchain_width, swapchain_height, current_swap_index;
 
@@ -233,6 +262,7 @@ struct RENDERER {
     const char *bake_stage;
     PROBE_GRID volume_probes;
     NriBuffer *volume_probe_buffer;
+    NriBuffer *default_probe_buffer;
     NriBuffer *beam_buffer;
     BEAM_GRID beams;
 
@@ -273,7 +303,14 @@ bool bake_worker_init(RENDERER *r);
 void bake_worker_deinit(RENDERER *r);
 void dynamic_deinit(RENDERER *r);
 bool dynamic_sync(RENDERER *r);
+uint32_t dynamic_instance_generation(const RENDERER *r);
+uint32_t dynamic_instance_count(const RENDERER *r);
+bool dynamic_instance_data(RENDERER *r, uint32_t index, DYNAMIC_INSTANCE_DATA *out);
 uint32_t dynamic_take_gi_jobs(RENDERER *r, DYNAMIC_GI_JOB *out, uint32_t capacity);
 uint32_t dynamic_take_cell_updates(RENDERER *r, DYNAMIC_CELL_UPDATE *out, uint32_t capacity);
+bool gpu_dynamic_register_model(RENDERER *r, struct MODEL *model);
+void gpu_dynamic_unregister_model(RENDERER *r, struct MODEL *model);
+bool gpu_dynamic_prepare_instances(RENDERER *r);
+void gpu_dynamic_deinit(RENDERER *r);
 
 #endif
