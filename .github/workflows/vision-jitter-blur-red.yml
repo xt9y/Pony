@@ -1,0 +1,21 @@
+name: vision-jitter-blur-red
+on:
+  push:
+    branches: [volumetrics-jitter-blur-work]
+jobs:
+  red:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Confirm regression test fails before implementation
+        shell: bash
+        run: |
+          set +e
+          python3 .github/vision_jitter_blur_test.py
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "Regression test unexpectedly passed before implementation"
+            exit 1
+          fi
+          echo "RED confirmed: jitter/blur implementation is missing"
