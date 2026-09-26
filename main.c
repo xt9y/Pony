@@ -74,8 +74,11 @@ int main(int argc, char **argv) {
     OBJECT scene_object = {
         .state = STATIC,
         .type = MODEL,
-        .transform = {.scale = {1.0f, 1.0f, 1.0f}},
-        .previous_transform = {.scale = {1.0f, 1.0f, 1.0f}},
+        .transform = {
+            .position = {0.0f, 0.0f, 0.0f},
+            .rotation = {0.0f, 0.0f, 0.0f},
+            .scale = {1.0f, 1.0f, 1.0f}
+        },
         .data = &scene_model
     };
     struct MODEL *scene_data = scene_object.data;
@@ -92,8 +95,11 @@ int main(int argc, char **argv) {
     OBJECT cube_object = {
         .state = DYNAMIC,
         .type = MODEL,
-        .transform = {.scale = {1.0f, 1.0f, 1.0f}},
-        .previous_transform = {.scale = {1.0f, 1.0f, 1.0f}},
+        .transform = {
+            .position = {0.0f, 0.0f, 0.0f},
+            .rotation = {0.0f, 0.0f, 0.0f},
+            .scale = {10.0f, 10.0f, 10.0f}
+        },
         .data = &cube_model
     };
     bool cube_registered = false;
@@ -154,8 +160,11 @@ int main(int argc, char **argv) {
     OBJECT light_object = {
         .state = STATIC,
         .type = LIGHT,
-        .transform = {.scale = {1.0f, 1.0f, 1.0f}},
-        .previous_transform = {.scale = {1.0f, 1.0f, 1.0f}},
+        .transform = {
+            .position = {0.0f, 0.0f, 0.0f},
+            .rotation = {0.0f, 0.0f, 0.0f},
+            .scale = {1.0f, 1.0f, 1.0f}
+        },
         .data = &sun
     };
     struct LIGHT *light_data = light_object.data;

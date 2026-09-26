@@ -249,7 +249,6 @@ typedef struct OBJECT {
     OBJECT_STATE state;
     OBJECT_TYPE type;
     TRANSFORM transform;
-    TRANSFORM previous_transform;
     void *data;
 } OBJECT;
 

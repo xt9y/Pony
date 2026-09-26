@@ -16,6 +16,7 @@ typedef struct DYNAMIC_CELL_JOB {
 
 typedef struct DYNAMIC_OBJECT_ENTRY {
     OBJECT *object;
+    TRANSFORM transform;
     AABB bounds;
     float world[16], inverse[16], normal[16];
 } DYNAMIC_OBJECT_ENTRY;
@@ -148,6 +149,7 @@ static bool fill_entry(DYNAMIC_OBJECT_ENTRY *entry, OBJECT *object) {
     struct MODEL *model = object->data;
     if (!model->geometry || !model->visual) return false;
     entry->object = object;
+    entry->transform = object->transform;
     matrices(&object->transform, entry->world, entry->inverse, entry->normal);
     entry->bounds = transform_bounds(model->geometry->bounds, entry->world);
     if (!finite3(entry->bounds.min) || !finite3(entry->bounds.max)) return false;
@@ -332,7 +334,6 @@ bool r_add_dynamic_object(RENDERER *r, OBJECT *object) {
     }
 
     s->objects[s->object_count++] = entry;
-    object->previous_transform = object->transform;
     AABB expanded = swept(entry.bounds, entry.bounds, s->settings.gi_radius);
     if (!invalidate(s, expanded)) {
         s->object_count--;
@@ -366,14 +367,13 @@ bool dynamic_sync(RENDERER *r) {
         DYNAMIC_OBJECT_ENTRY *entry = &s->objects[i];
         OBJECT *object = entry->object;
         if (!object || !transform_valid(&object->transform)) return false;
-        if (transform_equal(&object->transform, &object->previous_transform)) continue;
+        if (transform_equal(&object->transform, &entry->transform)) continue;
 
         DYNAMIC_OBJECT_ENTRY current = {0};
         if (!fill_entry(&current, object) ||
             !invalidate(s, swept(entry->bounds, current.bounds, s->settings.gi_radius)))
             return false;
         *entry = current;
-        object->previous_transform = object->transform;
         s->object_generation++;
     }
     return true;
