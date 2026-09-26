@@ -21,8 +21,11 @@ GPU_BIND_T(5, 2) Texture2D<float4> IndirectLightmap : register(t5, space2);
 GPU_BIND_S(5, 2) SamplerState IndirectLightmapSampler : register(s5, space2);
 GPU_BIND_T(6, 2) Texture2D<float4> DirectSunLightmap : register(t6, space2);
 GPU_BIND_S(6, 2) SamplerState DirectSunLightmapSampler : register(s6, space2);
+GPU_BIND_T(7, 2) Texture2D<float> DynamicShadow : register(t7, space2);
+GPU_BIND_S(7, 2) SamplerState DynamicShadowSampler : register(s7, space2);
 struct SurfaceProbe { float4 position; float4 coefficient[9]; };
-GPU_BIND_T(7, 2) StructuredBuffer<SurfaceProbe> SurfaceProbes : register(t7, space2);
+GPU_BIND_T(8, 2) StructuredBuffer<SurfaceProbe> SurfaceProbes : register(t8, space2);
+GPU_BIND_T(9, 2) StructuredBuffer<float> SurfaceBeams : register(t9, space2);
 
 GPU_BIND_B(0, 1) cbuffer Camera : register(b0, space1)
 {
@@ -44,6 +47,14 @@ GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3)
     float4 camera_position;
     float4 probe_origin_spacing;
     uint4 probe_dims;
+    float4 beam_origin;
+    float4 beam_step;
+    uint4 beam_dims;
+    float4 shadow_u_min;
+    float4 shadow_v_min;
+    float4 shadow_sun_max;
+    float4 shadow_extent_bias;
+    float4 shadow_texel_enabled;
     // float4 camera_forward; // Fragment depth diagnostic.
 };
 
@@ -133,6 +144,56 @@ float3 surface_probe_irradiance(float3 position, float3 normal)
     }
 
     return weight_sum > 0.0f ? sum / weight_sum : float3(0.12f, 0.12f, 0.12f);
+}
+
+float static_beam_visibility(float3 position)
+{
+    if (beam_dims.w == 0u || beam_dims.x == 0u || beam_dims.y == 0u || beam_dims.z == 0u || beam_step.x <= 0.0f || beam_step.y <= 0.0f)
+        return 1.0f;
+
+    float3 q = float3(dot(position, shadow_u_min.xyz), dot(position, shadow_v_min.xyz), dot(position, shadow_sun_max.xyz));
+    float2 coord = (q.xy - beam_origin.xy) / beam_step.xy - 0.5f;
+    int2 base = int2(floor(coord));
+    float2 fraction = frac(coord);
+    float visibility = 0.0f;
+    uint blocker_offset = beam_dims.x * beam_dims.y * beam_dims.z;
+    float guard = max(0.002f, min(0.02f, min(beam_step.x, beam_step.y) * 0.01f));
+
+    [unroll] for (uint y = 0u; y < 2u; ++y)
+    [unroll] for (uint x = 0u; x < 2u; ++x)
+    {
+        int2 cell = base + int2(x, y);
+        float2 axis_weight = lerp(1.0f - fraction, fraction, float2(x, y));
+        float weight = axis_weight.x * axis_weight.y;
+        float sample_visibility = 1.0f;
+        if (all(cell >= 0) && cell.x < (int)beam_dims.x && cell.y < (int)beam_dims.y) {
+            float blocker = SurfaceBeams[blocker_offset + (uint)cell.x + beam_dims.x * (uint)cell.y];
+            if (blocker > -1.0e20f) sample_visibility = q.z >= blocker - guard ? 1.0f : 0.0f;
+        }
+        visibility += weight * sample_visibility;
+    }
+    return saturate(visibility);
+}
+
+float dynamic_shadow_visibility(float3 position)
+{
+    if (shadow_texel_enabled.z < 0.5f || any(shadow_extent_bias.xyz <= 0.0f)) return 1.0f;
+    float sx = dot(position, shadow_u_min.xyz);
+    float sy = dot(position, shadow_v_min.xyz);
+    float sz = dot(position, shadow_sun_max.xyz);
+    float2 uv = (float2(sx, sy) - float2(shadow_u_min.w, shadow_v_min.w)) / shadow_extent_bias.xy;
+    float depth = (shadow_sun_max.w - sz) / shadow_extent_bias.z;
+    if (any(uv < 0.0f) || any(uv > 1.0f) || depth < 0.0f || depth > 1.0f) return 1.0f;
+
+    float visibility = 0.0f;
+    [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x)
+    {
+        float2 sample_uv = saturate(uv + float2((float)x, (float)y) * shadow_texel_enabled.xy);
+        float blocker = DynamicShadow.SampleLevel(DynamicShadowSampler, sample_uv, 0.0f);
+        visibility += depth <= blocker + shadow_extent_bias.w ? 1.0f : 0.0f;
+    }
+    return visibility / 9.0f;
 }
 
 float3 mapped_normal(SurfaceInput input, float scale)
@@ -249,12 +310,15 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace)
     float3 specular = d * g * f / max(4.0f * n_dot_v * max(n_dot_l, 0.001f), 1.0e-4f);
 
     float2 baked_uv = front_face ? input.lightmap_uv : input.back_lightmap_uv;
+    float static_visibility = static_beam_visibility(input.world_position);
+    float moving_visibility = dynamic_shadow_visibility(input.world_position);
+    float sun_visibility = static_visibility * moving_visibility;
     float3 indirect = object_dynamic != 0u
         ? surface_probe_irradiance(input.world_position, n) / PI
         : (camera_position.w > 0.5f ? max(IndirectLightmap.Sample(IndirectLightmapSampler, baked_uv).rgb, 0.0f) : float3(0.12f, 0.12f, 0.12f));
     float3 direct_sun = object_dynamic != 0u
-        ? float3(0.0f, 0.0f, 0.0f)
-        : (camera_position.w > 0.5f ? max(DirectSunLightmap.Sample(DirectSunLightmapSampler, baked_uv).rgb, 0.0f) : float3(0.0f, 0.0f, 0.0f));
+        ? sun_color.rgb * (roughness_normal_ao_sun.w * n_dot_l * sun_visibility)
+        : (camera_position.w > 0.5f ? max(DirectSunLightmap.Sample(DirectSunLightmapSampler, baked_uv).rgb, 0.0f) * moving_visibility : float3(0.0f, 0.0f, 0.0f));
     float3 baked = indirect + direct_sun;
     if (camera_position.w > 1.5f) {
         output.hdr=float4(baked,1.0f);
@@ -263,9 +327,6 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace)
         return output;
     }
     float baked_luma = dot(baked, float3(0.2126f, 0.7152f, 0.0722f));
-    float sun_visibility = object_dynamic != 0u
-        ? 1.0f
-        : (camera_position.w > 0.5f ? saturate(baked_luma * 0.55f) : 1.0f);
     float3 direct_specular = specular * sun_color.rgb * roughness_normal_ao_sun.w *
                              n_dot_l * sun_visibility;
     // output.hdr = float4(direct_specular, 1.0f);

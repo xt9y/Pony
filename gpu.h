@@ -165,6 +165,10 @@ struct RENDERER {
     NriBuffer *dynamic_instance_buffer;
     uint32_t dynamic_instance_buffer_count;
     uint32_t dynamic_instance_uploaded_generation;
+    NriTexture *dynamic_shadow_texture;
+    NriDescriptor *dynamic_shadow_sampler;
+    uint32_t dynamic_shadow_size;
+    bool dynamic_shadow_ready;
 
     uint32_t swapchain_width, swapchain_height, current_swap_index;
 
@@ -182,6 +186,7 @@ struct RENDERER {
     uint32_t texture_state_num, texture_state_cap;
 
     NriPipelineLayout *surface_layout;
+    NriPipelineLayout *dynamic_shadow_layout;
     NriPipelineLayout *line_layout;
     NriPipelineLayout *sky_layout;
     NriPipelineLayout *bake_layout;
@@ -199,6 +204,7 @@ struct RENDERER {
 
     NriPipeline *sky_pipeline;
     NriPipeline *solid_pipeline;
+    NriPipeline *dynamic_shadow_pipeline;
     NriPipeline *line_pipeline;
     NriPipeline *bake_pipeline;
     NriPipeline *lightmap_queue_reset_pipeline;
@@ -264,6 +270,7 @@ struct RENDERER {
     NriBuffer *volume_probe_buffer;
     NriBuffer *default_probe_buffer;
     NriBuffer *beam_buffer;
+    NriBuffer *default_beam_buffer;
     BEAM_GRID beams;
 
     FX_STATE fx;

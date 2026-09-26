@@ -145,4 +145,30 @@ void dynamic_trace_cs(uint3 id : SV_DispatchThreadID)
     DynamicTraceHit hit;
     DynamicTraceOutput[0] = dynamic_trace_closest(ray, hit) ? asuint(hit.t) : DYNAMIC_INVALID_NODE;
 }
+#elif defined(BUILD_DYNAMIC_SHADOW_VS)
+GPU_BIND_B(0, 1) cbuffer DynamicShadowData : register(b0, space1)
+{
+    float4x4 shadow_model;
+    float4 shadow_u_min;
+    float4 shadow_v_min;
+    float4 shadow_sun_max;
+    float4 shadow_extent;
+};
+
+struct DynamicShadowInput
+{
+    float3 position : TEXCOORD0;
+};
+
+float4 dynamic_shadow_vs(DynamicShadowInput input) : SV_Position
+{
+    float3 world = mul(shadow_model, float4(input.position, 1.0f)).xyz;
+    float sx = dot(world, shadow_u_min.xyz);
+    float sy = dot(world, shadow_v_min.xyz);
+    float sz = dot(world, shadow_sun_max.xyz);
+    float2 uv = (float2(sx, sy) - float2(shadow_u_min.w, shadow_v_min.w)) /
+                max(shadow_extent.xy, float2(1.0e-6f, 1.0e-6f));
+    float depth = (shadow_sun_max.w - sz) / max(shadow_extent.z, 1.0e-6f);
+    return float4(uv * 2.0f - 1.0f, saturate(depth), 1.0f);
+}
 #endif

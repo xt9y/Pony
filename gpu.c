@@ -74,7 +74,23 @@ typedef struct MATERIAL_UNIFORMS {
     float camera_position[4];
     float probe_origin_spacing[4];
     Uint32 probe_dims[4];
+    float beam_origin[4];
+    float beam_step[4];
+    Uint32 beam_dims[4];
+    float shadow_u_min[4];
+    float shadow_v_min[4];
+    float shadow_sun_max[4];
+    float shadow_extent_bias[4];
+    float shadow_texel_enabled[4];
 } MATERIAL_UNIFORMS;
+
+typedef struct DYNAMIC_SHADOW_UNIFORMS {
+    float model[16];
+    float shadow_u_min[4];
+    float shadow_v_min[4];
+    float shadow_sun_max[4];
+    float shadow_extent[4];
+} DYNAMIC_SHADOW_UNIFORMS;
 
 typedef struct SSAO_UNIFORMS {
     Uint32 width, height, ao_width, ao_height;
@@ -477,6 +493,39 @@ static NriPipeline *make_surface_pipeline(RENDERER *r, NriCoreInterface *core, N
     return pipeline;
 }
 
+static NriPipeline *make_dynamic_shadow_pipeline(RENDERER *r, NriPipelineLayout *layout, const NriShaderDesc *vs) {
+    const NriVertexStreamDesc vb = {
+        .bindingSlot = 0,
+        .stepRate = NriVertexStreamStepRate_PER_VERTEX,
+        .stride = (uint16_t)sizeof(RENDER_VERTEX)
+    };
+    const NriVertexAttributeDesc position = {
+        .d3d = {.semanticName = "TEXCOORD", .semanticIndex = 0},
+        .vk = {.location = 0},
+        .offset = (uint32_t)offsetof(RENDER_VERTEX, x),
+        .format = NriFormat_RGB32_SFLOAT,
+        .streamIndex = 0
+    };
+    const NriVertexInputDesc vertex_input = {.attributes = &position, .attributeNum = 1, .streams = &vb, .streamNum = 1};
+    const NriMultisampleDesc multisample = {.sampleMask = NRI_ALL, .sampleNum = 1};
+    const NriGraphicsPipelineDesc desc = {
+        .pipelineLayout = layout,
+        .vertexInput = &vertex_input,
+        .inputAssembly = {.topology = NriTopology_TRIANGLE_LIST},
+        .rasterization = {.fillMode = NriFillMode_SOLID, .cullMode = NriCullMode_NONE, .frontCounterClockwise = true, .depthClamp = false},
+        .multisample = &multisample,
+        .outputMerger = {
+            .depth = {.compareOp = NriCompareOp_LESS, .write = true},
+            .depthStencilFormat = r->depth_format
+        },
+        .shaders = vs,
+        .shaderNum = 1,
+        .cache = r->pipeline_cache
+    };
+    NriPipeline *pipeline = NULL;
+    return r->core.CreateGraphicsPipeline(r->device, &desc, &pipeline) == NriResult_SUCCESS ? pipeline : NULL;
+}
+
 static void clear_temporary(RENDERER *r);
 static bool begin_work_commands(RENDERER *r, NriCommandAllocator **allocator, NriCommandBuffer **command_buffer);
 static bool submit_work_commands(RENDERER *r, NriCommandAllocator *allocator, NriCommandBuffer *command_buffer, bool wait);
@@ -501,7 +550,7 @@ static void abort_commands(RENDERER *r, NriCommandAllocator *allocator, NriComma
 
 /* Descriptor sets match the HLSL register spaces in shaders/. */
 static bool create_pipeline_layout(RENDERER *r, NriPipelineLayout **out, const NriDescriptorType *types[4], const uint8_t counts[4], NriStageBits stages) {
-    NriDescriptorRangeDesc ranges[4][16] = {0};
+    NriDescriptorRangeDesc ranges[4][24] = {0};
     NriDescriptorSetDesc sets[4] = {0};
 
     for (uint32_t set = 0; set < 4; ++set) {
@@ -556,6 +605,7 @@ static bool create_surface_layout(RENDERER *r) {
         NriDescriptorType_TEXTURE,
         NriDescriptorType_TEXTURE,
         NriDescriptorType_TEXTURE,
+        NriDescriptorType_TEXTURE,
         NriDescriptorType_SAMPLER,
         NriDescriptorType_SAMPLER,
         NriDescriptorType_SAMPLER,
@@ -563,15 +613,25 @@ static bool create_surface_layout(RENDERER *r) {
         NriDescriptorType_SAMPLER,
         NriDescriptorType_SAMPLER,
         NriDescriptorType_SAMPLER,
+        NriDescriptorType_SAMPLER,
+        NriDescriptorType_STRUCTURED_BUFFER,
         NriDescriptorType_STRUCTURED_BUFFER
     };
 
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
 
     const NriDescriptorType *sets[4] = {NULL, camera, material, uniform};
-    const uint8_t counts[4] = {0, 1, 15, 1};
+    const uint8_t counts[4] = {0, 1, 18, 1};
 
     return create_pipeline_layout(r, &r->surface_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
+}
+
+static bool create_dynamic_shadow_layout(RENDERER *r) {
+    static const NriDescriptorType object[] = {NriDescriptorType_CONSTANT_BUFFER};
+    const NriDescriptorType *sets[4] = {NULL, object, NULL, NULL};
+    const uint8_t counts[4] = {0, 1, 0, 0};
+
+    return create_pipeline_layout(r, &r->dynamic_shadow_layout, sets, counts, NriStageBits_VERTEX_SHADER);
 }
 
 static bool create_line_layout(RENDERER *r) {
@@ -1399,6 +1459,7 @@ static bool bind_surface_resources(
         create_texture_view(r, material->emissive, NriTextureView_TEXTURE),
         create_texture_view(r, lightmap, NriTextureView_TEXTURE),
         create_texture_view(r, direct_lightmap, NriTextureView_TEXTURE),
+        create_texture_view(r, r->dynamic_shadow_ready && r->dynamic_shadow_texture ? r->dynamic_shadow_texture : r->default_white, NriTextureView_TEXTURE),
         material_sampler,
         material_sampler,
         material_sampler,
@@ -1406,10 +1467,12 @@ static bool bind_surface_resources(
         material_sampler,
         lightmap_sampler,
         lightmap_sampler,
-        create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE))
+        r->dynamic_shadow_sampler ? r->dynamic_shadow_sampler : lightmap_sampler,
+        create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
+        create_buffer_view(r, r->beam_buffer ? r->beam_buffer : r->default_beam_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(float))
     };
 
-    return bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 15) &&
+    return bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 18) &&
            bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
 }
 
@@ -1655,6 +1718,32 @@ static bool begin_scene_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTexture
     }, 1);
     r->core.CmdBeginRendering(cmd, &desc);
 
+    return true;
+}
+
+static bool begin_dynamic_shadow_rendering(RENDERER *r, NriCommandBuffer *cmd, uint32_t size) {
+    if (!r || !cmd || !r->dynamic_shadow_texture || !size) return false;
+    NriDescriptor *depth_view = create_texture_view(r, r->dynamic_shadow_texture, NriTextureView_DEPTH_STENCIL_ATTACHMENT);
+    if (!depth_view) return false;
+
+    const NriAccessLayoutStage depth_state = {
+        NriAccessBits_DEPTH_STENCIL_ATTACHMENT,
+        NriLayout_DEPTH_STENCIL_ATTACHMENT,
+        NriStageBits_DEPTH_STENCIL_ATTACHMENT
+    };
+    if (!texture_barrier(r, cmd, r->dynamic_shadow_texture, (NriAccessLayoutStage){0}, depth_state)) return false;
+
+    const NriRenderingDesc desc = {
+        .depth = {
+            .descriptor = depth_view,
+            .loadOp = NriLoadOp_CLEAR,
+            .storeOp = NriStoreOp_STORE,
+            .clearValue = {.depthStencil = {.depth = 1.0f}}
+        }
+    };
+    r->core.CmdSetViewports(cmd, &(NriViewport){.width = (float)size, .height = (float)size, .depthMax = 1.0f}, 1);
+    r->core.CmdSetScissors(cmd, &(NriRect){.width = (NriDim_t)size, .height = (NriDim_t)size}, 1);
+    r->core.CmdBeginRendering(cmd, &desc);
     return true;
 }
 
@@ -1953,6 +2042,27 @@ static NriTexture *create_texture(RENDERER *r, NriFormat format, NriTextureUsage
     }
 
     return result;
+}
+
+static bool ensure_dynamic_shadow_texture(RENDERER *r) {
+    if (!r || !r->device || !r->dynamic_lighting.shadow_map_size) return false;
+    const uint32_t size = r->dynamic_lighting.shadow_map_size;
+    if (r->dynamic_shadow_texture && r->dynamic_shadow_size == size) return true;
+
+    release_texture(r, r->dynamic_shadow_texture);
+    r->dynamic_shadow_texture = create_texture(
+        r,
+        r->depth_format,
+        NriTextureUsageBits_DEPTH_STENCIL_ATTACHMENT | NriTextureUsageBits_SHADER_RESOURCE,
+        size,
+        size
+    );
+    if (!r->dynamic_shadow_texture) {
+        r->dynamic_shadow_size = 0u;
+        return false;
+    }
+    r->dynamic_shadow_size = size;
+    return true;
 }
 
 static uint64_t upload_align(uint64_t value, uint64_t alignment) {
@@ -2451,6 +2561,7 @@ static void release_scene_resources(RENDERER *r) {
     release_texture(r, r->lightmap_texture);
     release_texture(r, r->lightmap_direct);
     release_buffer(r, r->default_probe_buffer);
+    release_buffer(r, r->default_beam_buffer);
 
     if (r->lightmap_sampler) r->core.DestroyDescriptor(r->lightmap_sampler);
 
@@ -2461,6 +2572,7 @@ static void release_scene_resources(RENDERER *r) {
     r->lightmap_texture = NULL;
     r->lightmap_direct = NULL;
     r->default_probe_buffer = NULL;
+    r->default_beam_buffer = NULL;
     r->lightmap_sampler = NULL;
 }
 
@@ -2506,9 +2618,11 @@ bool upload_scene(RENDERER *r, const GLTF_SCENE *visual) {
     r->lightmap_texture = pixel_texture(r, 0, 0, 0, 255);
     r->lightmap_direct = pixel_texture(r, 0, 0, 0, 255);
     const PROBE default_probe = {0};
+    const float default_beam = 1.0f;
     r->default_probe_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &default_probe, sizeof(default_probe), sizeof(default_probe));
+    r->default_beam_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &default_beam, sizeof(default_beam), sizeof(default_beam));
 
-    return r->lightmap_sampler && r->lightmap_texture && r->lightmap_direct && r->default_probe_buffer;
+    return r->lightmap_sampler && r->lightmap_texture && r->lightmap_direct && r->default_probe_buffer && r->default_beam_buffer;
 }
 
 
@@ -2784,6 +2898,10 @@ void gpu_dynamic_deinit(RENDERER *r) {
     r->dynamic_instance_buffer = NULL;
     r->dynamic_instance_buffer_count = 0u;
     r->dynamic_instance_uploaded_generation = 0u;
+    release_texture(r, r->dynamic_shadow_texture);
+    r->dynamic_shadow_texture = NULL;
+    r->dynamic_shadow_size = 0u;
+    r->dynamic_shadow_ready = false;
 }
 
 static NriTexture *create_lightmap_texture(RENDERER *r, Uint32 width, Uint32 height) {
@@ -4803,7 +4921,7 @@ static bool fx_apply(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *swap, floa
  * never learns about NRI descriptor sets/views.
  */
 static bool create_pipeline_layouts(RENDERER *r) {
-    return create_surface_layout(r) && create_line_layout(r) && create_sky_layout(r) && create_bake_layout(r) && create_lightmap_queue_layouts(r) && create_probe_layout(r) &&
+    return create_surface_layout(r) && create_dynamic_shadow_layout(r) && create_line_layout(r) && create_sky_layout(r) && create_bake_layout(r) && create_lightmap_queue_layouts(r) && create_probe_layout(r) &&
            create_ssao_layout(r) && create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) && create_volume_compose_layout(r) && create_compose_layout(r);
 }
 
@@ -4811,6 +4929,7 @@ static void destroy_pipeline_layouts(RENDERER *r) {
     if (!r) return;
 
     NriPipelineLayout **layouts[] = {&r->surface_layout,
+                                     &r->dynamic_shadow_layout,
                                      &r->line_layout,
                                      &r->sky_layout,
                                      &r->bake_layout,
@@ -4910,14 +5029,16 @@ bool r_init(RENDERER *r, const char *title, int width, int height) {
 
     NriShaderDesc surface_vs = compile_shader("shaders/vertex.hlsl", "surface_vs", "BUILD_SURFACE_VS", NriStageBits_VERTEX_SHADER);
     NriShaderDesc surface_ps = compile_shader("shaders/fragment.hlsl", "surface_fs", "BUILD_SURFACE_FS", NriStageBits_FRAGMENT_SHADER);
+    NriShaderDesc dynamic_shadow_vs = compile_shader("shaders/dynamic.hlsl", "dynamic_shadow_vs", "BUILD_DYNAMIC_SHADOW_VS", NriStageBits_VERTEX_SHADER);
     NriShaderDesc line_vs = compile_shader("shaders/vertex.hlsl", "wireframe_vs", "BUILD_WIREFRAME_VS", NriStageBits_VERTEX_SHADER);
     NriShaderDesc line_ps = compile_shader("shaders/fragment.hlsl", "wireframe_fs", "BUILD_WIREFRAME_FS", NriStageBits_FRAGMENT_SHADER);
     NriShaderDesc sky_vs = compile_shader("shaders/vertex.hlsl", "fullscreen_vs", "BUILD_FULLSCREEN_VS", NriStageBits_VERTEX_SHADER);
     NriShaderDesc sky_ps = compile_shader("shaders/fragment.hlsl", "sky_fs", "BUILD_SKY_FS", NriStageBits_FRAGMENT_SHADER);
 
-    if (!surface_vs.bytecode || !surface_ps.bytecode || !line_vs.bytecode || !line_ps.bytecode || !sky_vs.bytecode || !sky_ps.bytecode) {
+    if (!surface_vs.bytecode || !surface_ps.bytecode || !dynamic_shadow_vs.bytecode || !line_vs.bytecode || !line_ps.bytecode || !sky_vs.bytecode || !sky_ps.bytecode) {
         free_shader(&surface_vs);
         free_shader(&surface_ps);
+        free_shader(&dynamic_shadow_vs);
         free_shader(&line_vs);
         free_shader(&line_ps);
         free_shader(&sky_vs);
@@ -4928,17 +5049,21 @@ bool r_init(RENDERER *r, const char *title, int width, int height) {
     }
 
     r->solid_pipeline = make_surface_pipeline(r, &r->core, r->surface_layout, &surface_vs, &surface_ps);
+    r->dynamic_shadow_pipeline = make_dynamic_shadow_pipeline(r, r->dynamic_shadow_layout, &dynamic_shadow_vs);
     r->line_pipeline = make_line_pipeline(r, r->line_layout, &line_vs, &line_ps);
     r->sky_pipeline = make_sky_pipeline(r, r->sky_layout, &sky_vs, &sky_ps);
 
     free_shader(&surface_vs);
     free_shader(&surface_ps);
+    free_shader(&dynamic_shadow_vs);
     free_shader(&line_vs);
     free_shader(&line_ps);
     free_shader(&sky_vs);
     free_shader(&sky_ps);
 
-    if (!r->solid_pipeline || !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
+    r->dynamic_shadow_sampler = sampler(r, NriFilter_NEAREST, NriFilter_NEAREST, NriAddressMode_CLAMP_TO_EDGE);
+
+    if (!r->solid_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_shadow_sampler || !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
         r_deinit(r);
 
         return false;
@@ -4957,8 +5082,39 @@ static void matrix_set_identity(float out[16]) {
     out[0] = out[5] = out[10] = out[15] = 1.0f;
 }
 
+static bool dynamic_shadow_projection(
+    const RENDERER *r,
+    const RENDER_FRAME *frame,
+    float shadow_u_min[4],
+    float shadow_v_min[4],
+    float shadow_sun_max[4],
+    float shadow_extent_bias[4]
+) {
+    if (!r || !frame || !r->beams.width || !r->beams.height || !r->beams.depth || r->beams.step.x <= 0.0f || r->beams.step.y <= 0.0f || r->beams.step.z <= 0.0f)
+        return false;
+
+    const VEC3 sun = v3_normalize(frame->sun.direction);
+    VEC3 u = v3_normalize(v3_cross(v3(0.0f, 1.0f, 0.0f), sun));
+    if (v3_len_sq(u) < 0.5f) u = v3_normalize(v3_cross(v3(1.0f, 0.0f, 0.0f), sun));
+    if (v3_len_sq(u) < 0.5f) return false;
+    const VEC3 v = v3_cross(sun, u);
+    const float span_x = r->beams.step.x * (float)r->beams.width;
+    const float span_y = r->beams.step.y * (float)r->beams.height;
+    const float span_z = r->beams.step.z * (float)r->beams.depth;
+    if (span_x <= 0.0f || span_y <= 0.0f || span_z <= 0.0f) return false;
+
+    shadow_u_min[0] = u.x; shadow_u_min[1] = u.y; shadow_u_min[2] = u.z; shadow_u_min[3] = r->beams.origin.x;
+    shadow_v_min[0] = v.x; shadow_v_min[1] = v.y; shadow_v_min[2] = v.z; shadow_v_min[3] = r->beams.origin.y;
+    shadow_sun_max[0] = sun.x; shadow_sun_max[1] = sun.y; shadow_sun_max[2] = sun.z; shadow_sun_max[3] = r->beams.origin.z + span_z;
+    shadow_extent_bias[0] = span_x;
+    shadow_extent_bias[1] = span_y;
+    shadow_extent_bias[2] = span_z;
+    shadow_extent_bias[3] = r->dynamic_lighting.shadow_bias;
+    return true;
+}
+
 static MATERIAL_UNIFORMS surface_material_uniforms(RENDERER *r, const RENDER_MATERIAL *material, const RENDER_FRAME *frame) {
-    return (MATERIAL_UNIFORMS){
+    MATERIAL_UNIFORMS result = {
         .base_color_factor = {material->data.base_color[0], material->data.base_color[1], material->data.base_color[2], material->data.base_color[3]},
         .emissive_metallic = {material->data.emissive[0], material->data.emissive[1], material->data.emissive[2], material->data.metallic},
         .roughness_normal_ao_sun = {material->data.roughness, material->data.normal_scale, material->data.occlusion_strength, frame->sun.intensity},
@@ -4966,8 +5122,57 @@ static MATERIAL_UNIFORMS surface_material_uniforms(RENDERER *r, const RENDER_MAT
         .sun_color = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, 1.0f},
         .camera_position = {frame->eye.x, frame->eye.y, frame->eye.z, r->debug_view == 1u ? 2.0f : (r->has_bake ? 1.0f : 0.0f)},
         .probe_origin_spacing = {r->volume_probes.origin.x, r->volume_probes.origin.y, r->volume_probes.origin.z, r->volume_probes.spacing},
-        .probe_dims = {r->volume_probes.count_x, r->volume_probes.count_y, r->volume_probes.count_z, 0u}
+        .probe_dims = {r->volume_probes.count_x, r->volume_probes.count_y, r->volume_probes.count_z, 0u},
+        .beam_origin = {r->beams.origin.x, r->beams.origin.y, r->beams.origin.z, 0.0f},
+        .beam_step = {r->beams.step.x, r->beams.step.y, r->beams.step.z, 0.0f},
+        .beam_dims = {r->beams.width, r->beams.height, r->beams.depth, 0u}
     };
+    const bool projection_valid = dynamic_shadow_projection(r, frame, result.shadow_u_min, result.shadow_v_min, result.shadow_sun_max, result.shadow_extent_bias);
+    const bool beam_valid = projection_valid && r->beam_buffer != NULL;
+    result.beam_dims[3] = beam_valid ? 1u : 0u;
+    const float texel = r->dynamic_shadow_size ? 1.0f / (float)r->dynamic_shadow_size : 1.0f;
+    result.shadow_texel_enabled[0] = texel;
+    result.shadow_texel_enabled[1] = texel;
+    result.shadow_texel_enabled[2] = projection_valid && r->dynamic_shadow_ready ? 1.0f : 0.0f;
+    result.shadow_texel_enabled[3] = 0.0f;
+    return result;
+}
+
+static bool render_dynamic_shadow_map(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame) {
+    if (!r || !cmd || !frame) return false;
+    r->dynamic_shadow_ready = false;
+    const uint32_t count = dynamic_instance_count(r);
+    if (!count || !r->beam_buffer) return true;
+    if (!r->dynamic_shadow_pipeline || !r->dynamic_shadow_layout || !r->dynamic_shadow_sampler || !ensure_dynamic_shadow_texture(r)) return false;
+
+    DYNAMIC_SHADOW_UNIFORMS base = {0};
+    if (!dynamic_shadow_projection(r, frame, base.shadow_u_min, base.shadow_v_min, base.shadow_sun_max, base.shadow_extent)) return true;
+    if (!begin_dynamic_shadow_rendering(r, cmd, r->dynamic_shadow_size)) return false;
+    r->core.CmdSetPipeline(cmd, r->dynamic_shadow_pipeline);
+
+    bool good = true;
+    for (uint32_t instance_index = 0; instance_index < count && good; ++instance_index) {
+        DYNAMIC_INSTANCE_DATA instance = {0};
+        if (!dynamic_instance_data(r, instance_index, &instance)) { good = false; break; }
+        DYNAMIC_MODEL_RESOURCE *resource = dynamic_model_find(r, instance.model);
+        if (!resource || !resource->vertex_buffer) { good = false; break; }
+
+        DYNAMIC_SHADOW_UNIFORMS uniforms = base;
+        memcpy(uniforms.model, instance.world, sizeof(uniforms.model));
+        if (!bind_uniform_data(r, cmd, r->dynamic_shadow_layout, NriBindPoint_GRAPHICS, 1, &uniforms, sizeof(uniforms))) { good = false; break; }
+        const NriVertexBufferDesc vertex = {.buffer = resource->vertex_buffer, .offset = 0u, .stride = sizeof(RENDER_VERTEX)};
+        r->core.CmdSetVertexBuffers(cmd, 0, &vertex, 1);
+        for (uint32_t draw_index = 0; draw_index < resource->draw_count; ++draw_index) {
+            const DRAW_RANGE *draw = &resource->draws[draw_index];
+            r->core.CmdDraw(cmd, &(NriDrawDesc){.vertexNum = draw->count, .instanceNum = 1u, .baseVertex = draw->first, .baseInstance = instance_index});
+        }
+    }
+
+    r->core.CmdEndRendering(cmd);
+    if (!good) return false;
+    if (!transition_texture(r, cmd, r->dynamic_shadow_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_FRAGMENT_SHADER)) return false;
+    r->dynamic_shadow_ready = true;
+    return true;
 }
 
 static bool draw_dynamic_surfaces(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame, const CAMERA_UNIFORMS *base_camera) {
@@ -5041,6 +5246,7 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
 
     if (!begin_frame_commands(r, &queued_frame, &cmd)) goto failed_frame;
     if (!gpu_dynamic_prepare_instances(r)) goto failed_frame;
+    if (!render_dynamic_shadow_map(r, cmd, frame)) goto failed_frame;
 
     CAMERA_UNIFORMS camera = {0};
 
@@ -5272,6 +5478,7 @@ void r_deinit(RENDERER *r) {
         release_bake_resources(r);
         release_buffer(r, r->volume_probe_buffer);
         release_buffer(r, r->default_probe_buffer);
+        release_buffer(r, r->default_beam_buffer);
         release_buffer(r, r->beam_buffer);
         release_texture(r, r->depth_texture);
         release_texture(r, r->lightmap_texture);
@@ -5282,6 +5489,10 @@ void r_deinit(RENDERER *r) {
         if (r->sky_pipeline) r->core.DestroyPipeline(r->sky_pipeline);
 
         if (r->solid_pipeline) r->core.DestroyPipeline(r->solid_pipeline);
+
+        if (r->dynamic_shadow_pipeline) r->core.DestroyPipeline(r->dynamic_shadow_pipeline);
+
+        if (r->dynamic_shadow_sampler) r->core.DestroyDescriptor(r->dynamic_shadow_sampler);
 
         if (r->line_pipeline) r->core.DestroyPipeline(r->line_pipeline);
 
