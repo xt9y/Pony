@@ -261,7 +261,7 @@ static bool bake_make_probe_grid(const MESH *m, float spacing, PROBE_GRID *grid)
 }
 
 static bool bake_write_fast_seed(BAKE_JOB *job, PROBE_GRID *probes, BEAM_GRID *beams) {
-    unsigned char black_pixel[8] = {0};
+    unsigned char black_pixel[8] = {0, 0, 0, 0, 0, 0, 0x00, 0x3c};
     CACHED_LIGHTMAP seed = {0};
 
     seed.width = 1u;
