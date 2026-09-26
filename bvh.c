@@ -32,6 +32,7 @@ static VEC3 texture_color_uv(const GLTF_SCENE *visual, SDL_Surface **images, int
     if (image < 0 || (uint32_t)image >= visual->image_count || !images[image]) return v3(1, 1, 1);
 
     const SDL_Surface *surface = images[image];
+
     u -= floorf(u);
     v -= floorf(v);
 
@@ -58,6 +59,7 @@ static VEC3 texture_triangle_average(const GLTF_SCENE *visual, SDL_Surface **ima
         sum = v3_add(sum, texture_color_uv(visual, images, texture_index, vertices[i].u, vertices[i].v));
 
     sum = v3_add(sum, texture_color(visual, images, texture_index, vertices));
+
     return v3_scale(sum, 0.25f);
 }
 
@@ -437,7 +439,11 @@ bool trace_any(const BVH *tree, TRACE_RAY ray) {
 bool trace_closest(const BVH *tree, TRACE_RAY ray, TRACE_HIT *hit) {
 
     if (!hit) return false;
-    *hit = (TRACE_HIT){.t = ray.tmax, .triangle = UINT32_MAX};
+    *hit = (TRACE_HIT){
+        .t = ray.tmax,
+        .triangle = UINT32_MAX
+    };
+
     if (!tree || !tree->nodes || !tree->triangles || !tree->node_count || !tree->triangle_count || ray.tmax <= ray.tmin) return false;
 
     uint32_t node_index = 0u;
@@ -582,11 +588,14 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
             }
         }
 
-        build[i].gpu = (BVH_TRIANGLE){.a = {a.x, a.y, a.z, albedo.x},
-                                      .b = {b.x, b.y, b.z, albedo.y},
-                                      .c = {c.x, c.y, c.z, albedo.z},
-                                      .normal = {n.x, n.y, n.z, 0.0f},
-                                      .emissive = {emissive.x, emissive.y, emissive.z, 0.0f}};
+        build[i].gpu = (BVH_TRIANGLE){
+            .a = {a.x, a.y, a.z, albedo.x},
+            .b = {b.x, b.y, b.z, albedo.y},
+            .c = {c.x, c.y, c.z, albedo.z},
+            .normal = {n.x, n.y, n.z, 0.0f},
+            .emissive = {emissive.x, emissive.y, emissive.z, 0.0f}
+        };
+
         build[i].centroid = v3_scale(v3_add(v3_add(a, b), c), 1.0f / 3.0f);
         build[i].min = v3(fminf(a.x, fminf(b.x, c.x)), fminf(a.y, fminf(b.y, c.y)), fminf(a.z, fminf(b.z, c.z)));
         build[i].max = v3(fmaxf(a.x, fmaxf(b.x, c.x)), fmaxf(a.y, fmaxf(b.y, c.y)), fmaxf(a.z, fmaxf(b.z, c.z)));
@@ -637,8 +646,8 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
     }
 
     tree->emissive_weight = emissive_weight;
-    if (emissive_triangles)
-        SDL_Log("B: emissive geometry: %u triangles | %.3f importance", emissive_triangles, emissive_weight);
+
+    if (emissive_triangles) SDL_Log("B: emissive geometry: %u triangles | %.3f importance", emissive_triangles, emissive_weight);
 
     thread_node(tree, 0u, UINT32_MAX);
 

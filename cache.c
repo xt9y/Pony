@@ -305,26 +305,28 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
         return false;
     }
 
-    const CACHE_HEADER header = {.magic = DM_CACHE_MAGIC,
-                                 .version = DM_CACHE_VERSION,
-                                 .scene_hash = scene_hash,
-                                 .layout_hash = layout_hash,
-                                 .volume_hash = volume_hash,
-                                 .beam_hash = beam_hash,
-                                 .width = data->width,
-                                 .height = data->height,
-                                 .bytes = bytes,
-                                 .payload_hash = payload_hash,
-                                 .object_dims = {data->object_probes.count_x, data->object_probes.count_y, data->object_probes.count_z},
-                                 .volume_dims = {data->volume_probes.count_x, data->volume_probes.count_y, data->volume_probes.count_z},
-                                 .object_origin = {data->object_probes.origin.x, data->object_probes.origin.y, data->object_probes.origin.z},
-                                 .volume_origin = {data->volume_probes.origin.x, data->volume_probes.origin.y, data->volume_probes.origin.z},
-                                 .object_spacing = data->object_probes.spacing,
-                                 .volume_spacing = data->volume_probes.spacing,
-                                 .beam_origin = {beams->origin.x, beams->origin.y, beams->origin.z},
-                                 .beam_step = {beams->step.x, beams->step.y, beams->step.z},
-                                 .beam_dims = {beams->width, beams->height, beams->depth},
-                                 .beam_count = beams->count};
+    const CACHE_HEADER header = {
+        .magic = DM_CACHE_MAGIC,
+        .version = DM_CACHE_VERSION,
+        .scene_hash = scene_hash,
+        .layout_hash = layout_hash,
+        .volume_hash = volume_hash,
+        .beam_hash = beam_hash,
+        .width = data->width,
+        .height = data->height,
+        .bytes = bytes,
+        .payload_hash = payload_hash,
+        .object_dims = {data->object_probes.count_x, data->object_probes.count_y, data->object_probes.count_z},
+        .volume_dims = {data->volume_probes.count_x, data->volume_probes.count_y, data->volume_probes.count_z},
+        .object_origin = {data->object_probes.origin.x, data->object_probes.origin.y, data->object_probes.origin.z},
+        .volume_origin = {data->volume_probes.origin.x, data->volume_probes.origin.y, data->volume_probes.origin.z},
+        .object_spacing = data->object_probes.spacing,
+        .volume_spacing = data->volume_probes.spacing,
+        .beam_origin = {beams->origin.x, beams->origin.y, beams->origin.z},
+        .beam_step = {beams->step.x, beams->step.y, beams->step.z},
+        .beam_dims = {beams->width, beams->height, beams->depth},
+        .beam_count = beams->count
+    };
 
     const Uint64 write_started = SDL_GetPerformanceCounter();
     bool good = fwrite(&header, sizeof(header), 1, file) == 1 && fwrite(data->pixels, (size_t)bytes, 1, file) == 1 &&

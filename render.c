@@ -116,27 +116,37 @@ static bool reserve_vertices(RENDERER *r, uint32_t needed) {
 
 static bool push_surface(RENDERER *r, const GLTF_VERTEX *v, LMAP_UV uv) {
     if (!reserve_vertices(r, r->vertex_count + 1u)) return false;
-    r->vertices[r->vertex_count++] = (RENDER_VERTEX){.x = v->position.x,
-                                                     .y = v->position.y,
-                                                     .z = v->position.z,
-                                                     .nx = v->normal.x,
-                                                     .ny = v->normal.y,
-                                                     .nz = v->normal.z,
-                                                     .u = v->u,
-                                                     .v = v->v,
-                                                     .lu = uv.u,
-                                                     .lv = uv.v,
-                                                     .r = 1,
-                                                     .g = 1,
-                                                     .b = 1,
-                                                     .a = 1};
+    r->vertices[r->vertex_count++] = (RENDER_VERTEX){
+        .x = v->position.x,
+        .y = v->position.y,
+        .z = v->position.z,
+        .nx = v->normal.x,
+        .ny = v->normal.y,
+        .nz = v->normal.z,
+        .u = v->u,
+        .v = v->v,
+        .lu = uv.u,
+        .lv = uv.v,
+        .r = 1,
+        .g = 1,
+        .b = 1,
+        .a = 1
+    };
 
     return true;
 }
 
 static bool push_line_vertex(RENDERER *r, VEC3 p, COLOR4 c) {
     if (!reserve_vertices(r, r->vertex_count + 1u)) return false;
-    r->vertices[r->vertex_count++] = (RENDER_VERTEX){.x = p.x, .y = p.y, .z = p.z, .r = c.r, .g = c.g, .b = c.b, .a = c.a};
+    r->vertices[r->vertex_count++] = (RENDER_VERTEX){
+        .x = p.x,
+        .y = p.y,
+        .z = p.z,
+        .r = c.r,
+        .g = c.g,
+        .b = c.b,
+        .a = c.a
+    };
 
     return true;
 }
@@ -256,12 +266,25 @@ bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, 
     return good;
 }
 
-bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const char *path, uint64_t scene_hash, uint64_t layout_hash,
-                            uint64_t volume_hash, uint64_t beam_hash) {
+bool r_rebake_current_scene(
+    RENDERER *r,
+    const MESH *m,
+    const GLTF_SCENE *visual,
+    const LIGHTMAP *lm,
+    const struct LIGHT *light,
+    const SKY *sky,
+    const VOLUMETRICS_LIGHTING *volumetrics,
+    const char *path,
+    uint64_t scene_hash,
+    uint64_t layout_hash,
+    uint64_t volume_hash,
+    uint64_t beam_hash
+) {
     if (!r || !m || !lm || !r->device || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics) return false;
 
     r->sun = light->directional;
     r->sun.direction = v3_normalize(r->sun.direction);
+
     if (v3_len_sq(r->sun.direction) <= 0.0f) return false;
     r->sky = *sky;
     r->volumetrics = *volumetrics;
@@ -564,7 +587,9 @@ bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky, const VOLUME
     if (!r || !r->window || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics || !vision) return false;
 
     DIRECTIONAL_LIGHT sun = light->directional;
+
     sun.direction = v3_normalize(sun.direction);
+
     if (v3_len_sq(sun.direction) <= 0.0f) return false;
     r->sun = sun;
     r->sky = *sky;
@@ -590,7 +615,18 @@ bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky, const VOLUME
     const MAT4 proj = m4_perspective(fov, aspect, znear, zfar);
     const MAT4 mvp = m4_mul(proj, view);
 
-    RENDER_FRAME frame = {.eye = eye, .right = right, .up = up, .forward = forward, .sun = sun, .sky = *sky, .volumetrics = *volumetrics, .vision = *vision, .tan_half_fov = tan_half, .aspect = aspect};
+    RENDER_FRAME frame = {
+        .eye = eye,
+        .right = right,
+        .up = up,
+        .forward = forward,
+        .sun = sun,
+        .sky = *sky,
+        .volumetrics = *volumetrics,
+        .vision = *vision,
+        .tan_half_fov = tan_half,
+        .aspect = aspect
+    };
 
     memcpy(frame.mvp, mvp.m, sizeof(frame.mvp));
     memcpy(frame.view, view.m, sizeof(frame.view));
