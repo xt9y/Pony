@@ -1,0 +1,69 @@
+name: volumetrics-controls-green
+
+on:
+  push:
+    paths:
+      - '.github/workflows/volumetrics-controls-green.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  green:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply implementation
+        run: python3 .github/volumetrics_controls_patch.py
+
+      - name: Run source regression contract
+        run: python3 .github/volumetrics_controls_test.py
+
+      - name: Check source diff
+        run: git diff --check
+
+      - name: Install HLSL validator
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools
+
+      - name: Compile affected HLSL variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          validate() {
+            local source="$1"
+            local define="$2"
+            local entry="$3"
+            cat > __validate.hlsl <<EOF
+          #define GPU_BIND_S(n,s)
+          #define GPU_BIND_T(n,s)
+          #define GPU_BIND_B(n,s)
+          #define GPU_BIND_U(n,s)
+          #define GPU_STORAGE_RGBA16F
+          #define ${define}
+          #include "${source}"
+          EOF
+            glslangValidator -D -V --target-env vulkan1.2 -S comp -e "$entry" -I. __validate.hlsl -o /tmp/${entry}_${define}.spv
+          }
+
+          validate shaders/vision_compute.hlsl BUILD_VISION_VOLUME_CS volume_cs
+          validate shaders/vision_compute.hlsl BUILD_VISION_COMPOSE_CS volume_compose_cs
+          validate shaders/probe_wavefront.hlsl BUILD_PROBE_PREP_CS probe_prepare_cs
+          validate shaders/probe_wavefront.hlsl BUILD_PROBE_RESET_CS probe_reset_cs
+          validate shaders/probe_wavefront.hlsl BUILD_PROBE_VALIDATE_CS probe_validate_cs
+          validate shaders/probe_wavefront.hlsl BUILD_PROBE_PRIMARY_CS probe_primary_cs
+          validate shaders/probe_wavefront.hlsl BUILD_PROBE_BOUNCE_CS probe_bounce_cs
+          validate shaders/probe_wavefront.hlsl BUILD_PROBE_REDUCE_CS probe_reduce_cs
+          validate shaders/probe_wavefront.hlsl BUILD_PROBE_EMISSIVE_CS probe_emissive_cs
+          validate shaders/compute.hlsl BUILD_PROBE_CS probe_cs
+          validate shaders/compute.hlsl BUILD_LIGHTMAP_CS lightmap_cs
+          rm -f __validate.hlsl
+
+      - name: Commit verified source implementation
+        shell: bash
+        run: |
+          git config user.name xt9y
+          git config user.email felix@xt9y.de
+          git add game.h main.c gpu.c shaders/vision_compute.hlsl shaders/probe_wavefront.hlsl shaders/compute.hlsl
+          git commit -m "Smooth volumetric quality transitions"
+          git push origin HEAD:volumetrics-controls-work
