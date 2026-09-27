@@ -361,7 +361,7 @@ void dynamic_gi_cs(uint3 id : SV_DispatchThreadID)
     [unroll] for (uint sample_index = 0u; sample_index < EMITTER_VISIBILITY_SAMPLES; ++sample_index)
     {
         uint global_sample = sample_base + sample_index;
-        uint seed = hash_u32(pixel ^ ((global_sample + 1u) * 0x9e3779b9u));
+        uint seed = hash_u32((global_sample + 1u) * 0x9e3779b9u);
         float static_sample;
         float dynamic_sample;
         emissive_visibility_sample(job.position.xyz, normal, seed,
