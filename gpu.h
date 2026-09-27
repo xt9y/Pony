@@ -224,6 +224,7 @@ struct RENDERER {
     float scene_radius;
     double frame_time_ms;
     VEC3 target;
+    VEC3 sun;
 
     bool dragging;
     bool show_debug;

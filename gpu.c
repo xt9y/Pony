@@ -156,10 +156,6 @@ static Uint8 *load_spirv(const char *define, size_t *size) {
     return spirv;
 }
 
-static VEC3 sun_direction(void) {
-    return v3_normalize(v3(0.38f, 0.30f, 0.32f));
-}
-
 static void free_probe_grid(PROBE_GRID *grid) {
     if (!grid) return;
     free(grid->probes);
@@ -2359,7 +2355,7 @@ static void dispatch_shape(Uint32 items, Uint32 *groups_x, Uint32 *groups_y, Uin
 }
 
 static BAKE_UNIFORMS bake_data(RENDERER *r, Uint32 phase, Uint32 iteration, Uint32 item_count, Uint32 dispatch_width, Uint32 batch_count) {
-    const VEC3 sun = sun_direction();
+    const VEC3 sun = r->sun;
 
     return (BAKE_UNIFORMS){.item_count = item_count,
                            .lightmap_width = r->lightmap_width,
@@ -3169,9 +3165,8 @@ static uint32_t probe_wavefront_groups64(uint64_t threads) {
     return groups && groups <= UINT32_MAX ? (uint32_t)groups : 0u;
 }
 
-static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(const BVH *tree, const BEAM_GRID *beams, uint32_t probe_count, uint32_t sample_offset, uint32_t block_samples,
+static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(const BVH *tree, const BEAM_GRID *beams, VEC3 sun, uint32_t probe_count, uint32_t sample_offset, uint32_t block_samples,
                                                      uint32_t bounce_index) {
-    const VEC3 sun = v3_normalize(v3(0.38f, 0.30f, 0.32f));
     const BVH_NODE *root = &tree->nodes[0];
     float scene_scale = fmaxf(root->max[0] - root->min[0], fmaxf(root->max[1] - root->min[1], root->max[2] - root->min[2]));
 
@@ -3334,7 +3329,7 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
     while (good && completed < PROBE_MAX_SAMPLES && active) {
         const uint32_t block = PROBE_MAX_SAMPLES - completed > PROBE_BLOCK_SAMPLES ? PROBE_BLOCK_SAMPLES : PROBE_MAX_SAMPLES - completed;
 
-        uniforms = probe_wavefront_data(tree, beams, probe_count, completed, block, 0u);
+        uniforms = probe_wavefront_data(tree, beams, r->sun, probe_count, completed, block, 0u);
 
         NriCommandAllocator *allocator = NULL;
         NriCommandBuffer *cmd = NULL;

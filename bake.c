@@ -16,6 +16,7 @@ typedef struct BAKE_JOB {
     const MESH *scene;
     const GLTF_SCENE *visual;
     const LIGHTMAP *layout;
+    const struct LIGHT *light;
     char *path;
     char *worker_path;
     uint64_t scene_hash;
@@ -282,6 +283,11 @@ static bool bake_prepare_fast_components(BAKE_JOB *job, RENDERER *worker) {
     BVH tree = {0};
     PROBE_GRID probes = {0};
     BEAM_GRID beams = {0};
+
+    if (!job->light || job->light->type != LIGHT_DIRECTIONAL) return false;
+    worker->sun = v3_normalize(job->light->directional.direction);
+    if (v3_len_sq(worker->sun) <= 0.0f) return false;
+
     bool good = bvh_build(&tree, job->scene, job->visual);
 
     if (good) SDL_Log("B: fast probe BVH built in %.2f ms", bake_elapsed_ms(started));
@@ -290,7 +296,7 @@ static bool bake_prepare_fast_components(BAKE_JOB *job, RENDERER *worker) {
 
     started = SDL_GetPerformanceCounter();
 
-    if (good) good = beam_build(&beams, job->scene, &tree, v3_normalize(v3(0.38f, 0.30f, 0.32f)));
+    if (good) good = beam_build(&beams, job->scene, &tree, worker->sun);
 
     if (good) SDL_Log("B: fast sun field took %.2f ms", bake_elapsed_ms(started));
 
@@ -334,7 +340,7 @@ static int SDLCALL bake_thread_main(void *userdata) {
     bake_set_phase(BAKE_PHASE_LIGHTMAP, 0u, 0u, 0u);
 
     bool good = !bake_cancelled() &&
-                r_rebake_current_scene(&worker, job->scene, job->visual, job->layout, job->worker_path, job->scene_hash, job->layout_hash, job->volume_hash, job->beam_hash);
+                r_rebake_current_scene(&worker, job->scene, job->visual, job->layout, job->light, job->worker_path, job->scene_hash, job->layout_hash, job->volume_hash, job->beam_hash);
 
     if (!good) bake_set_error(job, SDL_GetError());
     bake_worker_deinit(&worker);
@@ -389,9 +395,9 @@ static void bake_free_job(BAKE_JOB *job) {
     free(job);
 }
 
-bool bake_start(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual, const LIGHTMAP *layout, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
+bool bake_start(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual, const LIGHTMAP *layout, const struct LIGHT *light, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
                 uint64_t beam_hash) {
-    if (!r || !r->device || !scene || !visual || !layout || !path) return false;
+    if (!r || !r->device || !scene || !visual || !layout || !light || light->type != LIGHT_DIRECTIONAL || !path) return false;
 
     if (g_bake) {
         SDL_SetError("a bake is already in progress");
@@ -406,6 +412,7 @@ bool bake_start(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual, const 
     job->scene = scene;
     job->visual = visual;
     job->layout = layout;
+    job->light = light;
     job->scene_hash = scene_hash;
     job->layout_hash = layout_hash;
     job->volume_hash = volume_hash;
