@@ -117,6 +117,7 @@ static void compile_nri_shaders(void) {
         {"shaders/probe_wavefront.hlsl", "probe_bounce_cs", "BUILD_PROBE_BOUNCE_CS", NULL, "compute", 0},
         {"shaders/probe_wavefront.hlsl", "probe_bounce_cs", "BUILD_PROBE_BOUNCE_WAVE_CS", "BUILD_PROBE_BOUNCE_CS", "compute", 1},
         {"shaders/probe_wavefront.hlsl", "probe_reduce_cs", "BUILD_PROBE_REDUCE_CS", NULL, "compute", 0},
+        {"shaders/probe_wavefront.hlsl", "probe_emissive_cs", "BUILD_PROBE_EMISSIVE_CS", NULL, "compute", 0},
     };
 
     for (size_t i = 0; i < sizeof(jobs) / sizeof(jobs[0]); ++i) {

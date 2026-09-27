@@ -10,7 +10,7 @@
       defined(BUILD_PROBE_VALIDATE_CS) || defined(BUILD_PROBE_PRIMARY_CS) || \
       defined(BUILD_PROBE_PRIMARY_WAVE_CS) || defined(BUILD_PROBE_BOUNCE_CS) || \
       defined(BUILD_PROBE_BOUNCE_WAVE_CS) || defined(BUILD_PROBE_ARGS_CS) || \
-      defined(BUILD_PROBE_REDUCE_CS)
+      defined(BUILD_PROBE_REDUCE_CS) || defined(BUILD_PROBE_EMISSIVE_CS)
 
 static const float PROBE_PI = 3.14159265358979323846f;
 static const float PROBE_SH0 = 0.2820947918f;
@@ -48,6 +48,8 @@ struct PackedProbeTriangle
     float4 a;
     float4 edge1;
     float4 edge2;
+    float4 normal;
+    float4 emissive;
 };
 
 struct ProbeTraceRay
@@ -379,6 +381,8 @@ void probe_prepare_cs(uint3 id : SV_DispatchThreadID)
         packed.a = source.a;
         packed.edge1 = float4(source.b.xyz - source.a.xyz, source.b.w);
         packed.edge2 = float4(source.c.xyz - source.a.xyz, source.c.w);
+        packed.normal = source.normal;
+        packed.emissive = source.emissive;
         ProbePackedTrianglesOut[index] = packed;
     }
 }
@@ -422,7 +426,7 @@ GPU_BIND_U(0, 1) RWStructuredBuffer<float4> ProbeCoefficientsEmissive : register
 
 #if defined(BUILD_PROBE_VALIDATE_CS) || defined(BUILD_PROBE_PRIMARY_CS) || \
     defined(BUILD_PROBE_PRIMARY_WAVE_CS) || defined(BUILD_PROBE_BOUNCE_CS) || \
-    defined(BUILD_PROBE_BOUNCE_WAVE_CS)
+    defined(BUILD_PROBE_BOUNCE_WAVE_CS) || defined(BUILD_PROBE_EMISSIVE_CS)
 bool probe_trace_any(ProbeTraceRay ray)
 {
     uint node_index = 0u;
@@ -727,9 +731,12 @@ void probe_primary_cs(uint3 id : SV_DispatchThreadID)
     }
 
     uint seed = probe_hash(probe_index * 9781u + sample_index * 6271u + 0x51f2e91du);
+    float3 initial_radiance = emissive_samples == 0u
+        ? hit.emissive * max(emissive_params.x, 0.0f)
+        : 0.0f;
     ProbeRayState state = probe_pack_state(ray.origin + ray.direction * hit.t,
                                           hit.normal, hit.albedo / PROBE_PI,
-                                          0.0f, result_index);
+                                          initial_radiance, result_index);
 
     uint slot;
 #if defined(BUILD_PROBE_PRIMARY_WAVE_CS)

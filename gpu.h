@@ -82,11 +82,11 @@ typedef struct RENDER_FRAME {
     float aspect;
 } RENDER_FRAME;
 
-typedef struct swapchain_texture swapchain_texture;
-typedef struct frame_context frame_context;
-typedef struct upload_context upload_context;
-typedef struct texture_state texture_state;
-typedef struct probe_wavefront_scratch probe_wavefront_scratch;
+typedef struct SWAPCHAIN_TEXTURE SWAPCHAIN_TEXTURE;
+typedef struct FRAME_CONTEXT FRAME_CONTEXT;
+typedef struct UPLOAD_CONTEXT UPLOAD_CONTEXT;
+typedef struct TEXTURE_STATE TEXTURE_STATE;
+typedef struct PROBE_WAVEFRONT_SCRATCH PROBE_WAVEFRONT_SCRATCH;
 
 struct RENDERER {
     SDL_Window *window;
@@ -104,14 +104,14 @@ struct RENDERER {
     NriDescriptorPool *descriptor_pool;
     NriFence *frame_fence;
     NriFence *work_fence;
-    frame_context *frame_contexts;
-    frame_context *work_contexts;
-    frame_context *active_frame;
-    frame_context *active_work;
+    FRAME_CONTEXT *frame_contexts;
+    FRAME_CONTEXT *work_contexts;
+    FRAME_CONTEXT *active_frame;
+    FRAME_CONTEXT *active_work;
     uint64_t work_index;
     uint64_t work_next_fence;
-    upload_context *upload;
-    swapchain_texture *swapchain_frames;
+    UPLOAD_CONTEXT *upload;
+    SWAPCHAIN_TEXTURE *swapchain_frames;
     NriTexture **swapchain_textures;
     uint32_t swapchain_texture_count;
 
@@ -120,7 +120,7 @@ struct RENDERER {
     NriBuffer *timestamp_readback;
     uint32_t timestamp_query_size;
     bool timestamp_supported;
-    probe_wavefront_scratch *probe_scratch;
+    PROBE_WAVEFRONT_SCRATCH *probe_scratch;
 
     uint32_t swapchain_width, swapchain_height, current_swap_index;
 
