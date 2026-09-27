@@ -254,7 +254,8 @@ float3 runtime_indirect(float3 world, float2 uv, float3 baked)
 
     float4 overlay = DynamicOverlay.SampleLevel(IndirectLightmapSampler, uv, 0.0f);
     float emitter_visibility = overlay.g > 0.5f ? saturate(overlay.r / overlay.g) : 1.0f;
-    emitter_visibility = smoothstep(0.35f, 0.65f, emitter_visibility);
+    float edge_width = max(fwidth(emitter_visibility), 1.0e-3f);
+    emitter_visibility = smoothstep(0.5f - edge_width, 0.5f + edge_width, emitter_visibility);
     return max(baked * emitter_visibility, 0.0f);
 }
 
