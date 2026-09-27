@@ -145,16 +145,16 @@ bool hit_box(Ray ray, float3 bmin, float3 bmax, float max_t)
     return hi >= ray.tmin;
 }
 
-bool hit_triangle(Ray ray, BvhTriangle triangle, float max_t, out float t)
+bool hit_triangle(Ray ray, BvhTriangle tri, float max_t, out float t)
 {
-    float3 edge1 = triangle.b.xyz - triangle.a.xyz;
-    float3 edge2 = triangle.c.xyz - triangle.a.xyz;
+    float3 edge1 = tri.b.xyz - tri.a.xyz;
+    float3 edge2 = tri.c.xyz - tri.a.xyz;
     float3 p = cross(ray.direction, edge2);
     float determinant = dot(edge1, p);
     if (abs(determinant) < 1.0e-7f) { t = 0.0f; return false; }
 
     float inverse = 1.0f / determinant;
-    float3 s = ray.origin - triangle.a.xyz;
+    float3 s = ray.origin - tri.a.xyz;
     float u = dot(s, p) * inverse;
     float3 q = cross(s, edge1);
     float v = dot(ray.direction, q) * inverse;
@@ -185,13 +185,13 @@ bool static_closest(Ray ray, inout Hit hit)
                 uint triangle_index = bvh.meta.z + i;
                 float t;
                 if (!hit_triangle(ray, StaticTriangles[triangle_index], closest, t)) continue;
-                BvhTriangle triangle = StaticTriangles[triangle_index];
-                float3 normal = normalize(triangle.normal.xyz);
+                BvhTriangle tri = StaticTriangles[triangle_index];
+                float3 normal = normalize(tri.normal.xyz);
                 if (dot(normal, ray.direction) > 0.0f) normal = -normal;
                 closest = hit.t = t;
                 hit.normal = normal;
-                hit.albedo = saturate(float3(triangle.a.w, triangle.b.w, triangle.c.w));
-                hit.emissive = max(triangle.emissive.rgb, 0.0f);
+                hit.albedo = saturate(float3(tri.a.w, tri.b.w, tri.c.w));
+                hit.emissive = max(tri.emissive.rgb, 0.0f);
                 hit.dynamic = 0u;
                 found = true;
             }
@@ -239,13 +239,13 @@ bool dynamic_closest(Ray world_ray, inout Hit hit)
                     uint triangle_index = bvh.meta.z + i;
                     float t;
                     if (!hit_triangle(ray, DynamicTriangles[triangle_index], closest, t)) continue;
-                    BvhTriangle triangle = DynamicTriangles[triangle_index];
-                    float3 normal = normalize(mul((float3x3)instance.normal_world, triangle.normal.xyz));
+                    BvhTriangle tri = DynamicTriangles[triangle_index];
+                    float3 normal = normalize(mul((float3x3)instance.normal_world, tri.normal.xyz));
                     if (dot(normal, world_ray.direction) > 0.0f) normal = -normal;
                     closest = hit.t = t;
                     hit.normal = normal;
-                    hit.albedo = saturate(float3(triangle.a.w, triangle.b.w, triangle.c.w));
-                    hit.emissive = max(triangle.emissive.rgb, 0.0f);
+                    hit.albedo = saturate(float3(tri.a.w, tri.b.w, tri.c.w));
+                    hit.emissive = max(tri.emissive.rgb, 0.0f);
                     hit.dynamic = 1u;
                     found = true;
                 }
@@ -296,15 +296,15 @@ void emissive_visibility_sample(float3 position, float3 normal, uint seed,
     }
     if (lo >= triangle_count) return;
 
-    BvhTriangle triangle = StaticTriangles[lo];
+    BvhTriangle tri = StaticTriangles[lo];
     float previous = lo == 0u ? 0.0f : StaticTriangles[lo - 1u].emissive.w;
-    if (triangle.emissive.w <= previous) return;
+    if (tri.emissive.w <= previous) return;
 
     float root = sqrt(random01(seed));
     float barycentric = random01(seed);
-    float3 light_position = triangle.a.xyz * (1.0f - root) +
-        triangle.b.xyz * (root * (1.0f - barycentric)) +
-        triangle.c.xyz * (root * barycentric);
+    float3 light_position = tri.a.xyz * (1.0f - root) +
+        tri.b.xyz * (root * (1.0f - barycentric)) +
+        tri.c.xyz * (root * barycentric);
 
     float3 delta = light_position - position;
     float distance2 = dot(delta, delta);
@@ -314,7 +314,7 @@ void emissive_visibility_sample(float3 position, float3 normal, uint seed,
     float distance = sqrt(distance2);
     float3 direction = delta / distance;
     if (dot(normal, direction) <= 0.0f ||
-        dot(normalize(triangle.normal.xyz), -direction) <= 0.0f)
+        dot(normalize(tri.normal.xyz), -direction) <= 0.0f)
         return;
 
     Ray shadow;
