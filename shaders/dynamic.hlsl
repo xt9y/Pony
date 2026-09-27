@@ -98,6 +98,7 @@ GPU_BIND_B(0, 2) cbuffer GiData : register(b0, space2)
 };
 
 static const uint INVALID_NODE = 0xffffffffu;
+static const uint DIRECT_EMISSIVE_SAMPLES = 8u;
 static const float PI = 3.14159265358979323846f;
 
 uint hash_u32(uint x)
@@ -453,19 +454,29 @@ void dynamic_gi_cs(uint3 id : SV_DispatchThreadID)
     uint2 xy = uint2(pixel % lightmap_width, pixel / lightmap_width);
 
     float3 n = normalize(job.normal.xyz);
-    uint seed = hash_u32(pixel ^ (job.generation * 0x9e3779b9u) ^ ((frame_index + 1u) * 0x85ebca6bu));
-    float3 transport_delta = 0.0f;
-    [loop] for (uint i = 0u; i < rays_per_texel; ++i) {
-        float3 static_indirect, dynamic_indirect;
-        float3 static_emissive, dynamic_emissive;
-        indirect_pair(job.position.xyz, n, seed, static_indirect, dynamic_indirect);
-        emissive_pair(job.position.xyz, n, seed, static_emissive, dynamic_emissive);
-        transport_delta += (dynamic_indirect + dynamic_emissive) -
-                           (static_indirect + static_emissive);
-    }
-    transport_delta /= max((float)rays_per_texel, 1.0f);
-
     bool first_sweep = (job.flags & 2u) != 0u;
+
+    float3 direct_delta = 0.0f;
+    [unroll] for (uint sample_index = 0u; sample_index < DIRECT_EMISSIVE_SAMPLES; ++sample_index) {
+        uint direct_seed = hash_u32((sample_index + 1u) * 0x9e3779b9u);
+        float3 static_emissive, dynamic_emissive;
+        emissive_pair(job.position.xyz, n, direct_seed, static_emissive, dynamic_emissive);
+        direct_delta += dynamic_emissive - static_emissive;
+    }
+    direct_delta /= (float)DIRECT_EMISSIVE_SAMPLES;
+
+    float3 transport_delta = direct_delta;
+    if (!first_sweep) {
+        uint seed = hash_u32(pixel ^ (job.generation * 0x9e3779b9u) ^ ((frame_index + 1u) * 0x85ebca6bu));
+        float3 indirect_delta = 0.0f;
+        [loop] for (uint i = 0u; i < rays_per_texel; ++i) {
+            float3 static_indirect, dynamic_indirect;
+            indirect_pair(job.position.xyz, n, seed, static_indirect, dynamic_indirect);
+            indirect_delta += dynamic_indirect - static_indirect;
+        }
+        transport_delta += indirect_delta / max((float)rays_per_texel, 1.0f);
+    }
+
     bool valid = !first_sweep && OverlayGenerations[job.cell] == job.generation;
     float4 old = valid ? Overlay[xy] : 0.0f;
     float count = valid ? old.a : 0.0f;
