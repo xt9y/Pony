@@ -1,4 +1,4 @@
-#include "dustmite.h"
+#include "game.h"
 
 #include <SDL3_image/SDL_image.h>
 
@@ -276,7 +276,7 @@ static void thread_node(bvh *tree, uint32_t node_index, uint32_t next) {
     thread_node(tree, right, next);
 }
 
-static bool trace_box(dm_trace_ray ray, const bvh_node *node, float max_t) {
+static bool trace_box(trace_ray ray, const bvh_node *node, float max_t) {
 
     float lo = ray.tmin;
     float hi = fminf(ray.tmax, max_t);
@@ -308,7 +308,7 @@ static bool trace_box(dm_trace_ray ray, const bvh_node *node, float max_t) {
     return hi >= ray.tmin;
 }
 
-static bool trace_triangle(dm_trace_ray ray, const bvh_triangle *tri,
+static bool trace_triangle(trace_ray ray, const bvh_triangle *tri,
                            float max_t, float *hit_t) {
 
     const vec3 a = v3(tri->a[0], tri->a[1], tri->a[2]);
@@ -334,7 +334,7 @@ static bool trace_triangle(dm_trace_ray ray, const bvh_triangle *tri,
     return true;
 }
 
-bool dm_trace_any(const bvh *tree, dm_trace_ray ray) {
+bool trace_any(const bvh *tree, trace_ray ray) {
 
     if (!tree || !tree->nodes || !tree->triangles || !tree->node_count ||
         !tree->triangle_count || ray.tmax <= ray.tmin) return false;
@@ -363,17 +363,17 @@ bool dm_trace_any(const bvh *tree, dm_trace_ray ray) {
     return false;
 }
 
-bool dm_trace_closest(const bvh *tree, dm_trace_ray ray, dm_trace_hit *hit) {
+bool trace_closest(const bvh *tree, trace_ray ray, trace_hit *hit) {
 
     if (!hit) return false;
-    *hit = (dm_trace_hit){.t = ray.tmax, .triangle = UINT32_MAX};
+    *hit = (trace_hit){.t = ray.tmax, .triangle = UINT32_MAX};
     if (!tree || !tree->nodes || !tree->triangles || !tree->node_count ||
         !tree->triangle_count || ray.tmax <= ray.tmin) return false;
 
     uint32_t node_index = 0u;
     float closest = ray.tmax;
     bool found = false;
-    dm_trace_hit best = {0};
+    trace_hit best = {0};
 
     while (node_index != UINT32_MAX) {
 

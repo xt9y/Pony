@@ -1,4 +1,4 @@
-#include "dustmite.h"
+#include "game.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -20,14 +20,14 @@ void bake_progress(renderer *r, const char *stage, Uint32 done, Uint32 total) {
 
     char title[160];
     if (total) {
-        snprintf(title, sizeof(title), "Dustmite - B baking %s: %u/%u", stage, done, total);
+        snprintf(title, sizeof(title), "Pony - B baking %s: %u/%u", stage, done, total);
         const double valid_texels = (double)r->lightmap_sample_count;
         const double completed_work = valid_texels * (double)done / (double)total;
         printf("frame time: %.2f ms | bake: %.2e/%.2e (%s)\n",
                r->frame_time_ms, completed_work, valid_texels, stage);
         fflush(stdout);
     } else {
-        snprintf(title, sizeof(title), "Dustmite - B baking %s...", stage);
+        snprintf(title, sizeof(title), "Pony - B baking %s...", stage);
     }
 
     SDL_SetWindowTitle(r->window, title);
@@ -150,13 +150,13 @@ static bool add_wire_triangle(renderer *r, vec3 a, vec3 b, vec3 c, color4 color)
            push_line_vertex(r, a, color);
 }
 
-static void free_probe_grid(dm_probe_grid *grid) {
+static void free_probe_grid(probe_grid *grid) {
     if (!grid) return;
     free(grid->probes);
     memset(grid, 0, sizeof(*grid));
 }
 
-static bool make_probe_grid(const mesh *m, float spacing, dm_probe_grid *grid) {
+static bool make_probe_grid(const mesh *m, float spacing, probe_grid *grid) {
     if (!m || !grid || spacing <= 0.0f) return false;
     memset(grid, 0, sizeof(*grid));
 
@@ -182,7 +182,7 @@ static bool make_probe_grid(const mesh *m, float spacing, dm_probe_grid *grid) {
             for (uint32_t x = 0; x < grid->count_x; ++x) {
                 const size_t index = x + (size_t)grid->count_x *
                     (y + (size_t)grid->count_y * z);
-                dm_probe *p = &grid->probes[index];
+                probe *p = &grid->probes[index];
                 p->position[0] = grid->origin.x + x * spacing;
                 p->position[1] = grid->origin.y + y * spacing;
                 p->position[2] = grid->origin.z + z * spacing;
@@ -198,13 +198,13 @@ bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash,
                             uint64_t beam_hash, const lightmap *lm) {
     if (!r || !r->device || !lm) return false;
 
-    dm_cached_lightmap cached = {0};
-    if (!dm_cache_read(path, scene_hash, layout_hash, volume_hash, beam_hash, &cached))
+    cached_lightmap cached = {0};
+    if (!cache_read(path, scene_hash, layout_hash, volume_hash, beam_hash, &cached))
         return false;
 
-    TEXTURE *replacement = NULL;
-    BUFFER *volume_buffer = NULL;
-    BUFFER *beam_buffer = NULL;
+    NriTexture *replacement = NULL;
+    NriBuffer *volume_buffer = NULL;
+    NriBuffer *beam_buffer = NULL;
 
     bool good = cached.width == lm->width && cached.height == lm->height;
     if (good) {
@@ -221,9 +221,9 @@ bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash,
     }
 
     if (good) {
-        TEXTURE *old = r->lightmap_texture;
-        BUFFER *old_volume = r->volume_probe_buffer;
-        BUFFER *old_beam = r->beam_buffer;
+        NriTexture *old = r->lightmap_texture;
+        NriBuffer *old_volume = r->volume_probe_buffer;
+        NriBuffer *old_beam = r->beam_buffer;
 
         r->lightmap_texture = replacement;
         r->volume_probe_buffer = volume_buffer;
@@ -235,7 +235,7 @@ bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash,
         r->volume_probes = cached.volume_probes;
         cached.volume_probes.probes = NULL;
 
-        dm_beam_free(&r->beams);
+        beam_free(&r->beams);
         r->beams = cached.beams;
         cached.beams.cells = NULL;
         cached.beams.shadow_depth = NULL;
@@ -250,7 +250,7 @@ bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash,
         release_buffer(r, beam_buffer);
     }
 
-    dm_cache_free(&cached);
+    cache_free(&cached);
     return good;
 }
 
@@ -260,12 +260,12 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
                             uint64_t volume_hash, uint64_t beam_hash) {
     if (!r || !m || !lm || !r->device) return false;
 
-    dm_cached_lightmap previous = {0};
-    bool reuse = dm_cache_read_partial(path, scene_hash, &previous);
+    cached_lightmap previous = {0};
+    bool reuse = cache_read_partial(path, scene_hash, &previous);
     if (reuse && previous.layout_hash == layout_hash &&
         previous.volume_hash == volume_hash && previous.beam_hash == beam_hash)
         reuse = false;
-    if (!reuse) dm_cache_free(&previous);
+    if (!reuse) cache_free(&previous);
 
     const bool reuse_lightmap = reuse && previous.layout_hash == layout_hash &&
                                 previous.width == lm->width && previous.height == lm->height;
@@ -277,14 +277,34 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
 
     bvh tree = {0};
     if (!bvh_build(&tree, m, visual)) {
-        dm_cache_free(&previous);
+        cache_free(&previous);
         return false;
     }
     bake_timing("scene geometry", started);
 
+    probe_grid volume_candidate = {0};
+    beam_grid beam_candidate = {0};
+    bake_progress(r, "volume probes", 0u, 0u);
+    started = SDL_GetPerformanceCounter();
+    if (reuse_volume) {
+        volume_candidate = previous.volume_probes;
+        previous.volume_probes.probes = NULL;
+        SDL_Log("B: reused cached volume probes");
+    } else {
+        bool made = make_probe_grid(m, 4.0f, &volume_candidate) &&
+                    bake_probe_grid(r, &volume_candidate, 1024u);
+        if (!made) {
+            free_probe_grid(&volume_candidate);
+            bvh_free(&tree);
+            cache_free(&previous);
+            return false;
+        }
+    }
+    bake_timing("volume probes", started);
+
     bake_progress(r, "lightmap shader", 0u, 0u);
 
-    TEXTURE *old = r->lightmap_texture;
+    NriTexture *old = r->lightmap_texture;
     const Uint32 old_width = r->lightmap_width;
     const Uint32 old_height = r->lightmap_height;
     const bool had_bake = r->has_bake;
@@ -301,24 +321,9 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
             SDL_Log("B: reused cached surface lightmap");
         }
     } else {
-        good = bake_lightmap(r, &tree, lm);
+        good = bake_lightmap(r, &tree, lm, &volume_candidate);
     }
-    if (good) bake_timing("surface lightmap", started);
-
-    dm_probe_grid volume_candidate = {0};
-    dm_beam_grid beam_candidate = {0};
-
-    if (good) bake_progress(r, "volume probes", 0u, 0u);
-    started = SDL_GetPerformanceCounter();
-    if (good && reuse_volume) {
-        volume_candidate = previous.volume_probes;
-        previous.volume_probes.probes = NULL;
-        SDL_Log("B: reused cached volume probes");
-    } else if (good) {
-        good = make_probe_grid(m, 4.0f, &volume_candidate) &&
-               bake_probe_grid(r, &volume_candidate, 1024u);
-    }
-    if (good) bake_timing("volume probes", started);
+    if (good) bake_timing(reuse_lightmap ? "cached lightmap upload submission" : "lightmap GPU submission", started);
 
     if (good) bake_progress(r, "sun visibility", 0u, 0u);
     started = SDL_GetPerformanceCounter();
@@ -328,13 +333,13 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
         previous.beams.shadow_depth = NULL;
         SDL_Log("B: reused cached sun beams");
     } else if (good) {
-        good = dm_beam_build(&beam_candidate, m, &tree, scene_sun_direction());
+        good = beam_build(&beam_candidate, m, &tree, scene_sun_direction());
     }
     if (good) bake_timing("sun visibility", started);
     if (good) SDL_Log("B: compressed sun beams into %u cells", beam_candidate.count);
 
-    BUFFER *volume_buffer = NULL;
-    BUFFER *beam_buffer = NULL;
+    NriBuffer *volume_buffer = NULL;
+    NriBuffer *beam_buffer = NULL;
     if (good) {
         volume_buffer = upload_probes(r, &volume_candidate);
         good = volume_buffer != NULL;
@@ -344,7 +349,7 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
         good = beam_buffer != NULL;
     }
 
-    dm_cached_lightmap candidate = {0};
+    cached_lightmap candidate = {0};
     if (good) {
         bake_progress(r, "saving cache", 0u, 0u);
         started = SDL_GetPerformanceCounter();
@@ -361,24 +366,26 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
         }
 
         if (good) {
-            good = dm_cache_write(path, scene_hash, layout_hash,
+            const Uint64 write_started = SDL_GetPerformanceCounter();
+            good = cache_write(path, scene_hash, layout_hash,
                                   volume_hash, beam_hash, &candidate);
+            if (good) bake_timing("cache serialization total", write_started);
         }
 
         candidate.volume_probes.probes = NULL;
         candidate.beams.cells = NULL;
         candidate.beams.shadow_depth = NULL;
-        if (good) bake_timing("saving cache", started);
+        if (good) bake_timing("readback and cache write", started);
     }
 
-    dm_cache_free(&candidate);
-    dm_cache_free(&previous);
+    cache_free(&candidate);
+    cache_free(&previous);
     release_bake_resources(r);
     bvh_free(&tree);
 
     if (good) {
-        BUFFER *old_volume = r->volume_probe_buffer;
-        BUFFER *old_beam = r->beam_buffer;
+        NriBuffer *old_volume = r->volume_probe_buffer;
+        NriBuffer *old_beam = r->beam_buffer;
 
         r->volume_probe_buffer = volume_buffer;
         r->beam_buffer = beam_buffer;
@@ -386,7 +393,7 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
         free_probe_grid(&r->volume_probes);
         r->volume_probes = volume_candidate;
 
-        dm_beam_free(&r->beams);
+        beam_free(&r->beams);
         r->beams = beam_candidate;
 
         r->has_bake = true;
@@ -396,7 +403,7 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
     } else {
         release_buffer(r, volume_buffer);
         release_buffer(r, beam_buffer);
-        dm_beam_free(&beam_candidate);
+        beam_free(&beam_candidate);
         free_probe_grid(&volume_candidate);
         release_texture(r, r->lightmap_texture);
         r->lightmap_texture = old;
@@ -462,7 +469,7 @@ bool r_build_scene(renderer *r, const mesh *m, const gltf_scene *visual,
     return true;
 }
 
-void r_event(renderer *r, const EVENT *event) {
+void r_event(renderer *r, const SDL_Event *event) {
     if (!r || !event) return;
 
     switch (event->type) {

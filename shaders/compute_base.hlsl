@@ -544,12 +544,23 @@ struct BakeSample
     float4 normal;
 };
 
+#if defined(BUILD_LIGHTMAP_CS)
+GPU_BIND_T(2, 0) StructuredBuffer<BvhNode> Nodes : register(t2, space0);
+GPU_BIND_T(3, 0) StructuredBuffer<BvhTriangle> Triangles : register(t3, space0);
+#else
 GPU_BIND_T(1, 0) StructuredBuffer<BvhNode> Nodes : register(t1, space0);
 GPU_BIND_T(2, 0) StructuredBuffer<BvhTriangle> Triangles : register(t2, space0);
+#endif
 #if defined(BUILD_LIGHTMAP_CS)
 GPU_BIND_T(0, 0) Texture2D<float4> Source : register(t0, space0);
 GPU_BIND_S(0, 0) SamplerState SourceSampler : register(s0, space0);
-GPU_BIND_T(3, 0) StructuredBuffer<BakeSample> Samples : register(t3, space0);
+GPU_BIND_T(1, 0) Texture2D<float4> Direct : register(t1, space0);
+GPU_BIND_S(1, 0) SamplerState DirectSampler : register(s1, space0);
+struct BakeProbe { float4 position; float4 coefficient[9]; };
+GPU_BIND_T(5, 0) StructuredBuffer<BakeProbe> BakeProbes : register(t5, space0);
+GPU_BIND_T(6, 0) StructuredBuffer<uint> PatchMap : register(t6, space0);
+GPU_BIND_T(7, 0) StructuredBuffer<uint4> PatchAnchors : register(t7, space0);
+GPU_BIND_T(4, 0) StructuredBuffer<BakeSample> Samples : register(t4, space0);
 GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
 #else
 GPU_BIND_T(0, 0) StructuredBuffer<float4> ProbePositions : register(t0, space0);
@@ -573,6 +584,8 @@ GPU_BIND_B(0, 2) cbuffer BakeData : register(b0, space2)
     float4 sky_zenith;
     float4 sky_horizon;
     float4 bake_params;
+    float4 probe_origin_spacing;
+    uint4 probe_dims_mode;
 };
 
 static const float PI = 3.14159265358979323846f;
@@ -581,6 +594,9 @@ static const uint PHASE_CLEAR = 0;
 static const uint PHASE_TRACE = 1;
 static const uint PHASE_FILTER = 2;
 static const uint PHASE_DILATE = 3;
+static const uint PHASE_DIRECT = 4;
+static const uint PHASE_COMBINE = 5;
+static const uint PHASE_RECONSTRUCT = 6;
 
 uint hash_u32(uint x)
 {
@@ -831,14 +847,47 @@ float3 direct_sun(float3 position, float3 normal, inout uint seed)
     return sun_color_radius.rgb * (sun_direction_intensity.w * n_dot_l);
 }
 
-float3 trace_path(float3 position, float3 normal, inout uint seed)
+#if defined(BUILD_LIGHTMAP_CS)
+float3 bake_probe_irradiance(float3 position, float3 normal,
+                             out float validity)
+{
+    validity = 0.0f;
+    if (probe_dims_mode.x == 0u || probe_origin_spacing.w <= 0.0f)
+        return 0.0f;
+    float3 coord = clamp((position + normal * (0.3f * probe_origin_spacing.w) -
+                          probe_origin_spacing.xyz) / probe_origin_spacing.w,
+                          0.0f, float3(probe_dims_mode.xyz) - 1.0f);
+    uint3 base = uint3(floor(coord));
+    float3 f = frac(coord);
+    float3 sum = 0.0f;
+    float weight_sum = 0.0f;
+    [unroll] for (uint z = 0u; z < 2u; ++z)
+    [unroll] for (uint y = 0u; y < 2u; ++y)
+    [unroll] for (uint x = 0u; x < 2u; ++x)
+    {
+        uint3 cell = min(base + uint3(x, y, z), probe_dims_mode.xyz - 1u);
+        float3 w = lerp(1.0f - f, f, float3(x, y, z));
+        BakeProbe probe = BakeProbes[cell.x + probe_dims_mode.x *
+                                        (cell.y + probe_dims_mode.y * cell.z)];
+        float weight = w.x * w.y * w.z * saturate(probe.position.w);
+        sum += max(probe.coefficient[0].rgb * 0.2820947918f, 0.0f) * weight;
+        weight_sum += weight;
+    }
+    validity = weight_sum;
+    return weight_sum > 0.0f ? sum / weight_sum : 0.0f;
+}
+#endif
+
+float3 trace_path_core(float3 position, float3 normal, inout uint seed,
+                       bool include_primary_sun)
 {
     float3 radiance = 0.0f;
     float3 throughput = 1.0f;
 
     for (uint bounce = 0; bounce < max_bounces; ++bounce)
     {
-        radiance += throughput * direct_sun(position, normal, seed);
+        if (bounce != 0u || include_primary_sun)
+            radiance += throughput * direct_sun(position, normal, seed);
 
         float3 direction = cosine_hemisphere(normal, seed);
         TraceRay ray = make_trace_ray(position + normal * bake_params.x,
@@ -854,9 +903,26 @@ float3 trace_path(float3 position, float3 normal, inout uint seed)
         throughput *= hit.albedo;
         position = ray.origin + ray.direction * hit.t;
         normal = hit.normal;
+#if defined(BUILD_LIGHTMAP_CS)
+        // Only reuse probes at secondary hits; primary reuse leaks across walls.
+        {
+            float validity;
+            float3 cached = bake_probe_irradiance(position, normal, validity);
+            if (validity >= 0.25f)
+            {
+                radiance += throughput * cached;
+                break;
+            }
+        }
+#endif
     }
 
     return radiance;
+}
+
+float3 trace_path(float3 position, float3 normal, inout uint seed)
+{
+    return trace_path_core(position, normal, seed, true);
 }
 
 #if defined(BUILD_LIGHTMAP_CS)
@@ -924,6 +990,67 @@ void lightmap_cs(uint3 dispatch_id : SV_DispatchThreadID)
         return;
     }
 
+    if (phase == PHASE_DIRECT)
+    {
+        BakeSample sample = Samples[index];
+        uint pixel = asuint(sample.position.w);
+        float3 normal = normalize(sample.normal.xyz);
+        uint seed = hash_u32(pixel ^ 0x4f03d2b1u);
+        float3 a = direct_sun(sample.position.xyz, normal, seed);
+        float3 b = direct_sun(sample.position.xyz, normal, seed);
+        float3 c = direct_sun(sample.position.xyz, normal, seed);
+        float3 d = direct_sun(sample.position.xyz, normal, seed);
+        float3 sum = a + b + c + d;
+        uint count = 4u;
+        float3 mean = sum * 0.25f;
+        if (length(a - mean) + length(b - mean) +
+            length(c - mean) + length(d - mean) > 0.02f)
+        {
+            for (uint i = 0u; i < 12u; ++i)
+                sum += direct_sun(sample.position.xyz, normal, seed);
+            count = 16u;
+        }
+        Output[uint2(pixel % lightmap_width, pixel / lightmap_width)] =
+            float4(sum / (float)count, 1.0f);
+        return;
+    }
+
+    if (phase == PHASE_COMBINE)
+    {
+        uint2 p = uint2(index % lightmap_width, index / lightmap_width);
+        float4 indirect = source_pixel(int2(p));
+        float4 direct = Direct.SampleLevel(DirectSampler,
+            (float2(p) + 0.5f) / float2(lightmap_width, lightmap_height), 0.0f);
+        Output[p] = indirect.a != 0.0f ? float4(indirect.rgb + direct.rgb, 1.0f) : 0.0f;
+        return;
+    }
+
+    if (phase == PHASE_RECONSTRUCT)
+    {
+        uint pixel = asuint(Samples[index].position.w);
+        uint2 p = uint2(pixel % lightmap_width, pixel / lightmap_width);
+        uint patch = PatchMap[index];
+        float3 color;
+        if (patch == 0xffffffffu)
+            color = source_pixel(int2(p)).rgb;
+        else
+        {
+            uint4 anchors = PatchAnchors[patch];
+            float2 t = float2(p.x % 4u, p.y % 4u) / 3.0f;
+            float3 c00 = source_pixel(int2(anchors.x % lightmap_width,
+                                           anchors.x / lightmap_width)).rgb;
+            float3 c10 = source_pixel(int2(anchors.y % lightmap_width,
+                                           anchors.y / lightmap_width)).rgb;
+            float3 c01 = source_pixel(int2(anchors.z % lightmap_width,
+                                           anchors.z / lightmap_width)).rgb;
+            float3 c11 = source_pixel(int2(anchors.w % lightmap_width,
+                                           anchors.w / lightmap_width)).rgb;
+            color = lerp(lerp(c00, c10, t.x), lerp(c01, c11, t.x), t.y);
+        }
+        Output[p] = float4(color, 1.0f);
+        return;
+    }
+
     if (phase == PHASE_TRACE)
     {
         BakeSample sample = Samples[index];
@@ -936,7 +1063,7 @@ void lightmap_cs(uint3 dispatch_id : SV_DispatchThreadID)
         {
             uint current = iteration + offset;
             uint seed = hash_u32(pixel ^ hash_u32(current + 0x51f2e91du));
-            float3 value = trace_path(position, normal, seed);
+            float3 value = trace_path_core(position, normal, seed, false);
             float n = (float)current;
             float3 mean = (previous.rgb * n + value) / (n + 1.0f);
             float old_luma = dot(previous.rgb, float3(0.2126f, 0.7152f, 0.0722f));
@@ -945,10 +1072,14 @@ void lightmap_cs(uint3 dispatch_id : SV_DispatchThreadID)
             float m2 = current == 0u ? 0.0f : previous.a;
             m2 += (sample_luma - old_luma) * (sample_luma - new_luma);
             float stderr = sqrt(max(m2, 0.0f) / max(n * (n + 1.0f), 1.0f));
-            bool converged = current + 1u >= 64u &&
+            // Use a tighter error bound before 64 samples.
+            float threshold = 0.01f + 0.025f * abs(new_luma);
+            if (current + 1u < 64u) threshold *= 0.5f;
+            bool converged = current + 1u >= (uint)bake_params.w &&
                 ((current + 1u) % 8u == 0u) &&
-                stderr < 0.01f + 0.025f * abs(new_luma);
-            previous = float4(mean, converged ? -max(m2, 1.0e-6f) : max(m2, 1.0e-6f));
+                stderr < threshold;
+            // Retain the sample count in negative alpha to mark convergence.
+            previous = float4(mean, converged ? -(float)(current + 1u) : max(m2, 1.0e-6f));
         }
         Output[pixel_xy] = previous;
         return;

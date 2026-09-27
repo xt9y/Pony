@@ -1,7 +1,7 @@
 #include <cbuild.h>
 
 void build(C_Build *b) {
-    C_Target *app = c_executable(b, "dustmite");
+    C_Target *app = c_executable(b, "game");
 
     c_sources(app, "main.c");
     c_sources(app, "init.c");

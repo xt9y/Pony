@@ -1,11 +1,11 @@
-#include "dustmite.h"
+#include "game.h"
 
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define LMAP_PADDING 3u
-#define LMAP_MIN_DENSITY 1.0f
+#define LMAP_MIN_DENSITY 0.125f
 /* Face-to-face joining is transitive: a loose normal threshold lets a folded
  * surface merge into one chart and project different locations onto the same
  * texel. Keep connected charts effectively planar. */
@@ -20,6 +20,7 @@ typedef struct chart {
     vec3 normal;
     float min_u, min_v;
     float max_u, max_v;
+    float density_scale;
     uint32_t x, y;
     uint32_t inner_w, inner_h;
     uint32_t rect_w, rect_h;
@@ -133,8 +134,9 @@ static bool pack_charts(chart *charts, uint32_t chart_count, float density, uint
         const float world_w = fmaxf(charts[i].max_u - charts[i].min_u, 1.0e-4f);
         const float world_h = fmaxf(charts[i].max_v - charts[i].min_v, 1.0e-4f);
 
-        charts[i].inner_w = (uint32_t)ceilf(world_w * density) + 1u;
-        charts[i].inner_h = (uint32_t)ceilf(world_h * density) + 1u;
+        const float chart_density = density * charts[i].density_scale;
+        charts[i].inner_w = (uint32_t)ceilf(world_w * chart_density) + 1u;
+        charts[i].inner_h = (uint32_t)ceilf(world_h * chart_density) + 1u;
         if (charts[i].inner_w < 2u) charts[i].inner_w = 2u;
         if (charts[i].inner_h < 2u) charts[i].inner_h = 2u;
 
@@ -145,6 +147,8 @@ static bool pack_charts(chart *charts, uint32_t chart_count, float density, uint
         if (charts[i].rect_w > largest_width) largest_width = charts[i].rect_w;
 
     }
+
+    if (total_area > (uint64_t)max_size * max_size) return false;
 
     uint32_t *order = malloc((size_t)chart_count * sizeof(*order));
     if (!order && chart_count) return false;
@@ -303,7 +307,8 @@ void lmap_free(lightmap *lm) {
     memset(lm, 0, sizeof(*lm));
 }
 
-bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit, uint32_t max_size) {
+bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
+                uint32_t max_size) {
 
     if (!lm || !m || !m->faces.count || !m->vertices.count || m->faces.count > UINT32_MAX || m->vertices.count > UINT32_MAX || max_size < 256u) return false;
 
@@ -321,10 +326,10 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
     uint32_t *root_chart = malloc((size_t)face_count * sizeof(*root_chart));
     uint32_t *face_chart = malloc((size_t)face_count * sizeof(*face_chart));
-    chart *charts = calloc(face_count, sizeof(*charts));
-    vec3 *normals = malloc((size_t)vertex_count * sizeof(*normals));
+    chart *charts = NULL;
+    vec3 *normals = NULL;
 
-    if (!parent || !rank || !edges || !root_chart || !face_chart || !charts || !normals) goto fail;
+    if (!parent || !rank || !edges || !root_chart || !face_chart) goto fail;
 
     for (uint32_t i = 0; i < face_count; ++i) {
 
@@ -381,16 +386,31 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
         const uint32_t root = uf_find(parent, i);
         if (root_chart[root] == UINT32_MAX) root_chart[root] = chart_count++;
-
         face_chart[i] = root_chart[root];
-        charts[face_chart[i]].normal = v3_add(charts[face_chart[i]].normal, geometric_normal(points, faces[i]));
 
     }
+
+    free(parent);
+    free(rank);
+    free(edges);
+    free(root_chart);
+    parent = NULL;
+    rank = NULL;
+    edges = NULL;
+    root_chart = NULL;
+
+    charts = calloc(chart_count, sizeof(*charts));
+    if (!charts) goto fail;
+
+    for (uint32_t i = 0; i < face_count; ++i)
+        charts[face_chart[i]].normal = v3_add(
+            charts[face_chart[i]].normal, geometric_normal(points, faces[i]));
 
     for (uint32_t i = 0; i < chart_count; ++i) {
         charts[i].normal = v3_normalize(charts[i].normal);
         charts[i].min_u = charts[i].min_v = INFINITY;
         charts[i].max_u = charts[i].max_v = -INFINITY;
+        charts[i].density_scale = 1.0f;
 
     }
 
@@ -414,15 +434,24 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
     }
 
+    for (uint32_t i = 0; i < chart_count; ++i) {
+        const float area = (charts[i].max_u - charts[i].min_u) *
+                           (charts[i].max_v - charts[i].min_v);
+        if (area >= 32.0f) charts[i].density_scale = 0.5f;
+        else if (area >= 8.0f) charts[i].density_scale = 0.75f;
+    }
+
 
     float density = preferred_texels_per_unit ? (float)preferred_texels_per_unit : 16.0f;
     uint32_t width = 0, height = 0;
 
-    while (density >= LMAP_MIN_DENSITY && !pack_charts(charts, chart_count, density, max_size, &width, &height)) {
-        density *= 0.80f;
-    }
+    for (;;) {
+        if (pack_charts(charts, chart_count, density, max_size, &width, &height)) break;
+        if (density <= LMAP_MIN_DENSITY) goto fail;
 
-    if (!width || !height) goto fail;
+        density *= 0.80f;
+        if (density < LMAP_MIN_DENSITY) density = LMAP_MIN_DENSITY;
+    }
 
     if (height > max_size || height > UINT32_MAX / 2u) goto fail;
     lm->uvs = malloc((size_t)face_count * 6u * sizeof(*lm->uvs));
@@ -445,8 +474,10 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
             float u, v;
 
             project_point(c->normal, points[faces[i].indices[k]].p, &u, &v);
-            float px = (float)(c->x + LMAP_PADDING) + 0.5f + (u - c->min_u) * density;
-            float py = (float)(c->y + LMAP_PADDING) + 0.5f + (v - c->min_v) * density;
+            float px = (float)(c->x + LMAP_PADDING) + 0.5f +
+                       (u - c->min_u) * density * c->density_scale;
+            float py = (float)(c->y + LMAP_PADDING) + 0.5f +
+                       (v - c->min_v) * density * c->density_scale;
 
             if (px > max_x) px = max_x;
             if (py > max_y) py = max_y;
@@ -455,6 +486,9 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
                                                     (py + (float)height) / (float)lm->height};
         }
     }
+
+    free(charts);
+    charts = NULL;
 
     if ((uint64_t)width * height > SIZE_MAX) goto fail;
     const size_t pixel_count = (size_t)width * height;
@@ -515,6 +549,12 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
     }
     lm->sample_count = sample_count;
     memset(occupied, 0, pixel_count);
+
+    normals = malloc((size_t)vertex_count * sizeof(*normals));
+    if (!normals) {
+        free(occupied);
+        goto fail;
+    }
     vertex_normals(m, normals);
 
 
@@ -576,7 +616,7 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
                 s->normal[0] = n.x;
                 s->normal[1] = n.y;
                 s->normal[2] = n.z;
-                s->normal[3] = 0.0f;
+                s->normal[3] = (float)face_chart[i];
 
                 lmap_sample *back = &lm->samples[out_sample++];
                 *back = *s;
@@ -585,6 +625,7 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
                 back->normal[0] = -n.x;
                 back->normal[1] = -n.y;
                 back->normal[2] = -n.z;
+                back->normal[3] = (float)(face_chart[i] + chart_count);
             }
         }
     

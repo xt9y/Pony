@@ -1,4 +1,4 @@
-#include "dustmite.h"
+#include "game.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -99,7 +99,7 @@ static uint32_t beam_depth_for_span(float span) {
 
 /* Orthographic depth buffer looking from the sun toward the scene. The
  * largest sun-space z is the first surface a ray from the sun encounters. */
-static void raster_depth(float *depth, const dm_beam_grid *grid, const bvh *tree,
+static void raster_depth(float *depth, const beam_grid *grid, const bvh *tree,
                          vec3 u, vec3 v, vec3 sun) {
 
     const size_t columns = (size_t)grid->width * grid->height;
@@ -157,7 +157,7 @@ typedef struct depth_tile_info {
     uint32_t covered;
 } depth_tile_info;
 
-static depth_tile_info measure_depth_tile(const float *depth, const dm_beam_grid *grid,
+static depth_tile_info measure_depth_tile(const float *depth, const beam_grid *grid,
                                           uint32_t x, uint32_t y) {
     depth_tile_info info = {INFINITY, -INFINITY, 0};
     for (uint32_t j = y; j < y + BEAM_TILE; ++j) {
@@ -172,7 +172,7 @@ static depth_tile_info measure_depth_tile(const float *depth, const dm_beam_grid
     return info;
 }
 
-static int depth_tile(depth_tile_info info, const dm_beam_grid *grid, uint32_t z) {
+static int depth_tile(depth_tile_info info, const beam_grid *grid, uint32_t z) {
     if (!info.covered) return 1;
     if (info.covered != BEAM_TILE * BEAM_TILE ||
         info.farthest - info.nearest > grid->step.z * 0.5f) return -1;
@@ -184,23 +184,23 @@ static int depth_tile(depth_tile_info info, const dm_beam_grid *grid, uint32_t z
     return -1;
 }
 
-static bool emit(dm_beam_grid *grid, uint32_t x, uint32_t y, uint32_t z, uint32_t side) {
+static bool emit(beam_grid *grid, uint32_t x, uint32_t y, uint32_t z, uint32_t side) {
 
     const uint64_t max_cells = (uint64_t)grid->width * grid->height * grid->depth;
     if (grid->count >= max_cells) return false;
 
     if (!grid->count || (grid->count >= 64u && !(grid->count & (grid->count - 1u)))) {
         const uint32_t capacity = grid->count ? grid->count * 2u : 64u;
-        dm_beam_cell *next = realloc(grid->cells, (size_t)capacity * sizeof(*next));
+        beam_cell *next = realloc(grid->cells, (size_t)capacity * sizeof(*next));
         if (!next) return false;
         grid->cells = next;
     }
 
-    grid->cells[grid->count++] = (dm_beam_cell){x, y, z, side};
+    grid->cells[grid->count++] = (beam_cell){x, y, z, side};
     return true;
 }
 
-static bool compress(dm_beam_grid *grid, const uint32_t *prefix,
+static bool compress(beam_grid *grid, const uint32_t *prefix,
                      uint32_t x, uint32_t y, uint32_t z, uint32_t side) {
     const size_t stride = (size_t)grid->width + 1u;
     const uint32_t visible = prefix[(y + side) * stride + x + side] -
@@ -232,7 +232,7 @@ static void prefix_slice(uint32_t *prefix, const unsigned char *samples,
     }
 }
 
-void dm_beam_free(dm_beam_grid *grid) {
+void beam_free(beam_grid *grid) {
 
     if (!grid) return;
 
@@ -241,7 +241,7 @@ void dm_beam_free(dm_beam_grid *grid) {
     memset(grid, 0, sizeof(*grid));
 }
 
-bool dm_beam_build(dm_beam_grid *grid, const mesh *scene, const bvh *tree,
+bool beam_build(beam_grid *grid, const mesh *scene, const bvh *tree,
                    vec3 sun_direction) {
 
     if (!grid || !scene || !tree || !tree->node_count) return false;
@@ -313,13 +313,13 @@ bool dm_beam_build(dm_beam_grid *grid, const mesh *scene, const bvh *tree,
                                               min.z + (z + 0.5f) * grid->step.z);
                             const vec3 p = v3_add(v3_add(v3_scale(u, q.x), v3_scale(v, q.y)),
                                                   v3_scale(sun, q.z));
-                            const dm_trace_ray ray = {
+                            const trace_ray ray = {
                                 .origin = p,
                                 .tmin = 0.001f,
                                 .direction = sun,
                                 .tmax = 1.0e20f
                             };
-                            visible = !dm_trace_any(tree, ray);
+                            visible = !trace_any(tree, ray);
                             ++traced;
                         }
                         samples[i + (size_t)grid->width * (j + (size_t)grid->height * z)] = visible;
@@ -344,12 +344,12 @@ bool dm_beam_build(dm_beam_grid *grid, const mesh *scene, const bvh *tree,
     if (good) grid->shadow_depth = depth;
     else {
         free(depth);
-        dm_beam_free(grid);
+        beam_free(grid);
     }
     return good;
 }
 
-float *dm_beam_expand(const dm_beam_grid *grid) {
+float *beam_expand(const beam_grid *grid) {
 
     if (!grid || !grid->width || !grid->height || !grid->depth ||
         grid->width > 128u || grid->height > 128u || grid->depth > BEAM_MAX_SLICES ||
@@ -360,7 +360,7 @@ float *dm_beam_expand(const dm_beam_grid *grid) {
     if (!samples) return NULL;
 
     for (uint32_t n = 0; n < grid->count; ++n) {
-        const dm_beam_cell c = grid->cells[n];
+        const beam_cell c = grid->cells[n];
         if (!c.side || c.side > grid->width || c.x > grid->width - c.side ||
             c.y > grid->height - c.side || c.z >= grid->depth) {
             free(samples);

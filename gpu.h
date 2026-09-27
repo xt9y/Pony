@@ -1,77 +1,48 @@
 #ifndef GPU_H
 #define GPU_H
 
-// Uncomment to compile the SDL_GPU backend.
-// #define DUSTMITE_GPU_SDL
-
-#include "dustmite.h"
+#include "game.h"
 
 #include <SDL3/SDL.h>
 
-#if !defined(DUSTMITE_GPU_SDL) && defined(__clang__)
+#if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wgnu-zero-variadic-macro-arguments"
 #pragma clang diagnostic ignored "-Wvariadic-macro-arguments-omitted"
 #pragma clang diagnostic ignored "-Wstrict-prototypes"
 #endif
 
-#ifndef DUSTMITE_GPU_SDL
 #include <NRI.h>
 #include <Extensions/NRIDeviceCreation.h>
 #include <Extensions/NRIHelper.h>
 #include <Extensions/NRISwapChain.h>
-#endif
 
-#if !defined(DUSTMITE_GPU_SDL) && defined(__clang__)
+#if defined(__clang__)
 #pragma clang diagnostic pop
-#endif
-
-#define WINDOW SDL_Window
-#define EVENT SDL_Event
-#ifdef DUSTMITE_GPU_SDL
-#define DEVICE SDL_GPUDevice
-#define BUFFER SDL_GPUBuffer
-#define TEXTURE SDL_GPUTexture
-#define SAMPLER SDL_GPUSampler
-#define GRAPHICS_PIPELINE SDL_GPUGraphicsPipeline
-#define COMPUTE_PIPELINE SDL_GPUComputePipeline
-#define TEXTURE_FORMAT SDL_GPUTextureFormat
-#else
-#define DEVICE NriDevice
-#define BUFFER NriBuffer
-#define TEXTURE NriTexture
-#define SAMPLER NriDescriptor
-#define GRAPHICS_PIPELINE NriPipeline
-#define COMPUTE_PIPELINE NriPipeline
-#define TEXTURE_FORMAT NriFormat
 #endif
 
 typedef struct renderer renderer;
 
 typedef struct fx_state {
-#ifdef DUSTMITE_GPU_SDL
-    DEVICE *device;
-#else
     renderer *owner;
-#endif
 
-    GRAPHICS_PIPELINE *compose_pipeline;
-    COMPUTE_PIPELINE *ssao_pipeline;
-    COMPUTE_PIPELINE *bloom_pipeline;
-    COMPUTE_PIPELINE *grade_pipeline;
-    COMPUTE_PIPELINE *volume_pipeline;
-    COMPUTE_PIPELINE *volume_compose_pipeline;
-    SAMPLER *sampler;
-    SAMPLER *depth_sampler;
+    NriPipeline *compose_pipeline;
+    NriPipeline *ssao_pipeline;
+    NriPipeline *bloom_pipeline;
+    NriPipeline *grade_pipeline;
+    NriPipeline *volume_pipeline;
+    NriPipeline *volume_compose_pipeline;
+    NriDescriptor *sampler;
+    NriDescriptor *depth_sampler;
 
-    TEXTURE *hdr;
-    TEXTURE *normal_depth;
-    TEXTURE *ao;
-    TEXTURE *bloom_a;
-    TEXTURE *bloom_b;
-    TEXTURE *lut;
-    TEXTURE *volume;
-    TEXTURE *lit;
+    NriTexture *hdr;
+    NriTexture *normal_depth;
+    NriTexture *ao;
+    NriTexture *bloom_a;
+    NriTexture *bloom_b;
+    NriTexture *lut;
+    NriTexture *volume;
+    NriTexture *lit;
 
     Uint32 width, height;
     Uint32 ao_width, ao_height;
@@ -107,32 +78,28 @@ typedef struct render_frame {
     float aspect;
 } render_frame;
 
-#ifndef DUSTMITE_GPU_SDL
-typedef struct swapchain_texture {
-    TEXTURE *texture;
-    NriDescriptor *color_attachment;
-    NriFence *acquire;
-    NriFence *release;
-} swapchain_texture;
-typedef struct texture_state {
-    NriTexture *texture;
-    NriAccessLayoutStage state;
-} texture_state;
-#endif
+typedef struct swapchain_texture swapchain_texture;
+typedef struct frame_context frame_context;
+typedef struct upload_context upload_context;
+typedef struct texture_state texture_state;
 
 struct renderer {
-    WINDOW *window;
-    DEVICE *device;
+    SDL_Window *window;
 
-#ifndef DUSTMITE_GPU_SDL
+    NriDevice *device;
+
     NriCoreInterface core;
     NriHelperInterface helper;
     NriSwapChainInterface swapchain_api;
     NriQueue *graphics_queue;
     NriSwapChain *swapchain;
     NriDescriptorPool *descriptor_pool;
+    NriFence *frame_fence;
+    frame_context *frame_contexts;
+    frame_context *active_frame;
+    upload_context *upload;
     swapchain_texture *swapchain_frames;
-    TEXTURE **swapchain_textures;
+    NriTexture **swapchain_textures;
     uint32_t swapchain_texture_count;
     uint32_t swapchain_width, swapchain_height, current_swap_index;
     uint64_t frame_index;
@@ -156,32 +123,38 @@ struct renderer {
     NriPipelineLayout *volume_layout;
     NriPipelineLayout *volume_compose_layout;
     NriPipelineLayout *compose_layout;
-    NriPipelineLayout *current_graphics_layout, *current_compute_layout;
-#endif
+    NriPipelineLayout *current_graphics_layout;
+    NriPipelineLayout *current_compute_layout;
 
-    GRAPHICS_PIPELINE *sky_pipeline;
-    GRAPHICS_PIPELINE *solid_pipeline;
-    GRAPHICS_PIPELINE *line_pipeline;
-    COMPUTE_PIPELINE *bake_pipeline;
+    NriPipeline *sky_pipeline;
+    NriPipeline *solid_pipeline;
+    NriPipeline *line_pipeline;
+    NriPipeline *bake_pipeline;
 
-    BUFFER *vertex_buffer;
-    BUFFER *bvh_node_buffer;
-    BUFFER *bvh_triangle_buffer;
-    BUFFER *lightmap_sample_buffer;
+    NriBuffer *vertex_buffer;
+    NriBuffer *bvh_node_buffer;
+    NriBuffer *bvh_triangle_buffer;
+    NriBuffer *lightmap_sample_buffer;
+    NriBuffer *lightmap_full_sample_buffer;
+    NriBuffer *lightmap_sparse_sample_buffer;
+    NriBuffer *lightmap_probe_buffer;
+    NriBuffer *lightmap_patch_map_buffer;
+    NriBuffer *lightmap_patch_anchor_buffer;
 
-    TEXTURE *depth_texture;
-    TEXTURE *lightmap_texture;
-    TEXTURE *lightmap_scratch;
-    SAMPLER *lightmap_sampler;
-    SAMPLER *material_sampler;
-    TEXTURE_FORMAT depth_format;
+    NriTexture *depth_texture;
+    NriTexture *lightmap_texture;
+    NriTexture *lightmap_scratch;
+    NriTexture *lightmap_direct;
+    NriDescriptor *lightmap_sampler;
+    NriDescriptor *material_sampler;
+    NriFormat depth_format;
     Uint32 depth_width;
     Uint32 depth_height;
 
-    TEXTURE **image_textures;
+    NriTexture **image_textures;
     uint32_t image_texture_count;
-    TEXTURE *default_white;
-    TEXTURE *default_normal;
+    NriTexture *default_white;
+    NriTexture *default_normal;
 
     render_material *materials;
     uint32_t material_count;
@@ -197,14 +170,21 @@ struct renderer {
     uint32_t lightmap_width;
     uint32_t lightmap_height;
     uint32_t lightmap_sample_count;
+    uint32_t lightmap_trace_count;
     uint32_t bake_target_samples;
+    uint32_t lightmap_min_samples;
+    vec3 lightmap_probe_origin;
+    float lightmap_probe_spacing;
+    uint32_t lightmap_probe_count_x;
+    uint32_t lightmap_probe_count_y;
+    uint32_t lightmap_probe_count_z;
     float bake_epsilon;
     bool has_bake;
     const char *bake_stage;
-    dm_probe_grid volume_probes;
-    BUFFER *volume_probe_buffer;
-    BUFFER *beam_buffer;
-    dm_beam_grid beams;
+    probe_grid volume_probes;
+    NriBuffer *volume_probe_buffer;
+    NriBuffer *beam_buffer;
+    beam_grid beams;
 
     fx_state fx;
 
@@ -221,45 +201,24 @@ struct renderer {
     uint32_t debug_view;
 };
 
-bool r_init(renderer *r, const char *title, int width, int height);
-bool r_build_scene(renderer *r, const mesh *m, const gltf_scene *visual,
-                   const lightmap *lm);
-bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash,
-                            uint64_t layout_hash, uint64_t volume_hash,
-                            uint64_t beam_hash, const lightmap *lm);
-bool r_rebake_current_scene(renderer *r, const mesh *m,
-                            const gltf_scene *visual, const lightmap *lm,
-                            const char *path, uint64_t scene_hash,
-                            uint64_t layout_hash, uint64_t volume_hash,
-                            uint64_t beam_hash);
-void r_event(renderer *r, const EVENT *event);
-bool r_draw(renderer *r);
-void r_deinit(renderer *r);
-
 bool upload_scene(renderer *r, const gltf_scene *visual);
 bool upload_bvh(renderer *r, const bvh *tree);
-bool bake_lightmap(renderer *r, const bvh *tree, const lightmap *lm);
-bool bake_probe_grid(renderer *r, dm_probe_grid *grid, Uint32 samples);
-TEXTURE *upload_lightmap(renderer *r, const dm_cached_lightmap *cached);
-BUFFER *upload_probes(renderer *r, const dm_probe_grid *grid);
-BUFFER *upload_beams(renderer *r, const dm_beam_grid *grid);
-bool download_lightmap(renderer *r, dm_cached_lightmap *out);
-void release_texture(renderer *r, TEXTURE *texture);
-void release_buffer(renderer *r, BUFFER *buffer);
+bool bake_lightmap(renderer *r, const bvh *tree, const lightmap *lm,
+                   const probe_grid *probes);
+typedef bool (*probe_bake_progress_fn)(Uint32 done, Uint32 total, Uint32 active);
+bool bake_probe_grid_fast(renderer *r, probe_grid *grid,
+                          const bvh *tree, const beam_grid *beams,
+                          probe_bake_progress_fn progress);
+bool bake_probe_grid(renderer *r, probe_grid *grid, Uint32 samples);
+NriTexture *upload_lightmap(renderer *r, const cached_lightmap *cached);
+NriBuffer *upload_probes(renderer *r, const probe_grid *grid);
+NriBuffer *upload_beams(renderer *r, const beam_grid *grid);
+bool download_lightmap(renderer *r, cached_lightmap *out);
+void release_texture(renderer *r, NriTexture *texture);
+void release_buffer(renderer *r, NriBuffer *buffer);
 void release_bake_resources(renderer *r);
 bool draw_frame(renderer *r, const render_frame *frame);
 bool bake_worker_init(renderer *r);
 void bake_worker_deinit(renderer *r);
-
-void bake_progress(renderer *r, const char *stage, Uint32 done, Uint32 total);
-
-bool bake_start(renderer *r, const mesh *scene, const gltf_scene *visual,
-                const lightmap *layout, const char *path,
-                uint64_t scene_hash, uint64_t layout_hash,
-                uint64_t volume_hash, uint64_t beam_hash);
-void bake_update(renderer *r);
-void bake_cancel(renderer *r);
-bool bake_active(renderer *r);
-void bake_update_title(renderer *r);
 
 #endif
