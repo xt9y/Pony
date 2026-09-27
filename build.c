@@ -1,7 +1,27 @@
 #include <cbuild.h>
 
+#include <stdio.h>
+#include <stdlib.h>
+
+static void format_sources(void) {
+#if defined(_WIN32)
+    const char *command =
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command "
+        "\"py .\\felix-format -i "
+        "(Get-ChildItem -File *.c,*.h | ForEach-Object FullName)\"";
+#else
+    const char *command = "./felix-format -i *.c *.h";
+#endif
+
+    if (system(command) != 0) {
+        fprintf(stderr, "felix-format failed\n");
+        exit(1);
+    }
+}
 
 void build(C_Build *b) {
+    format_sources();
+
     C_Target *app = c_executable(b, "game");
 
     c_sources(app, "main.c");
