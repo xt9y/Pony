@@ -88,6 +88,7 @@ static const uint RT_STATIC_TRIANGLE_WORDS = 20u;
 static const uint RT_OBJECT_WORDS = 8u;
 static const uint RT_DYNAMIC_TRIANGLE_WORDS = 9u;
 static const uint RT_INVALID_NODE = 0xffffffffu;
+static const uint RT_EMITTER_SAMPLES = 8u;
 
 float3 srgb_to_linear(float3 c)
 {
@@ -151,59 +152,6 @@ float source_float(uint index)
 float3 source_float3(uint index)
 {
     return float3(source_float(index), source_float(index + 1u), source_float(index + 2u));
-}
-
-bool rt_emitter_point(out float3 light_position, out float3 light_normal)
-{
-    light_position = 0.0f;
-    light_normal = 0.0f;
-    if (!rt_ready()) return false;
-
-    uint source_bytes = 0u;
-    StaticTraceTriangles.GetDimensions(source_bytes);
-    uint source_words = source_bytes / 4u;
-    uint triangle_count = rt_word(9u);
-    float total_weight = asfloat(rt_word(10u));
-    if (triangle_count == 0u || total_weight <= 0.0f ||
-        triangle_count > source_words / RT_STATIC_TRIANGLE_WORDS)
-        return false;
-
-    float target = total_weight * 0.5f;
-    uint lo = 0u;
-    uint hi = triangle_count;
-    while (lo < hi)
-    {
-        uint mid = lo + (hi - lo) / 2u;
-        float cumulative = source_float(mid * RT_STATIC_TRIANGLE_WORDS + 19u);
-        if (cumulative > target) hi = mid;
-        else lo = mid + 1u;
-    }
-    if (lo >= triangle_count) return false;
-
-    uint base = lo * RT_STATIC_TRIANGLE_WORDS;
-    float cumulative = source_float(base + 19u);
-    float previous = lo == 0u ? 0.0f : source_float((lo - 1u) * RT_STATIC_TRIANGLE_WORDS + 19u);
-    if (cumulative <= previous) return false;
-
-    float3 a = source_float3(base + 0u);
-    float3 b = source_float3(base + 4u);
-    float3 c = source_float3(base + 8u);
-    float ab = dot(b - a, b - a);
-    float bc = dot(c - b, c - b);
-    float ca = dot(a - c, a - c);
-
-    float triangle_weight = cumulative - previous;
-    if (triangle_weight >= total_weight * 0.999f)
-        light_position = (a + b + c) / 3.0f;
-    else if (ab >= bc && ab >= ca)
-        light_position = (a + b) * 0.5f;
-    else if (bc >= ca)
-        light_position = (b + c) * 0.5f;
-    else
-        light_position = (c + a) * 0.5f;
-
-    light_normal = normalize(source_float3(base + 12u));
-    return all(isfinite(light_position)) && all(isfinite(light_normal));
 }
 
 bool rt_box(float3 origin, float3 direction, float tmin, float tmax,
@@ -322,29 +270,107 @@ bool rt_dynamic_any(float3 origin, float3 direction, float tmin, float tmax)
     return false;
 }
 
-float realtime_emitter_visibility(float3 position, float3 normal, bool include_static)
+bool rt_emitter_sample(uint sample_index, out float3 light_position,
+                       out float3 light_normal, out float3 light_radiance,
+                       out float pdf_area)
 {
-    float3 light_position;
-    float3 light_normal;
-    if (!rt_emitter_point(light_position, light_normal)) return 1.0f;
+    light_position = 0.0f;
+    light_normal = 0.0f;
+    light_radiance = 0.0f;
+    pdf_area = 0.0f;
+    if (!rt_ready()) return false;
 
-    float3 delta = light_position - position;
-    float distance2 = dot(delta, delta);
+    uint source_bytes = 0u;
+    StaticTraceTriangles.GetDimensions(source_bytes);
+    uint source_words = source_bytes / 4u;
+    uint triangle_count = rt_word(9u);
+    float total_weight = asfloat(rt_word(10u));
+    if (triangle_count == 0u || total_weight <= 0.0f ||
+        triangle_count > source_words / RT_STATIC_TRIANGLE_WORDS)
+        return false;
+
+    float sequence = ((float)sample_index + 0.5f) / (float)RT_EMITTER_SAMPLES;
+    float target = sequence * total_weight;
+    uint lo = 0u;
+    uint hi = triangle_count;
+    while (lo < hi)
+    {
+        uint mid = lo + (hi - lo) / 2u;
+        float cumulative = source_float(mid * RT_STATIC_TRIANGLE_WORDS + 19u);
+        if (cumulative > target) hi = mid;
+        else lo = mid + 1u;
+    }
+    if (lo >= triangle_count) return false;
+
+    uint base = lo * RT_STATIC_TRIANGLE_WORDS;
+    float cumulative = source_float(base + 19u);
+    float previous = lo == 0u ? 0.0f : source_float((lo - 1u) * RT_STATIC_TRIANGLE_WORDS + 19u);
+    float triangle_weight = cumulative - previous;
+    if (triangle_weight <= 0.0f) return false;
+
+    float3 a = source_float3(base + 0u);
+    float3 b = source_float3(base + 4u);
+    float3 c = source_float3(base + 8u);
+    float3 edge1 = b - a;
+    float3 edge2 = c - a;
+    float area = 0.5f * length(cross(edge1, edge2));
+    if (area <= 1.0e-10f) return false;
+
+    float sample_u = frac(((float)sample_index + 0.5f) * 0.754877666f);
+    float sample_v = frac(((float)sample_index + 0.5f) * 0.569840296f);
+    float root = sqrt(sample_u);
+    light_position = a * (1.0f - root) +
+                     b * (root * (1.0f - sample_v)) +
+                     c * (root * sample_v);
+    light_normal = normalize(source_float3(base + 12u));
+    light_radiance = max(source_float3(base + 16u), 0.0f);
+    pdf_area = (triangle_weight / total_weight) / area;
+    return pdf_area > 1.0e-12f && all(isfinite(light_position)) &&
+           all(isfinite(light_normal));
+}
+
+float3 realtime_emitter_shadow_delta(float3 position, float3 normal)
+{
+    if (!rt_ready() || rt_word(5u) == 0u) return 0.0f;
+
     float epsilon = max(asfloat(rt_word(11u)), 1.0e-4f);
-    if (distance2 <= epsilon * epsilon) return 1.0f;
+    float3 correction = 0.0f;
 
-    float distance = sqrt(distance2);
-    float3 direction = delta / distance;
-    if (dot(normal, direction) <= 0.0f || dot(light_normal, -direction) <= 0.0f)
-        return 1.0f;
+    [unroll] for (uint sample_index = 0u; sample_index < RT_EMITTER_SAMPLES; ++sample_index)
+    {
+        float3 light_position;
+        float3 light_normal;
+        float3 light_radiance;
+        float pdf_area;
+        if (!rt_emitter_sample(sample_index, light_position, light_normal,
+                               light_radiance, pdf_area))
+            continue;
 
-    float3 origin = position + normal * epsilon;
-    float tmax = distance - 2.0f * epsilon;
-    if (tmax <= epsilon) return 1.0f;
+        float3 delta = light_position - position;
+        float distance2 = dot(delta, delta);
+        if (distance2 <= epsilon * epsilon) continue;
 
-    if (include_static && rt_static_any(origin, direction, epsilon, tmax)) return 0.0f;
-    if (rt_dynamic_any(origin, direction, epsilon, tmax)) return 0.0f;
-    return 1.0f;
+        float distance = sqrt(distance2);
+        float3 direction = delta / distance;
+        float receiver_cosine = saturate(dot(normal, direction));
+        float emitter_cosine = saturate(dot(light_normal, -direction));
+        if (receiver_cosine <= 0.0f || emitter_cosine <= 0.0f) continue;
+
+        float3 origin = position + normal * epsilon;
+        float tmax = distance - 2.0f * epsilon;
+        if (tmax <= epsilon) continue;
+
+        // Most pixels never intersect dynamic bounds. Only pay for the static BVH
+        // when a dynamic object actually blocks this emitter sample.
+        if (!rt_dynamic_any(origin, direction, epsilon, tmax)) continue;
+        if (rt_static_any(origin, direction, epsilon, tmax)) continue;
+
+        correction -= light_radiance *
+            (receiver_cosine * emitter_cosine /
+             max(distance2 * pdf_area, 1.0e-8f));
+    }
+
+    return correction / (float)RT_EMITTER_SAMPLES;
 }
 
 float3 surface_probe_value(SurfaceProbe probe, float3 normal)
@@ -536,12 +562,12 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace)
         ? max(IndirectLightmap.Sample(IndirectLightmapSampler, baked_uv).rgb, 0.0f)
         : float3(0.12f, 0.12f, 0.12f);
 
-    float emitter_visibility = realtime_emitter_visibility(
-        input.world_position, n, object_dynamic != 0u);
     float3 indirect = object_dynamic != 0u
         ? surface_probe_irradiance(input.world_position, n) / PI
         : base_indirect;
-    indirect *= emitter_visibility;
+    float3 emitter_shadow_delta = realtime_emitter_shadow_delta(input.world_position, n);
+    if (object_dynamic != 0u) emitter_shadow_delta /= PI;
+    indirect = max(indirect + emitter_shadow_delta, 0.0f);
 
     float3 direct_sun = object_dynamic != 0u
         ? sun_color.rgb * (roughness_normal_ao_sun.w * n_dot_l * sun_visibility)
