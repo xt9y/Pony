@@ -1,5 +1,11 @@
 #include "gpu.h"
+#include "game.h"
 
+#include "NRI.h"
+#include "NRIDescs.h"
+
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,13 +24,20 @@ struct SWAPCHAIN_FRAME {
     NriAccessLayoutStage state;
 };
 
-static void destroy_swapchain(GPU *gpu);
-static void destroy_frame_contexts(GPU *gpu);
+NriDescriptor *gpu_swapchain_color_attachment(GPU *gpu, uint32_t swapchain_index) {
+    if (!gpu || !gpu->swapchain_frames || swapchain_index >= gpu->swapchain_texture_count) {
+        return NULL;
+    }
+
+    return gpu->swapchain_frames[swapchain_index].color_attachment;
+}
 
 static bool acquire_queues(GPU *gpu) {
     if (!gpu || !gpu->device) return false;
 
-    if (gpu->core.GetQueue(gpu->device, NriQueueType_GRAPHICS, 0, &gpu->graphics_queue) != NriResult_SUCCESS) return false;
+    if (gpu->core.GetQueue(gpu->device, NriQueueType_GRAPHICS, 0, &gpu->graphics_queue) != NriResult_SUCCESS) {
+        return false;
+    }
 
     if (gpu->core.GetQueue(gpu->device, NriQueueType_COMPUTE, 0, &gpu->compute_queue) != NriResult_SUCCESS) {
         gpu->compute_queue = gpu->graphics_queue;
@@ -37,6 +50,9 @@ static bool acquire_queues(GPU *gpu) {
     return true;
 }
 
+static void destroy_swapchain(GPU *gpu);
+static void destroy_frame_contexts(GPU *gpu);
+
 static bool create_swapchain(GPU *gpu, uint32_t width, uint32_t height) {
     if (!gpu || !gpu->window || !gpu->device || !gpu->graphics_queue || !width || !height) return false;
 
@@ -47,6 +63,7 @@ static bool create_swapchain(GPU *gpu, uint32_t width, uint32_t height) {
     (void)props;
 
     if (!gpu->metal_view) gpu->metal_view = SDL_Metal_CreateView(gpu->window);
+
     if (!gpu->metal_view) return false;
 
     window.metal.caMetalLayer = SDL_Metal_GetLayer(gpu->metal_view);
@@ -83,10 +100,12 @@ static bool create_swapchain(GPU *gpu, uint32_t width, uint32_t height) {
     if (gpu->swapchain_api.CreateSwapChain(gpu->device, &desc, &gpu->swapchain) != NriResult_SUCCESS) return false;
 
     uint32_t count = 0;
+
     NriTexture *const *textures = gpu->swapchain_api.GetSwapChainTextures(gpu->swapchain, &count);
 
     if (!textures || !count) {
         destroy_swapchain(gpu);
+
         return false;
     }
 
@@ -96,6 +115,7 @@ static bool create_swapchain(GPU *gpu, uint32_t width, uint32_t height) {
 
     if (!gpu->swapchain_textures || !gpu->swapchain_frames) {
         destroy_swapchain(gpu);
+
         return false;
     }
 
@@ -127,6 +147,7 @@ static bool create_swapchain(GPU *gpu, uint32_t width, uint32_t height) {
             gpu->core.CreateFence(gpu->device, NRI_SWAPCHAIN_SEMAPHORE, &frame->acquire) != NriResult_SUCCESS ||
             gpu->core.CreateFence(gpu->device, NRI_SWAPCHAIN_SEMAPHORE, &frame->release) != NriResult_SUCCESS) {
             destroy_swapchain(gpu);
+
             return false;
         }
     }
@@ -142,7 +163,9 @@ static void destroy_swapchain(GPU *gpu) {
             SWAPCHAIN_FRAME *frame = &gpu->swapchain_frames[i];
 
             if (frame->color_attachment) gpu->core.DestroyDescriptor(frame->color_attachment);
+
             if (frame->acquire) gpu->core.DestroyFence(frame->acquire);
+
             if (frame->release) gpu->core.DestroyFence(frame->release);
         }
     }
@@ -180,6 +203,7 @@ static bool create_frame_contexts(GPU *gpu) {
 
     if (gpu->core.CreateFence(gpu->device, 0, &gpu->frame_fence) != NriResult_SUCCESS) {
         destroy_frame_contexts(gpu);
+
         return false;
     }
 
@@ -189,6 +213,7 @@ static bool create_frame_contexts(GPU *gpu) {
         if (gpu->core.CreateCommandAllocator(gpu->graphics_queue, &frame->allocator) != NriResult_SUCCESS ||
             gpu->core.CreateCommandBuffer(frame->allocator, &frame->command_buffer) != NriResult_SUCCESS) {
             destroy_frame_contexts(gpu);
+
             return false;
         }
     }
@@ -204,6 +229,7 @@ static void destroy_frame_contexts(GPU *gpu) {
             FRAME_CONTEXT *frame = &gpu->frame_contexts[i];
 
             if (frame->command_buffer) gpu->core.DestroyCommandBuffer(frame->command_buffer);
+
             if (frame->allocator) gpu->core.DestroyCommandAllocator(frame->allocator);
         }
     }
@@ -217,12 +243,7 @@ static void destroy_frame_contexts(GPU *gpu) {
     }
 }
 
-static void transition_swapchain_texture(
-    GPU *gpu,
-    NriCommandBuffer *command_buffer,
-    uint32_t swapchain_index,
-    NriAccessLayoutStage after
-) {
+static void transition_swapchain_texture(GPU *gpu, NriCommandBuffer *command_buffer, uint32_t swapchain_index, NriAccessLayoutStage after) {
     SWAPCHAIN_FRAME *frame = &gpu->swapchain_frames[swapchain_index];
 
     const NriTextureBarrierDesc texture_barrier = {
@@ -243,12 +264,32 @@ static void transition_swapchain_texture(
     frame->state = after;
 }
 
-bool gpu_begin_frame(
-    GPU *gpu,
-    NriCommandBuffer **command_buffer,
-    NriTexture **swapchain_texture,
-    uint32_t *swapchain_index
-) {
+static bool create_streamer(GPU *gpu) {
+    const NriStreamerDesc streamer_desc = {
+        .constantBufferMemoryLocation = NriMemoryLocation_HOST_UPLOAD,
+        .constantBufferSize = 1024 * 1024,
+        .dynamicBufferMemoryLocation = NriMemoryLocation_HOST_UPLOAD,
+        .dynamicBufferDesc = {
+            .usage = NriBufferUsageBits_NONE
+        },
+        .queuedFrameNum = FRAME_QUEUE_DEPTH,
+        .hostDataCapacity = 0
+    };
+
+    if (gpu->streamer_api.CreateStreamer(gpu->device, &streamer_desc, &gpu->streamer) != NriResult_SUCCESS) {
+        return false;
+    }
+
+    return true;
+}
+
+static void destroy_streamer(GPU *gpu) {
+    if (gpu->streamer) {
+        gpu->streamer_api.DestroyStreamer(gpu->streamer);
+    }
+}
+
+bool gpu_begin_frame(GPU *gpu, NriCommandBuffer **command_buffer, NriTexture **swapchain_texture, uint32_t *swapchain_index) {
     if (!gpu || !gpu->device || !gpu->swapchain || !gpu->frame_contexts || !gpu->frame_fence || !command_buffer || !swapchain_texture || !swapchain_index) {
         return false;
     }
@@ -268,10 +309,7 @@ bool gpu_begin_frame(
         if (!recreate_swapchain(gpu, (uint32_t)width, (uint32_t)height)) return false;
     }
 
-    const uint64_t wait_value =
-        gpu->frame_index >= FRAME_QUEUE_DEPTH
-            ? 1u + gpu->frame_index - FRAME_QUEUE_DEPTH
-            : 0u;
+    const uint64_t wait_value = gpu->frame_index >= FRAME_QUEUE_DEPTH ? 1u + gpu->frame_index - FRAME_QUEUE_DEPTH : 0u;
 
     gpu->core.Wait(gpu->frame_fence, wait_value);
 
@@ -313,12 +351,7 @@ bool gpu_begin_frame(
     return true;
 }
 
-bool gpu_clear_frame(
-    GPU *gpu,
-    NriCommandBuffer *command_buffer,
-    uint32_t swapchain_index,
-    NriColor32f clear_color
-) {
+bool gpu_clear_frame(GPU *gpu, NriCommandBuffer *command_buffer, uint32_t swapchain_index, NriColor32f clear_color) {
     if (!gpu || !command_buffer || swapchain_index >= gpu->swapchain_texture_count) return false;
 
     const NriAttachmentDesc color = {
@@ -343,18 +376,11 @@ bool gpu_clear_frame(
     return true;
 }
 
-bool gpu_end_frame(
-    GPU *gpu,
-    NriCommandBuffer *command_buffer,
-    uint32_t swapchain_index
-) {
+bool gpu_end_frame(GPU *gpu, NriCommandBuffer *command_buffer, uint32_t swapchain_index) {
     if (!gpu || !command_buffer || !gpu->swapchain || swapchain_index >= gpu->swapchain_texture_count) return false;
 
     transition_swapchain_texture(
-        gpu,
-        command_buffer,
-        swapchain_index,
-        (NriAccessLayoutStage){
+        gpu, command_buffer, swapchain_index, (NriAccessLayoutStage){
             .access = NriAccessBits_NONE,
             .layout = NriLayout_PRESENT,
             .stages = NriStageBits_NONE
@@ -373,19 +399,14 @@ bool gpu_end_frame(
         .stages = NriStageBits_COLOR_ATTACHMENT
     };
 
-    const NriFenceSubmitDesc signal_fences[] = {
-        {
-            .fence = release
-        },
-        {
-            .fence = gpu->frame_fence,
-            .value = present_id
-        }
-    };
+    const NriFenceSubmitDesc signal_fences[] = {{
+    .fence = release
+}, {
+    .fence = gpu->frame_fence,
+    .value = present_id
+}};
 
-    NriCommandBuffer *command_buffers[] = {
-        command_buffer
-    };
+    const NriCommandBuffer *const command_buffers[] = {command_buffer};
 
     const NriQueueSubmitDesc submit = {
         .waitFences = &wait_fence,
@@ -399,6 +420,7 @@ bool gpu_end_frame(
     if (gpu->core.QueueSubmit(gpu->graphics_queue, &submit) != NriResult_SUCCESS) return false;
 
     const NriResult result = gpu->swapchain_api.QueuePresent(gpu->swapchain, release, present_id);
+
     gpu->frame_index = present_id;
 
     if (result == NriResult_OUT_OF_DATE) {
@@ -406,6 +428,7 @@ bool gpu_end_frame(
         int height = 0;
 
         if (!SDL_GetWindowSizeInPixels(gpu->window, &width, &height)) return false;
+
         if (width <= 0 || height <= 0) return true;
 
         return recreate_swapchain(gpu, (uint32_t)width, (uint32_t)height);
@@ -429,34 +452,19 @@ bool gpu_resize(GPU *gpu) {
     return recreate_swapchain(gpu, (uint32_t)width, (uint32_t)height);
 }
 
-bool gpu_create_buffer(
-    GPU *gpu,
-    const NriBufferDesc *desc,
-    NriMemoryLocation memory,
-    NriBuffer **buffer
-) {
+bool gpu_create_buffer(GPU *gpu, const NriBufferDesc *desc, NriMemoryLocation memory, NriBuffer **buffer) {
     if (!gpu || !gpu->device || !desc || !buffer) return false;
 
     return gpu->core.CreateCommittedBuffer(gpu->device, memory, 0.0f, desc, buffer) == NriResult_SUCCESS;
 }
 
-bool gpu_create_texture(
-    GPU *gpu,
-    const NriTextureDesc *desc,
-    NriMemoryLocation memory,
-    NriTexture **texture
-) {
+bool gpu_create_texture(GPU *gpu, const NriTextureDesc *desc, NriMemoryLocation memory, NriTexture **texture) {
     if (!gpu || !gpu->device || !desc || !texture) return false;
 
     return gpu->core.CreateCommittedTexture(gpu->device, memory, 0.0f, desc, texture) == NriResult_SUCCESS;
 }
 
-bool gpu_upload_buffer(
-    GPU *gpu,
-    NriBuffer *buffer,
-    const void *data,
-    NriAccessStage after
-) {
+bool gpu_upload_buffer(GPU *gpu, NriBuffer *buffer, const void *data, NriAccessStage after) {
     if (!gpu || !gpu->graphics_queue || !buffer || !data) return false;
 
     const NriBufferUploadDesc upload = {
@@ -468,13 +476,7 @@ bool gpu_upload_buffer(
     return gpu->helper.UploadData(gpu->graphics_queue, NULL, 0, &upload, 1) == NriResult_SUCCESS;
 }
 
-bool gpu_upload_texture(
-    GPU *gpu,
-    NriTexture *texture,
-    const NriTextureSubresourceUploadDesc *subresources,
-    NriPlaneBits planes,
-    NriAccessLayoutStage after
-) {
+bool gpu_upload_texture(GPU *gpu, NriTexture *texture, const NriTextureSubresourceUploadDesc *subresources, NriPlaneBits planes, NriAccessLayoutStage after) {
     if (!gpu || !gpu->graphics_queue || !texture || !subresources) return false;
 
     const NriTextureUploadDesc upload = {
@@ -528,25 +530,78 @@ bool gpu_init(GPU *gpu, const char *title, int width, int height) {
         }
     };
 
+    NriVertexAttributeDesc attributes_desc[] = {
+        {
+            .d3d = {"POSITION", 0},
+            .vk = {0},
+            .offset = 0,
+            .format = NriFormat_RGB32_SFLOAT,
+            .streamIndex = 0
+        },
+        {
+            .d3d = {"NOR  MAL", 0},
+            .vk = {1},
+            .offset = 12,
+            .format = NriFormat_RGB32_SFLOAT,
+            .streamIndex = 0
+        },
+        {
+            .d3d = {"TEXCOORD", 0},
+            .vk = {2},
+            .offset = 24,
+            .format = NriFormat_RG32_SFLOAT,
+            .streamIndex = 0
+        },
+        {
+            .d3d = {"MATERIAL", 0},
+            .vk = {3},
+            .offset = 32,
+            .format = NriFormat_R32_UINT,
+            .streamIndex = 0
+        }
+    };
+
+    NriVertexStreamDesc stream_desc = {
+        .bindingSlot = 0,
+        .stride = sizeof(GLTF_VERTEX),
+        .stepRate = NriVertexStreamStepRate_PER_VERTEX
+    };
+
     if (nriCreateDevice(&device_desc, &gpu->device) != NriResult_SUCCESS) {
         SDL_Log("NRI device creation failed");
         gpu_deinit(gpu);
+
         return false;
     }
 
-    if (nriGetInterface(gpu->device, NRI_INTERFACE(NriCoreInterface), &gpu->core) != NriResult_SUCCESS ||
+    if (nriGetInterface(gpu->device, NRI_INTERFACE(NriStreamerInterface), &gpu->streamer_api) != NriResult_SUCCESS ||
+        nriGetInterface(gpu->device, NRI_INTERFACE(NriCoreInterface), &gpu->core) != NriResult_SUCCESS ||
         nriGetInterface(gpu->device, NRI_INTERFACE(NriHelperInterface), &gpu->helper) != NriResult_SUCCESS ||
         nriGetInterface(gpu->device, NRI_INTERFACE(NriSwapChainInterface), &gpu->swapchain_api) != NriResult_SUCCESS) {
         SDL_Log("NRI interface acquisition failed");
         gpu_deinit(gpu);
+
         return false;
     }
 
-    if (!acquire_queues(gpu) ||
-        !create_frame_contexts(gpu) ||
-        !create_swapchain(gpu, (uint32_t)width, (uint32_t)height)) {
-        SDL_Log("NRI frame/swapchain creation failed");
+    if (!acquire_queues(gpu) || !create_frame_contexts(gpu)) {
+        SDL_Log("NRI frame creation failed");
         gpu_deinit(gpu);
+
+        return false;
+    }
+
+    if (!create_swapchain(gpu, (uint32_t)width, (uint32_t)height)) {
+        SDL_Log("NRI swapchain creation failed");
+        gpu_deinit(gpu);
+
+        return false;
+    }
+
+    if (!create_streamer(gpu)) {
+        SDL_Log("NRI stramer creation failed");
+        gpu_deinit(gpu);
+
         return false;
     }
 
@@ -563,6 +618,7 @@ void gpu_deinit(GPU *gpu) {
 
         destroy_frame_contexts(gpu);
         destroy_swapchain(gpu);
+        destroy_streamer(gpu);
 
         nriDestroyDevice(gpu->device);
     }

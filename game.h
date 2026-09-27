@@ -55,6 +55,8 @@ VEC3 v3_normalize(VEC3 v);
 void mesh_free(MESH *m);
 
 
+// MODEL LOADING
+
 typedef enum GLB_TOKEN_TYPE { GLB_TOKEN_OBJECT, GLB_TOKEN_ARRAY, GLB_TOKEN_STRING, GLB_TOKEN_PRIMITIVE } GLB_TOKEN_TYPE;
 
 typedef struct GLB_TOKEN {
@@ -182,6 +184,8 @@ bool gltf_extract(const GLB_DOC *doc, GLTF_SCENE *scene);
 void gltf_free(GLTF_SCENE *scene);
 
 
+// SCENE
+
 typedef struct TRANSFORM {
     VEC3 position;
     float rotation[4];
@@ -270,6 +274,8 @@ void object_set_transform(OBJECT *object, TRANSFORM transform);
 void object_mark_dirty(OBJECT *object);
 void scene_free(SCENE *scene);
 
+
+// RENDERER
 
 typedef struct CAMERA {
     VEC3 position;

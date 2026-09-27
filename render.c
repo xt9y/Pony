@@ -8,14 +8,15 @@ bool renderer_init(RENDERER *renderer, GPU *gpu) {
     memset(renderer, 0, sizeof(*renderer));
 
     renderer->gpu = gpu;
-    renderer->camera = (CAMERA){
-        .position = {0.0f, 1.0f, 5.0f},
-        .forward = {0.0f, 0.0f, -1.0f},
-        .up = {0.0f, 1.0f, 0.0f},
-        .fov_y = 62.0f,
-        .near_plane = 0.05f,
-        .far_plane = 1000.0f
-    };
+    renderer->camera =
+        (CAMERA){
+            .position = {0.0f, 1.0f, 5.0f},
+            .forward = {0.0f, 0.0f, -1.0f},
+            .up = {0.0f, 1.0f, 0.0f},
+            .fov_y = 62.0f,
+            .near_plane = 0.05f,
+            .far_plane = 1000.0f
+        };
 
     return true;
 }
@@ -57,8 +58,7 @@ bool renderer_frame(RENDERER *renderer) {
         .w = 1.0f
     };
 
-    if (!gpu_clear_frame(renderer->gpu, command_buffer, swapchain_index, clear_color) ||
-        !gpu_end_frame(renderer->gpu, command_buffer, swapchain_index)) {
+    if (!gpu_clear_frame(renderer->gpu, command_buffer, swapchain_index, clear_color) || !gpu_end_frame(renderer->gpu, command_buffer, swapchain_index)) {
         return false;
     }
 
