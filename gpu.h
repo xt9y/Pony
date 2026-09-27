@@ -83,6 +83,7 @@ typedef struct swapchain_texture swapchain_texture;
 typedef struct frame_context frame_context;
 typedef struct upload_context upload_context;
 typedef struct texture_state texture_state;
+typedef struct probe_wavefront_scratch probe_wavefront_scratch;
 
 struct renderer {
     SDL_Window *window;
@@ -93,15 +94,30 @@ struct renderer {
     NriHelperInterface helper;
     NriSwapChainInterface swapchain_api;
     NriQueue *graphics_queue;
+    NriQueue *compute_queue;
+    NriQueue *copy_queue;
+    NriQueue *work_queue;
     NriSwapChain *swapchain;
     NriDescriptorPool *descriptor_pool;
     NriFence *frame_fence;
+    NriFence *work_fence;
     frame_context *frame_contexts;
+    frame_context *work_contexts;
     frame_context *active_frame;
+    frame_context *active_work;
+    uint64_t work_index;
+    uint64_t work_next_fence;
     upload_context *upload;
     swapchain_texture *swapchain_frames;
     NriTexture **swapchain_textures;
     uint32_t swapchain_texture_count;
+
+    NriPipelineCache *pipeline_cache;
+    NriQueryPool *timestamp_pool;
+    NriBuffer *timestamp_readback;
+    uint32_t timestamp_query_size;
+    bool timestamp_supported;
+    probe_wavefront_scratch *probe_scratch;
 
     uint32_t swapchain_width, swapchain_height, current_swap_index;
 
@@ -122,6 +138,8 @@ struct renderer {
     NriPipelineLayout *line_layout;
     NriPipelineLayout *sky_layout;
     NriPipelineLayout *bake_layout;
+    NriPipelineLayout *lightmap_queue_reset_layout;
+    NriPipelineLayout *lightmap_queue_args_layout;
     NriPipelineLayout *probe_layout;
     NriPipelineLayout *ssao_layout;
     NriPipelineLayout *bloom_layout;
@@ -136,6 +154,8 @@ struct renderer {
     NriPipeline *solid_pipeline;
     NriPipeline *line_pipeline;
     NriPipeline *bake_pipeline;
+    NriPipeline *lightmap_queue_reset_pipeline;
+    NriPipeline *lightmap_queue_args_pipeline;
 
     NriBuffer *vertex_buffer;
     NriBuffer *bvh_node_buffer;
@@ -146,6 +166,10 @@ struct renderer {
     NriBuffer *lightmap_probe_buffer;
     NriBuffer *lightmap_patch_map_buffer;
     NriBuffer *lightmap_patch_anchor_buffer;
+    NriBuffer *lightmap_active_buffer[2];
+    NriBuffer *lightmap_active_count[2];
+    NriBuffer *lightmap_dispatch_args;
+    uint64_t lightmap_active_capacity;
 
     NriTexture *depth_texture;
     NriTexture *lightmap_texture;

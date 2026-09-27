@@ -1,3 +1,11 @@
+#ifndef GPU_BIND_S
+#define GPU_BIND_S(n,s) [[vk::binding(n, s)]]
+#define GPU_BIND_T(n,s) [[vk::binding(n + 16, s)]]
+#define GPU_BIND_B(n,s) [[vk::binding(n + 32, s)]]
+#define GPU_BIND_U(n,s) [[vk::binding(n + 48, s)]]
+#define GPU_STORAGE_RGBA16F [[vk::image_format("rgba16f")]]
+#endif
+
 #if defined(BUILD_SURFACE_FS)
 GPU_BIND_T(0, 2) Texture2D<float4> BaseColor : register(t0, space2);
 GPU_BIND_S(0, 2) SamplerState BaseColorSampler : register(s0, space2);
