@@ -177,7 +177,6 @@ float3 surface_probe_irradiance(float3 position, float3 normal)
 
     return found ? surface_probe_value(SurfaceProbes[best_index], normal) : float3(0.12f, 0.12f, 0.12f);
 }
-
 float static_beam_visibility(float3 position)
 {
     if (beam_dims.w == 0u || beam_dims.x == 0u || beam_dims.y == 0u || beam_dims.z == 0u || beam_step.x <= 0.0f || beam_step.y <= 0.0f)
@@ -239,7 +238,7 @@ float3 runtime_indirect(float3 world, float2 uv, float3 baked)
     float4 overlay = DynamicOverlay.SampleLevel(IndirectLightmapSampler, uv, 0.0f);
     float confidence_samples = min((float)dynamic_grid_dims_target.w, 4.0f);
     float confidence = saturate(overlay.a / max(confidence_samples, 1.0f));
-    return lerp(baked, max(overlay.rgb, 0.0f), confidence);
+    return max(baked + overlay.rgb * confidence, 0.0f);
 }
 
 float3 mapped_normal(SurfaceInput input, float scale)
