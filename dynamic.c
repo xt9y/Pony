@@ -580,7 +580,7 @@ bool dynamic_sync(RENDERER *r) {
 
     if (changed) s->object_generation++;
 
-    return rt_upload(r);
+    return true;
 }
 
 bool dynamic_grid_info(const RENDERER *r, DYNAMIC_GRID_INFO *out) {

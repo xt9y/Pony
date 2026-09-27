@@ -106,7 +106,7 @@ int main(int argc, char **argv) {
     bool cube_registered = false;
 
     DIRECTIONAL_LIGHT directional_sun = {
-        .direction = {0.38f, 0.30f, 0.32f},
+        .direction = {0.0f, 1.0f, 0.0f},
         .color = {1.00f, 0.94f, 0.84f},
         .intensity = 0.0f,
         .angular_radius = 0.00465f
