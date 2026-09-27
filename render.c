@@ -256,12 +256,14 @@ bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, 
     return good;
 }
 
-bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm, const struct LIGHT *light, const char *path, uint64_t scene_hash, uint64_t layout_hash,
+bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm, const struct LIGHT *light, const SKY *sky, const char *path, uint64_t scene_hash, uint64_t layout_hash,
                             uint64_t volume_hash, uint64_t beam_hash) {
-    if (!r || !m || !lm || !r->device || !light || light->type != LIGHT_DIRECTIONAL) return false;
+    if (!r || !m || !lm || !r->device || !light || light->type != LIGHT_DIRECTIONAL || !sky) return false;
 
-    r->sun = v3_normalize(light->directional.direction);
-    if (v3_len_sq(r->sun) <= 0.0f) return false;
+    r->sun = light->directional;
+    r->sun.direction = v3_normalize(r->sun.direction);
+    if (v3_len_sq(r->sun.direction) <= 0.0f) return false;
+    r->sky = *sky;
 
     CACHED_LIGHTMAP previous = {0};
     bool reuse = cache_read_partial(path, scene_hash, &previous);
@@ -354,7 +356,7 @@ bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual
         previous.beams.shadow_depth = NULL;
         SDL_Log("B: reused cached sun beams");
     } else if (good) {
-        good = beam_build(&beam_candidate, m, &tree, r->sun);
+        good = beam_build(&beam_candidate, m, &tree, r->sun.direction);
     }
 
     if (good) bake_timing("sun visibility", started);
@@ -557,12 +559,14 @@ void r_event(RENDERER *r, const SDL_Event *event) {
     }
 }
 
-bool r_draw(RENDERER *r, const struct LIGHT *light) {
-    if (!r || !r->window || !light || light->type != LIGHT_DIRECTIONAL) return false;
+bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky) {
+    if (!r || !r->window || !light || light->type != LIGHT_DIRECTIONAL || !sky) return false;
 
-    const VEC3 sun = v3_normalize(light->directional.direction);
-    if (v3_len_sq(sun) <= 0.0f) return false;
+    DIRECTIONAL_LIGHT sun = light->directional;
+    sun.direction = v3_normalize(sun.direction);
+    if (v3_len_sq(sun.direction) <= 0.0f) return false;
     r->sun = sun;
+    r->sky = *sky;
 
     int width = 0;
     int height = 0;
@@ -585,7 +589,7 @@ bool r_draw(RENDERER *r, const struct LIGHT *light) {
     const MAT4 proj = m4_perspective(fov, aspect, znear, zfar);
     const MAT4 mvp = m4_mul(proj, view);
 
-    RENDER_FRAME frame = {.eye = eye, .right = right, .up = up, .forward = forward, .sun = sun, .tan_half_fov = tan_half, .aspect = aspect};
+    RENDER_FRAME frame = {.eye = eye, .right = right, .up = up, .forward = forward, .sun = sun, .sky = *sky, .tan_half_fov = tan_half, .aspect = aspect};
 
     memcpy(frame.mvp, mvp.m, sizeof(frame.mvp));
     memcpy(frame.view, view.m, sizeof(frame.view));

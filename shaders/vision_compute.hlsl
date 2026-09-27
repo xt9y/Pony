@@ -113,7 +113,7 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
         pow(max(1.0f + g * g - 2.0f * g * cosine, 0.001f), 1.5f));
     float sun_integral = integrate_sun_grid(eye_density.xyz, direction, enter, leave,
                                             eye_density.w, sun_fraction);
-    sum += sun_integral * sun_intensity.w * hg * float3(1.0f, 0.94f, 0.84f);
+    sum += sun_integral * sun_intensity.w * hg * sun_color.rgb;
     Output[id.xy] = float4(sum, exp(-eye_density.w * (leave - enter)));
 }
 

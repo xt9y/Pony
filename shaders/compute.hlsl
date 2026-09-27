@@ -20,6 +20,7 @@ GPU_BIND_B(0, 2) cbuffer VolumeData : register(b0, space2)
     float4 up_tan;
     float4 forward_g;
     float4 sun_intensity;
+    float4 sun_color;
     float4 grid_origin_spacing;
     uint4 grid_dims_width;
     uint4 height_debug;
@@ -438,7 +439,7 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
         pow(max(1.0f + g*g - 2.0f*g*cosine, 0.001f), 1.5f));
     float sun_integral = integrate_sun_grid(eye_density.xyz, direction, enter, leave,
                                             eye_density.w, sun_fraction);
-    sum += sun_integral * sun_intensity.w * hg * float3(1.0f, 0.94f, 0.84f);
+    sum += sun_integral * sun_intensity.w * hg * sun_color.rgb;
     // float T = exp(-eye_density.w * (leave - enter));
     // Output[id.xy] = float4(T.xxx, 1.0f);
     // return;

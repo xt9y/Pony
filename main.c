@@ -67,7 +67,11 @@ int main(int argc, char **argv) {
     struct MODEL scene_model = {.geometry = &scene, .visual = &visual};
     OBJECT scene_object = {.state = STATIC, .type = MODEL, .data = &scene_model};
     struct MODEL *scene_data = scene_object.data;
-    DIRECTIONAL_LIGHT directional_sun = {.direction = {0.38f, 0.30f, 0.32f}};
+    DIRECTIONAL_LIGHT directional_sun = {.direction = {-0.38f, -0.30f, -0.32f},
+                                         .color = {1.00f, 0.94f, 0.84f},
+                                         .intensity = 2.4f,
+                                         .angular_radius = 0.00465f};
+    SKY sky = {.zenith = {0.22f, 0.42f, 0.78f}, .horizon = {0.68f, 0.76f, 0.88f}, .intensity = 1.0f};
     struct LIGHT sun = {.type = LIGHT_DIRECTIONAL, .directional = directional_sun};
     OBJECT light_object = {.state = STATIC, .type = LIGHT, .data = &sun};
     struct LIGHT *light_data = light_object.data;
@@ -157,7 +161,10 @@ int main(int argc, char **argv) {
 
     layout_hash = hash_bytes(layout_hash, bake_settings, sizeof(bake_settings));
 
-    const float lighting_settings[] = {light_data->directional.direction.x, light_data->directional.direction.y, light_data->directional.direction.z, 2.4f, 1.0f, 0.94f, 0.84f, 0.00465f, 0.22f, 0.42f, 0.78f, 0.68f, 0.76f, 0.88f};
+    const float lighting_settings[] = {light_data->directional.direction.x, light_data->directional.direction.y, light_data->directional.direction.z,
+                                     light_data->directional.intensity, light_data->directional.color.x, light_data->directional.color.y,
+                                     light_data->directional.color.z, light_data->directional.angular_radius, sky.zenith.x, sky.zenith.y,
+                                     sky.zenith.z, sky.horizon.x, sky.horizon.y, sky.horizon.z, sky.intensity};
 
     layout_hash = hash_bytes(layout_hash, lighting_settings, sizeof(lighting_settings));
 
@@ -206,7 +213,7 @@ int main(int argc, char **argv) {
                 if (event.key.scancode == SDL_SCANCODE_B || event.key.key == SDLK_B) {
                     SDL_ClearError();
 
-                    if (!bake_start(&r, scene_data->geometry, scene_data->visual, &lm, light_data, bake_path, scene_hash, layout_hash, volume_hash, beam_hash)) {
+                    if (!bake_start(&r, scene_data->geometry, scene_data->visual, &lm, light_data, &sky, bake_path, scene_hash, layout_hash, volume_hash, beam_hash)) {
                         SDL_Log("B: could not start rebake: %s", *SDL_GetError() ? SDL_GetError() : "unknown error");
                     }
                 }
@@ -225,7 +232,7 @@ int main(int argc, char **argv) {
         if (render_due) {
             const Uint64 frame_begin = SDL_GetPerformanceCounter();
 
-            if (!r_draw(&r, light_data)) {
+            if (!r_draw(&r, light_data, &sky)) {
                 SDL_Log("draw failed: %s", SDL_GetError());
 
                 running = false;
