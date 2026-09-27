@@ -12,7 +12,11 @@
 
 static VEC3 beam_u(VEC3 sun) {
 
-    return v3_normalize(v3_cross(v3(0, 1, 0), sun));
+    VEC3 u = v3_normalize(v3_cross(v3(0, 1, 0), sun));
+
+    if (v3_len_sq(u) < 0.5f) u = v3_normalize(v3_cross(v3(1, 0, 0), sun));
+
+    return u;
 }
 
 #if 0
