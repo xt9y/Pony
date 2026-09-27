@@ -60,7 +60,6 @@ GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3)
     float4 shadow_texel_enabled;
     float4 dynamic_grid_origin_cell;
     uint4 dynamic_grid_dims_target;
-    // float4 camera_forward; // Fragment depth diagnostic.
 };
 
 struct SurfaceInput
@@ -131,7 +130,8 @@ float3 surface_probe_irradiance(float3 position, float3 normal)
         return float3(0.12f, 0.12f, 0.12f);
 
     normal = normalize(normal);
-    float3 coord = clamp((position - probe_origin_spacing.xyz) / probe_origin_spacing.w, 0.0f, float3(probe_dims.xyz) - 1.0f);
+    float3 coord = clamp((position - probe_origin_spacing.xyz) / probe_origin_spacing.w,
+                         0.0f, float3(probe_dims.xyz) - 1.0f);
     uint3 base = uint3(floor(coord));
     float3 fraction = frac(coord);
     float3 sum = 0.0f;
@@ -168,21 +168,27 @@ float3 surface_probe_irradiance(float3 position, float3 normal)
         if (probe.position.w <= 0.0f) continue;
         float3 delta = probe.position.xyz - position;
         float distance2 = dot(delta, delta);
-        if (distance2 < best_distance2) {
+        if (distance2 < best_distance2)
+        {
             best_distance2 = distance2;
             best_index = index;
             found = true;
         }
     }
 
-    return found ? surface_probe_value(SurfaceProbes[best_index], normal) : float3(0.12f, 0.12f, 0.12f);
+    return found ? surface_probe_value(SurfaceProbes[best_index], normal)
+                 : float3(0.12f, 0.12f, 0.12f);
 }
+
 float static_beam_visibility(float3 position)
 {
-    if (beam_dims.w == 0u || beam_dims.x == 0u || beam_dims.y == 0u || beam_dims.z == 0u || beam_step.x <= 0.0f || beam_step.y <= 0.0f)
+    if (beam_dims.w == 0u || beam_dims.x == 0u || beam_dims.y == 0u ||
+        beam_dims.z == 0u || beam_step.x <= 0.0f || beam_step.y <= 0.0f)
         return 1.0f;
 
-    float3 q = float3(dot(position, shadow_u_min.xyz), dot(position, shadow_v_min.xyz), dot(position, shadow_sun_max.xyz));
+    float3 q = float3(dot(position, shadow_u_min.xyz),
+                      dot(position, shadow_v_min.xyz),
+                      dot(position, shadow_sun_max.xyz));
     float2 coord = (q.xy - beam_origin.xy) / beam_step.xy - 0.5f;
     int2 base = int2(floor(coord));
     float2 fraction = frac(coord);
@@ -197,22 +203,26 @@ float static_beam_visibility(float3 position)
         float2 axis_weight = lerp(1.0f - fraction, fraction, float2(x, y));
         float weight = axis_weight.x * axis_weight.y;
         float sample_visibility = 1.0f;
-        if (all(cell >= 0) && cell.x < (int)beam_dims.x && cell.y < (int)beam_dims.y) {
+        if (all(cell >= 0) && cell.x < (int)beam_dims.x && cell.y < (int)beam_dims.y)
+        {
             float blocker = SurfaceBeams[blocker_offset + (uint)cell.x + beam_dims.x * (uint)cell.y];
             if (blocker > -1.0e20f) sample_visibility = q.z >= blocker - guard ? 1.0f : 0.0f;
         }
         visibility += weight * sample_visibility;
     }
+
     return saturate(visibility);
 }
 
 float dynamic_shadow_visibility(float3 position)
 {
     if (shadow_texel_enabled.z < 0.5f || any(shadow_extent_bias.xyz <= 0.0f)) return 1.0f;
+
     float sx = dot(position, shadow_u_min.xyz);
     float sy = dot(position, shadow_v_min.xyz);
     float sz = dot(position, shadow_sun_max.xyz);
-    float2 uv = (float2(sx, sy) - float2(shadow_u_min.w, shadow_v_min.w)) / shadow_extent_bias.xy;
+    float2 uv = (float2(sx, sy) - float2(shadow_u_min.w, shadow_v_min.w)) /
+                shadow_extent_bias.xy;
     float depth = (shadow_sun_max.w - sz) / shadow_extent_bias.z;
     if (any(uv < 0.0f) || any(uv > 1.0f) || depth < 0.0f || depth > 1.0f) return 1.0f;
 
@@ -229,14 +239,22 @@ float dynamic_shadow_visibility(float3 position)
 
 float3 runtime_indirect(float3 world, float2 uv, float3 baked)
 {
-    if (dynamic_grid_dims_target.w == 0u || dynamic_grid_origin_cell.w <= 0.0f || any(dynamic_grid_dims_target.xyz == 0u)) return baked;
-    int3 cell = int3(floor((world - dynamic_grid_origin_cell.xyz) / dynamic_grid_origin_cell.w));
+    if (dynamic_grid_dims_target.w == 0u || dynamic_grid_origin_cell.w <= 0.0f ||
+        any(dynamic_grid_dims_target.xyz == 0u))
+        return baked;
+
+    int3 cell = int3(floor((world - dynamic_grid_origin_cell.xyz) /
+                           dynamic_grid_origin_cell.w));
     if (any(cell < 0) || any(cell >= int3(dynamic_grid_dims_target.xyz))) return baked;
-    uint index = (uint)cell.x + dynamic_grid_dims_target.x * ((uint)cell.y + dynamic_grid_dims_target.y * (uint)cell.z);
+
+    uint index = (uint)cell.x + dynamic_grid_dims_target.x *
+        ((uint)cell.y + dynamic_grid_dims_target.y * (uint)cell.z);
     uint generation = CellGenerations[index];
     if (generation == 0u || OverlayGenerations[index] != generation) return baked;
+
     float4 overlay = DynamicOverlay.SampleLevel(IndirectLightmapSampler, uv, 0.0f);
-    return max(baked + overlay.rgb, 0.0f);
+    float emitter_visibility = overlay.g > 0.5f ? saturate(overlay.r / overlay.g) : 1.0f;
+    return max(baked * emitter_visibility, 0.0f);
 }
 
 float3 mapped_normal(SurfaceInput input, float scale)
@@ -249,95 +267,33 @@ float3 mapped_normal(SurfaceInput input, float scale)
     float determinant = duvdx.x * duvdy.y - duvdx.y * duvdy.x;
     if (abs(determinant) < 1.0e-7f) return n;
 
-    float inv = 1.0f / determinant;
-    float3 t = normalize((dpdx * duvdy.y - dpdy * duvdx.y) * inv);
-    t = normalize(t - n * dot(n, t));
-    float3 b = normalize(cross(n, t) * (determinant < 0.0f ? -1.0f : 1.0f));
+    float inverse = 1.0f / determinant;
+    float3 tangent = normalize((dpdx * duvdy.y - dpdy * duvdx.y) * inverse);
+    tangent = normalize(tangent - n * dot(n, tangent));
+    float3 bitangent = normalize(cross(n, tangent) * (determinant < 0.0f ? -1.0f : 1.0f));
 
     float3 sample_normal = NormalMap.Sample(NormalMapSampler, input.uv).xyz * 2.0f - 1.0f;
     sample_normal.xy *= scale;
-    return normalize(t * sample_normal.x + b * sample_normal.y + n * sample_normal.z);
+    return normalize(tangent * sample_normal.x + bitangent * sample_normal.y + n * sample_normal.z);
 }
 
 SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace)
 {
     SurfaceOutput output;
 
-    // float3 relative = input.world_position - camera_position.xyz;
-
-    // float error = abs(input.view_depth - dot(relative, camera_forward.xyz));
-    // float error = abs(input.view_depth - dot(input.world_position - camera_position.xyz, camera_forward.xyz));
-    // float error = abs(input.view_depth - dot(input.world_position - camera_position.xyz, camera_forward.xyz));
-    // output.hdr = float4(0, 0, 0, 1);
-    // output.normal_depth = float4(normalize(input.view_normal) * 0.5f + 0.5f, max(input.view_depth, 0.0f));
-    // output.normal_depth = float4(saturate(error * 2.0f), 0, 0, max(input.view_depth, 0.0f));
-    // return output;
-
-    // float error = abs(input.view_depth - input.world_position.z);
-    // output.normal_depth = float4(saturate(error * 2.0f), 0, 0, 1.0f);
-
-    // float raster_depth = 1.0f / max(input.position.w, 1.0e-6f);
-    // float error = abs(input.view_depth - raster_depth);
-
-    // output.hdr = float4(0, 0, 0, 1);
-    // output.normal_depth = float4(camera_forward.xyz, input.view_depth);
-    // output.normal_depth = float4(saturate(error * 2.0f), 0, 0, input.view_depth);
-    // output.normal_depth = float4(camera_position.xyz, input.view_depth);
-    // return output;
-
     float4 base_sample = BaseColor.Sample(BaseColorSampler, input.uv);
     float3 base = srgb_to_linear(base_sample.rgb) * base_color_factor.rgb;
-    // output.hdr = float4(base, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f, 
-    //      input.view_depth
-    // );
-    // return output;
-
-    float4 mr = MetallicRoughness.Sample(MetallicRoughnessSampler, input.uv);
-    float metallic = saturate(emissive_metallic.w * mr.b);
-    // output.hdr = float4(metallic.xxx, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f, 
-    //      input.view_depth
-    // );
-    // return output;
-
-    float roughness = clamp(roughness_normal_ao_sun.x * mr.g, 0.045f, 1.0f);
-    // output.hdr = float4(roughness.xxx, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f, 
-    //      input.view_depth
-    // );
-    // return output;
-
+    float4 metallic_roughness = MetallicRoughness.Sample(MetallicRoughnessSampler, input.uv);
+    float metallic = saturate(emissive_metallic.w * metallic_roughness.b);
+    float roughness = clamp(roughness_normal_ao_sun.x * metallic_roughness.g, 0.045f, 1.0f);
     float ao_sample = Occlusion.Sample(OcclusionSampler, input.uv).r;
     float material_ao = lerp(1.0f, ao_sample, saturate(roughness_normal_ao_sun.z));
-    // output.hdr = float4(material_ao.xxx, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f, 
-    //      input.view_depth
-    // );
-    // return output;
-
     float3 emissive = srgb_to_linear(Emissive.Sample(EmissiveSampler, input.uv).rgb) *
                       emissive_metallic.rgb;
-    // output.hdr = float4(emissive, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f, 
-    //      input.view_depth
-    // );
-    // return output;
-    
+
     float3 n = mapped_normal(input, roughness_normal_ao_sun.y);
     if (!front_face) n = -n;
-    // output.hdr = float4(n * 0.5f + 0.5f, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f, 
-    //      input.view_depth
-    // );
-    // return output;
- 
+
     float3 v = normalize(camera_position.xyz - input.world_position);
     float3 l = normalize(sun_direction.xyz);
     float3 h = normalize(v + l);
@@ -350,59 +306,54 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace)
     float3 f = fresnel_schlick(v_dot_h, f0);
     float d = distribution_ggx(n_dot_h, roughness);
     float g = geometry_schlick(n_dot_v, roughness) * geometry_schlick(n_dot_l, roughness);
-    float3 specular = d * g * f / max(4.0f * n_dot_v * max(n_dot_l, 0.001f), 1.0e-4f);
+    float3 specular = d * g * f /
+        max(4.0f * n_dot_v * max(n_dot_l, 0.001f), 1.0e-4f);
 
     float2 baked_uv = front_face ? input.lightmap_uv : input.back_lightmap_uv;
     float static_visibility = static_beam_visibility(input.world_position);
     float moving_visibility = dynamic_shadow_visibility(input.world_position);
     float sun_visibility = static_visibility * moving_visibility;
-    float3 base_indirect = camera_position.w > 0.5f ? max(IndirectLightmap.Sample(IndirectLightmapSampler, baked_uv).rgb, 0.0f) : float3(0.12f, 0.12f, 0.12f);
-    float3 indirect = object_dynamic != 0u ? surface_probe_irradiance(input.world_position, n) / PI : runtime_indirect(input.world_position, baked_uv, base_indirect);
+
+    float3 base_indirect = camera_position.w > 0.5f
+        ? max(IndirectLightmap.Sample(IndirectLightmapSampler, baked_uv).rgb, 0.0f)
+        : float3(0.12f, 0.12f, 0.12f);
+
+    float3 indirect = object_dynamic != 0u
+        ? surface_probe_irradiance(input.world_position, n) / PI
+        : runtime_indirect(input.world_position, baked_uv, base_indirect);
+
     float3 direct_sun = object_dynamic != 0u
         ? sun_color.rgb * (roughness_normal_ao_sun.w * n_dot_l * sun_visibility)
-        : (camera_position.w > 0.5f ? max(DirectSunLightmap.Sample(DirectSunLightmapSampler, baked_uv).rgb, 0.0f) * moving_visibility : float3(0.0f, 0.0f, 0.0f));
+        : (camera_position.w > 0.5f
+            ? max(DirectSunLightmap.Sample(DirectSunLightmapSampler, baked_uv).rgb, 0.0f) *
+              moving_visibility
+            : float3(0.0f, 0.0f, 0.0f));
+
     float3 baked = indirect + direct_sun;
-    if (camera_position.w > 1.5f) {
-        output.hdr=float4(baked,1.0f);
-        output.normal_depth=float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f,
-                                    max(input.view_depth, 0.0f));
+    if (camera_position.w > 1.5f)
+    {
+        output.hdr = float4(baked, 1.0f);
+        output.normal_depth = float4(
+            normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f,
+            max(input.view_depth, 0.0f));
         return output;
     }
+
     float baked_luma = dot(baked, float3(0.2126f, 0.7152f, 0.0722f));
     float3 direct_specular = specular * sun_color.rgb * roughness_normal_ao_sun.w *
                              n_dot_l * sun_visibility;
-    // output.hdr = float4(direct_specular, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f, 
-    //      input.view_depth
-    // );
-    // return output;
-
     float3 environment_specular = f0 * (0.025f + 0.10f * (1.0f - roughness)) *
-                                  material_ao * (camera_position.w > 0.5f
-                                  ? saturate(baked_luma * 2.0f) : 1.0f);
-    // output.hdr = float4(environment_specular, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f, 
-    //      input.view_depth
-    // );
-    // return output;
+        material_ao * (camera_position.w > 0.5f ? saturate(baked_luma * 2.0f) : 1.0f);
 
     float3 diffuse = base * baked * material_ao * (1.0f - metallic);
     output.hdr = float4(max(diffuse + direct_specular + environment_specular + emissive, 0.0f),
                         base_sample.a * base_color_factor.a);
-
-    // output.normal_depth = float4(input.world_position, input.view_depth);
-
-    // output.normal_depth = float4(input.world_position - camera_position.xyz,
-    //                              input.view_depth);
-
-    output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f,
-                                 max(input.view_depth, 0.0f));
-
-
+    output.normal_depth = float4(
+        normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f,
+        max(input.view_depth, 0.0f));
     return output;
 }
+
 #elif defined(BUILD_SKY_FS)
 GPU_BIND_B(0, 3) cbuffer SkyData : register(b0, space3)
 {
@@ -436,9 +387,9 @@ float3 sky_radiance(float3 direction)
     float3 sun_dir = normalize(sun_direction_intensity.xyz);
     float sun_cos = cos(sun_color_radius.w);
     float halo_cos = cos(sun_color_radius.w * 8.0f);
-    float d = dot(direction, sun_dir);
-    float disc = smoothstep(sun_cos, 1.0f, d);
-    float halo = smoothstep(halo_cos, sun_cos, d) * 0.08f;
+    float directional = dot(direction, sun_dir);
+    float disc = smoothstep(sun_cos, 1.0f, directional);
+    float halo = smoothstep(halo_cos, sun_cos, directional) * 0.08f;
     return sky + sun_color_radius.rgb * sun_direction_intensity.w * (disc + halo);
 }
 
@@ -452,6 +403,7 @@ SkyOutput sky_fs(SkyInput input)
     output.normal_depth = float4(0.0f, 0.0f, 0.0f, 0.0f);
     return output;
 }
+
 #elif defined(BUILD_COMPOSE_FS)
 GPU_BIND_T(0, 2) Texture2D<float4> Hdr : register(t0, space2);
 GPU_BIND_S(0, 2) SamplerState HdrSampler : register(s0, space2);
@@ -493,13 +445,13 @@ float3 sample_lut(float3 color)
     float blue = color.b * (size - 1.0f);
     float b0 = floor(blue);
     float b1 = min(b0 + 1.0f, size - 1.0f);
-    float r = color.r * (size - 1.0f);
-    float g = color.g * (size - 1.0f);
+    float red = color.r * (size - 1.0f);
+    float green = color.g * (size - 1.0f);
 
-    float2 uv0 = float2((b0 * size + r + 0.5f) / (size * size),
-                        (g + 0.5f) / size);
-    float2 uv1 = float2((b1 * size + r + 0.5f) / (size * size),
-                        (g + 0.5f) / size);
+    float2 uv0 = float2((b0 * size + red + 0.5f) / (size * size),
+                        (green + 0.5f) / size);
+    float2 uv1 = float2((b1 * size + red + 0.5f) / (size * size),
+                        (green + 0.5f) / size);
     float3 a = Lut.SampleLevel(LutSampler, uv0, 0.0f).rgb;
     float3 b = Lut.SampleLevel(LutSampler, uv1, 0.0f).rgb;
     return lerp(a, b, frac(blue));
@@ -510,11 +462,9 @@ float4 compose_fs(ComposeInput input) : SV_Target0
     uint width, height;
     Hdr.GetDimensions(width, height);
     float2 uv = input.position.xy / float2(width, height);
-    
 
-    if (exposure < 0.0f) 
+    if (exposure < 0.0f)
         return float4(saturate(Hdr.SampleLevel(HdrSampler, uv, 0.0f).rgb), 1.0f);
-
 
     float3 hdr = Hdr.SampleLevel(HdrSampler, uv, 0.0f).rgb * exposure;
     float ao = Ao.SampleLevel(AoSampler, uv, 0.0f).r;
@@ -528,6 +478,7 @@ float4 compose_fs(ComposeInput input) : SV_Target0
     mapped = pow(saturate(mapped), 1.0f / 2.2f);
     return float4(mapped, 1.0f);
 }
+
 #elif defined(BUILD_WIREFRAME_FS)
 struct WireframeInput
 {
