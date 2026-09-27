@@ -27,8 +27,8 @@ struct SurfaceProbe { float4 position; float4 coefficient[9]; };
 GPU_BIND_T(8, 2) StructuredBuffer<SurfaceProbe> SurfaceProbes : register(t8, space2);
 GPU_BIND_T(9, 2) StructuredBuffer<float> SurfaceBeams : register(t9, space2);
 GPU_BIND_T(10, 2) Texture2D<float4> DynamicOverlay : register(t10, space2);
-GPU_BIND_T(11, 2) StructuredBuffer<uint> CellGenerations : register(t11, space2);
-GPU_BIND_T(12, 2) StructuredBuffer<uint> OverlayGenerations : register(t12, space2);
+GPU_BIND_T(11, 2) StructuredBuffer<uint> StaticTraceTriangles : register(t11, space2);
+GPU_BIND_T(12, 2) StructuredBuffer<uint> RealtimeTrace : register(t12, space2);
 
 GPU_BIND_B(0, 1) cbuffer Camera : register(b0, space1)
 {
@@ -81,6 +81,13 @@ struct SurfaceOutput
 };
 
 static const float PI = 3.14159265358979323846f;
+static const uint RT_MAGIC = 0x50525431u;
+static const uint RT_HEADER_WORDS = 16u;
+static const uint RT_NODE_WORDS = 12u;
+static const uint RT_STATIC_TRIANGLE_WORDS = 20u;
+static const uint RT_OBJECT_WORDS = 8u;
+static const uint RT_DYNAMIC_TRIANGLE_WORDS = 9u;
+static const uint RT_INVALID_NODE = 0xffffffffu;
 
 float3 srgb_to_linear(float3 c)
 {
@@ -107,6 +114,228 @@ float geometry_schlick(float n_dot_v, float roughness)
 float3 fresnel_schlick(float cos_theta, float3 f0)
 {
     return f0 + (1.0f - f0) * pow(1.0f - saturate(cos_theta), 5.0f);
+}
+
+bool rt_ready()
+{
+    uint count = 0u;
+    uint stride = 0u;
+    RealtimeTrace.GetDimensions(count, stride);
+    return count >= RT_HEADER_WORDS && RealtimeTrace[0] == RT_MAGIC;
+}
+
+float rt_float(uint index)
+{
+    return asfloat(RealtimeTrace[index]);
+}
+
+float3 rt_float3(uint index)
+{
+    return float3(rt_float(index), rt_float(index + 1u), rt_float(index + 2u));
+}
+
+float source_float(uint index)
+{
+    return asfloat(StaticTraceTriangles[index]);
+}
+
+float3 source_float3(uint index)
+{
+    return float3(source_float(index), source_float(index + 1u), source_float(index + 2u));
+}
+
+bool rt_emitter_point(out float3 light_position, out float3 light_normal)
+{
+    light_position = 0.0f;
+    light_normal = 0.0f;
+    if (!rt_ready()) return false;
+
+    uint source_words = 0u;
+    uint source_stride = 0u;
+    StaticTraceTriangles.GetDimensions(source_words, source_stride);
+    uint triangle_count = RealtimeTrace[9];
+    float total_weight = asfloat(RealtimeTrace[10]);
+    if (triangle_count == 0u || total_weight <= 0.0f ||
+        (uint64_t)triangle_count * RT_STATIC_TRIANGLE_WORDS > source_words)
+        return false;
+
+    float target = total_weight * 0.5f;
+    uint lo = 0u;
+    uint hi = triangle_count;
+    while (lo < hi)
+    {
+        uint mid = lo + (hi - lo) / 2u;
+        float cumulative = source_float(mid * RT_STATIC_TRIANGLE_WORDS + 19u);
+        if (cumulative > target) hi = mid;
+        else lo = mid + 1u;
+    }
+    if (lo >= triangle_count) return false;
+
+    uint base = lo * RT_STATIC_TRIANGLE_WORDS;
+    float cumulative = source_float(base + 19u);
+    float previous = lo == 0u ? 0.0f : source_float((lo - 1u) * RT_STATIC_TRIANGLE_WORDS + 19u);
+    if (cumulative <= previous) return false;
+
+    float3 a = source_float3(base + 0u);
+    float3 b = source_float3(base + 4u);
+    float3 c = source_float3(base + 8u);
+    float ab = dot(b - a, b - a);
+    float bc = dot(c - b, c - b);
+    float ca = dot(a - c, a - c);
+
+    float triangle_weight = cumulative - previous;
+    if (triangle_weight >= total_weight * 0.999f)
+        light_position = (a + b + c) / 3.0f;
+    else if (ab >= bc && ab >= ca)
+        light_position = (a + b) * 0.5f;
+    else if (bc >= ca)
+        light_position = (b + c) * 0.5f;
+    else
+        light_position = (c + a) * 0.5f;
+
+    light_normal = normalize(source_float3(base + 12u));
+    return all(isfinite(light_position)) && all(isfinite(light_normal));
+}
+
+bool rt_box(float3 origin, float3 direction, float tmin, float tmax,
+            float3 bmin, float3 bmax)
+{
+    float lo = tmin;
+    float hi = tmax;
+    [unroll] for (uint axis = 0u; axis < 3u; ++axis)
+    {
+        float d = direction[axis];
+        if (abs(d) < 1.0e-7f)
+        {
+            if (origin[axis] < bmin[axis] || origin[axis] > bmax[axis]) return false;
+        }
+        else
+        {
+            float a = (bmin[axis] - origin[axis]) / d;
+            float b = (bmax[axis] - origin[axis]) / d;
+            if (a > b) { float swap = a; a = b; b = swap; }
+            lo = max(lo, a);
+            hi = min(hi, b);
+            if (lo > hi) return false;
+        }
+    }
+    return hi >= tmin;
+}
+
+bool rt_triangle(float3 origin, float3 direction, float tmin, float tmax,
+                 float3 a, float3 b, float3 c)
+{
+    float3 edge1 = b - a;
+    float3 edge2 = c - a;
+    float3 p = cross(direction, edge2);
+    float determinant = dot(edge1, p);
+    if (abs(determinant) < 1.0e-7f) return false;
+    float inverse = 1.0f / determinant;
+    float3 s = origin - a;
+    float u = dot(s, p) * inverse;
+    if (u < 0.0f || u > 1.0f) return false;
+    float3 q = cross(s, edge1);
+    float v = dot(direction, q) * inverse;
+    if (v < 0.0f || u + v > 1.0f) return false;
+    float t = dot(edge2, q) * inverse;
+    return t > tmin && t < tmax;
+}
+
+bool rt_static_any(float3 origin, float3 direction, float tmin, float tmax)
+{
+    uint node_count = RealtimeTrace[1];
+    uint triangle_count = RealtimeTrace[2];
+    uint node_offset = RealtimeTrace[3];
+    uint triangle_offset = RealtimeTrace[4];
+    if (node_count == 0u || triangle_count == 0u) return false;
+
+    uint node = 0u;
+    [loop] while (node != RT_INVALID_NODE && node < node_count)
+    {
+        uint base = node_offset + node * RT_NODE_WORDS;
+        float3 bmin = rt_float3(base + 0u);
+        float3 bmax = rt_float3(base + 4u);
+        uint left = RealtimeTrace[base + 8u];
+        uint next = RealtimeTrace[base + 9u];
+        uint first = RealtimeTrace[base + 10u];
+        uint count = RealtimeTrace[base + 11u];
+        if (!rt_box(origin, direction, tmin, tmax, bmin, bmax))
+        {
+            node = next;
+            continue;
+        }
+
+        if (count != 0u)
+        {
+            for (uint i = 0u; i < count && first + i < triangle_count; ++i)
+            {
+                uint tri = triangle_offset + (first + i) * RT_STATIC_TRIANGLE_WORDS;
+                if (rt_triangle(origin, direction, tmin, tmax,
+                                rt_float3(tri + 0u), rt_float3(tri + 4u),
+                                rt_float3(tri + 8u)))
+                    return true;
+            }
+            node = next;
+        }
+        else
+        {
+            node = left;
+        }
+    }
+    return false;
+}
+
+bool rt_dynamic_any(float3 origin, float3 direction, float tmin, float tmax)
+{
+    uint object_count = RealtimeTrace[5];
+    uint object_offset = RealtimeTrace[6];
+    uint triangle_count = RealtimeTrace[7];
+    uint triangle_offset = RealtimeTrace[8];
+
+    for (uint object_index = 0u; object_index < object_count; ++object_index)
+    {
+        uint object = object_offset + object_index * RT_OBJECT_WORDS;
+        float3 bmin = rt_float3(object + 0u);
+        float3 bmax = rt_float3(object + 3u);
+        if (!rt_box(origin, direction, tmin, tmax, bmin, bmax)) continue;
+
+        uint first = RealtimeTrace[object + 6u];
+        uint count = RealtimeTrace[object + 7u];
+        for (uint i = 0u; i < count && first + i < triangle_count; ++i)
+        {
+            uint tri = triangle_offset + (first + i) * RT_DYNAMIC_TRIANGLE_WORDS;
+            if (rt_triangle(origin, direction, tmin, tmax,
+                            rt_float3(tri + 0u), rt_float3(tri + 3u),
+                            rt_float3(tri + 6u)))
+                return true;
+        }
+    }
+    return false;
+}
+
+float realtime_emitter_visibility(float3 position, float3 normal, bool include_static)
+{
+    float3 light_position;
+    float3 light_normal;
+    if (!rt_emitter_point(light_position, light_normal)) return 1.0f;
+
+    float3 delta = light_position - position;
+    float distance2 = dot(delta, delta);
+    float epsilon = max(asfloat(RealtimeTrace[11]), 1.0e-4f);
+    if (distance2 <= epsilon * epsilon) return 1.0f;
+
+    float distance = sqrt(distance2);
+    float3 direction = delta / distance;
+    if (dot(normal, direction) <= 0.0f || dot(light_normal, -direction) <= 0.0f)
+        return 1.0f;
+
+    float3 origin = position + normal * epsilon;
+    float tmax = distance - 2.0f * epsilon;
+    if (tmax <= epsilon) return 1.0f;
+
+    if (include_static && rt_static_any(origin, direction, epsilon, tmax)) return 0.0f;
+    if (rt_dynamic_any(origin, direction, epsilon, tmax)) return 0.0f;
+    return 1.0f;
 }
 
 float3 surface_probe_value(SurfaceProbe probe, float3 normal)
@@ -237,28 +466,6 @@ float dynamic_shadow_visibility(float3 position)
     return visibility / 9.0f;
 }
 
-float3 runtime_indirect(float3 world, float2 uv, float3 baked)
-{
-    if (dynamic_grid_dims_target.w == 0u || dynamic_grid_origin_cell.w <= 0.0f ||
-        any(dynamic_grid_dims_target.xyz == 0u))
-        return baked;
-
-    int3 cell = int3(floor((world - dynamic_grid_origin_cell.xyz) /
-                           dynamic_grid_origin_cell.w));
-    if (any(cell < 0) || any(cell >= int3(dynamic_grid_dims_target.xyz))) return baked;
-
-    uint index = (uint)cell.x + dynamic_grid_dims_target.x *
-        ((uint)cell.y + dynamic_grid_dims_target.y * (uint)cell.z);
-    uint generation = CellGenerations[index];
-    if (generation == 0u || OverlayGenerations[index] != generation) return baked;
-
-    float4 overlay = DynamicOverlay.SampleLevel(IndirectLightmapSampler, uv, 0.0f);
-    float emitter_visibility = overlay.g > 0.5f ? saturate(overlay.r / overlay.g) : 1.0f;
-    float edge_width = max(fwidth(emitter_visibility), 1.0e-3f);
-    emitter_visibility = smoothstep(0.5f - edge_width, 0.5f + edge_width, emitter_visibility);
-    return max(baked * emitter_visibility, 0.0f);
-}
-
 float3 mapped_normal(SurfaceInput input, float scale)
 {
     float3 n = normalize(input.world_normal);
@@ -320,9 +527,12 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace)
         ? max(IndirectLightmap.Sample(IndirectLightmapSampler, baked_uv).rgb, 0.0f)
         : float3(0.12f, 0.12f, 0.12f);
 
+    float emitter_visibility = realtime_emitter_visibility(
+        input.world_position, n, object_dynamic != 0u);
     float3 indirect = object_dynamic != 0u
         ? surface_probe_irradiance(input.world_position, n) / PI
-        : runtime_indirect(input.world_position, baked_uv, base_indirect);
+        : base_indirect;
+    indirect *= emitter_visibility;
 
     float3 direct_sun = object_dynamic != 0u
         ? sun_color.rgb * (roughness_normal_ao_sun.w * n_dot_l * sun_visibility)
