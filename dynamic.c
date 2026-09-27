@@ -6,6 +6,7 @@
 
 #define DYNAMIC_MAX_CELLS (1u << 20u)
 #define DYNAMIC_GI_JOB_SLICE 64u
+#define DYNAMIC_VISIBILITY_TEXEL_MULTIPLIER 8u
 
 typedef struct DYNAMIC_CELL {
     uint32_t first, count, generation;
@@ -326,9 +327,14 @@ bool r_dynamic_init(RENDERER *r, const MESH *static_scene, const LIGHTMAP *lm, c
     DYNAMIC_STATE *s = calloc(1, sizeof(*s));
     if (!s) return false;
     s->settings = *settings;
+    if (s->settings.texels_per_frame > UINT32_MAX / DYNAMIC_VISIBILITY_TEXEL_MULTIPLIER) {
+        free(s);
+        return false;
+    }
+    s->settings.texels_per_frame *= DYNAMIC_VISIBILITY_TEXEL_MULTIPLIER;
     s->object_generation = 1u;
     r->dynamic = s;
-    r->dynamic_lighting = *settings;
+    r->dynamic_lighting = s->settings;
 
     if (!build_grid(s, lm)) {
         dynamic_deinit(r);
