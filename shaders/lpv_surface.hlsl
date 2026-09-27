@@ -40,20 +40,28 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace)
 
     float moving_visibility = dynamic_shadow_visibility(input.world_position);
 
-    // LPV is rebuilt completely every frame.  Both STATIC and DYNAMIC objects
-    // therefore consume the same current-frame indirect field; lightmaps are
-    // intentionally not sampled by this entry point.
-    float3 indirect = surface_probe_irradiance(input.world_position, n) / PI;
+    // Dynamic objects occupy LPV cells to stop transport through their volume.
+    // Sampling exactly on their surface therefore aliases against invalid cells
+    // as they move between voxels. Sample just outside the geometric surface so
+    // the object reads incident light rather than the blocked interior field.
+    float3 probe_position = input.world_position;
+    if (object_dynamic != 0u)
+    {
+        float3 geometric_normal = normalize(input.world_normal);
+        if (!front_face) geometric_normal = -geometric_normal;
+        probe_position += geometric_normal * max(probe_origin_spacing.w * 0.60f, 0.01f);
+    }
 
-    // Emissive geometry remains a full analytic area source.  The rasterized
-    // dynamic shadow map only supplies current-frame visibility.
-    float3 direct_emitter = rt_analytic_emitter_irradiance(input.world_position, n) *
-                            moving_visibility / PI;
+    // Emissive geometry is injected into the LPV with software visibility
+    // against both static and dynamic geometry. Do not add the analytic emitter
+    // path here: its old directional shadow visibility was not emitter visibility
+    // and kept the room lit even when a moving object covered the area light.
+    float3 indirect = surface_probe_irradiance(probe_position, n) / PI;
 
     float3 direct_sun = sun_color.rgb *
         (roughness_normal_ao_sun.w * n_dot_l * moving_visibility);
 
-    float3 lighting = indirect + direct_emitter + direct_sun;
+    float3 lighting = indirect + direct_sun;
     if (camera_position.w > 1.5f)
     {
         output.hdr = float4(lighting, 1.0f);
