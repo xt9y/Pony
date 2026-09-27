@@ -89,6 +89,16 @@ static void unpack_grid(probe_grid *grid, const uint32_t dims[3], const float or
     grid->count_z = dims[2];
 }
 
+static bool cache_replace_file(const char *source, const char *destination) {
+    if (rename(source, destination) == 0) return true;
+
+    if (errno != EEXIST) return false;
+
+    if (remove(destination) != 0) return false;
+
+    return rename(source, destination) == 0;
+}
+
 bool cache_read_partial(const char *path, uint64_t scene_hash, cached_lightmap *out) {
 
     if (!path || !out) return false;
@@ -325,7 +335,7 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
 
     if (good) SDL_Log("B: cache file write took %.2f ms", (double)(SDL_GetPerformanceCounter() - write_started) * 1000.0 / (double)SDL_GetPerformanceFrequency());
 
-    if (good && rename(temporary, path) != 0) {
+    if (good && !cache_replace_file(temporary, path)) {
         SDL_SetError("could not save %s: %s", path, strerror(errno));
 
         good = false;
