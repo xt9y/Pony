@@ -21,10 +21,10 @@
 #pragma clang diagnostic pop
 #endif
 
-typedef struct renderer renderer;
+typedef struct RENDERER RENDERER;
 
-typedef struct fx_state {
-    renderer *owner;
+typedef struct FX_STATE {
+    RENDERER *owner;
 
     NriPipeline *compose_pipeline;
     NriPipeline *ssao_pipeline;
@@ -49,35 +49,35 @@ typedef struct fx_state {
 
     bool volume_ready;
     uint32_t debug_view;
-} fx_state;
+} FX_STATE;
 
-typedef struct render_vertex {
+typedef struct RENDER_VERTEX {
     float x, y, z;
     float nx, ny, nz;
     float u, v;
     float lu, lv;
     float r, g, b, a;
-} render_vertex;
+} RENDER_VERTEX;
 
-typedef struct render_material render_material;
+typedef struct RENDER_MATERIAL RENDER_MATERIAL;
 
-typedef struct draw_range {
+typedef struct DRAW_RANGE {
     uint32_t first;
     uint32_t count;
     uint32_t material;
-} draw_range;
+} DRAW_RANGE;
 
-typedef struct render_frame {
+typedef struct RENDER_FRAME {
     float mvp[16];
     float view[16];
-    vec3 eye;
-    vec3 right;
-    vec3 up;
-    vec3 forward;
-    vec3 sun;
+    VEC3 eye;
+    VEC3 right;
+    VEC3 up;
+    VEC3 forward;
+    VEC3 sun;
     float tan_half_fov;
     float aspect;
-} render_frame;
+} RENDER_FRAME;
 
 typedef struct swapchain_texture swapchain_texture;
 typedef struct frame_context frame_context;
@@ -85,7 +85,7 @@ typedef struct upload_context upload_context;
 typedef struct texture_state texture_state;
 typedef struct probe_wavefront_scratch probe_wavefront_scratch;
 
-struct renderer {
+struct RENDERER {
     SDL_Window *window;
 
     NriDevice *device;
@@ -130,7 +130,7 @@ struct renderer {
     uint32_t temporary_descriptor_num, temporary_descriptor_cap;
     uint32_t temporary_buffer_num, temporary_buffer_cap;
 
-    texture_state *texture_states;
+    TEXTURE_STATE *texture_states;
 
     uint32_t texture_state_num, texture_state_cap;
 
@@ -186,12 +186,12 @@ struct renderer {
     NriTexture *default_white;
     NriTexture *default_normal;
 
-    render_material *materials;
+    RENDER_MATERIAL *materials;
     uint32_t material_count;
-    draw_range *draws;
+    DRAW_RANGE *draws;
     uint32_t draw_count;
 
-    render_vertex *vertices;
+    RENDER_VERTEX *vertices;
     uint32_t vertex_count;
     uint32_t vertex_capacity;
     uint32_t debug_vertex_start;
@@ -203,7 +203,7 @@ struct renderer {
     uint32_t lightmap_trace_count;
     uint32_t bake_target_samples;
     uint32_t lightmap_min_samples;
-    vec3 lightmap_probe_origin;
+    VEC3 lightmap_probe_origin;
     float lightmap_probe_spacing;
     uint32_t lightmap_probe_count_x;
     uint32_t lightmap_probe_count_y;
@@ -211,19 +211,19 @@ struct renderer {
     float bake_epsilon;
     bool has_bake;
     const char *bake_stage;
-    probe_grid volume_probes;
+    PROBE_GRID volume_probes;
     NriBuffer *volume_probe_buffer;
     NriBuffer *beam_buffer;
-    beam_grid beams;
+    BEAM_GRID beams;
 
-    fx_state fx;
+    FX_STATE fx;
 
     float yaw;
     float pitch;
     float distance;
     float scene_radius;
     double frame_time_ms;
-    vec3 target;
+    VEC3 target;
 
     bool dragging;
     bool show_debug;
@@ -231,21 +231,21 @@ struct renderer {
     uint32_t debug_view;
 };
 
-bool upload_scene(renderer *r, const gltf_scene *visual);
-bool upload_bvh(renderer *r, const bvh *tree);
-bool bake_lightmap(renderer *r, const bvh *tree, const lightmap *lm, const probe_grid *probes);
-typedef bool (*probe_bake_progress_fn)(Uint32 done, Uint32 total, Uint32 active);
-bool bake_probe_grid_fast(renderer *r, probe_grid *grid, const bvh *tree, const beam_grid *beams, probe_bake_progress_fn progress);
-bool bake_probe_grid(renderer *r, probe_grid *grid, Uint32 samples);
-NriTexture *upload_lightmap(renderer *r, const cached_lightmap *cached);
-NriBuffer *upload_probes(renderer *r, const probe_grid *grid);
-NriBuffer *upload_beams(renderer *r, const beam_grid *grid);
-bool download_lightmap(renderer *r, cached_lightmap *out);
-void release_texture(renderer *r, NriTexture *texture);
-void release_buffer(renderer *r, NriBuffer *buffer);
-void release_bake_resources(renderer *r);
-bool draw_frame(renderer *r, const render_frame *frame);
-bool bake_worker_init(renderer *r);
-void bake_worker_deinit(renderer *r);
+bool upload_scene(RENDERER *r, const GLTF_SCENE *visual);
+bool upload_bvh(RENDERER *r, const BVH *tree);
+bool bake_lightmap(RENDERER *r, const BVH *tree, const LIGHTMAP *lm, const PROBE_GRID *probes);
+typedef bool (*PROBE_BAKE_PROGRESS_FN)(Uint32 done, Uint32 total, Uint32 active);
+bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const BEAM_GRID *beams, PROBE_BAKE_PROGRESS_FN progress);
+bool bake_probe_grid(RENDERER *r, PROBE_GRID *grid, Uint32 samples);
+NriTexture *upload_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached);
+NriBuffer *upload_probes(RENDERER *r, const PROBE_GRID *grid);
+NriBuffer *upload_beams(RENDERER *r, const BEAM_GRID *grid);
+bool download_lightmap(RENDERER *r, CACHED_LIGHTMAP *out);
+void release_texture(RENDERER *r, NriTexture *texture);
+void release_buffer(RENDERER *r, NriBuffer *buffer);
+void release_bake_resources(RENDERER *r);
+bool draw_frame(RENDERER *r, const RENDER_FRAME *frame);
+bool bake_worker_init(RENDERER *r);
+void bake_worker_deinit(RENDERER *r);
 
 #endif

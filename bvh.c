@@ -11,19 +11,19 @@
 #define BVH_SAH_BINS 16u
 #define BVH_EPSILON 1.0e-6f
 
-typedef struct build_tri {
-    bvh_triangle gpu;
-    vec3 centroid;
-    vec3 min;
-    vec3 max;
-} build_tri;
+typedef struct BUILD_TRI {
+    BVH_TRIANGLE gpu;
+    VEC3 centroid;
+    VEC3 min;
+    VEC3 max;
+} BUILD_TRI;
 
 static float srgb_linear(float value) {
 
     return value <= 0.04045f ? value / 12.92f : powf((value + 0.055f) / 1.055f, 2.4f);
 }
 
-static vec3 texture_color(const gltf_scene *visual, SDL_Surface **images, int32_t texture_index, const gltf_vertex *vertices) {
+static VEC3 texture_color(const GLTF_SCENE *visual, SDL_Surface **images, int32_t texture_index, const GLTF_VERTEX *vertices) {
 
     if (texture_index < 0 || (uint32_t)texture_index >= visual->texture_count) return v3(1, 1, 1);
 
@@ -55,11 +55,11 @@ static void release_images(SDL_Surface **images, uint32_t count) {
     free(images);
 }
 
-static float axis_value(vec3 v, int axis) {
+static float axis_value(VEC3 v, int axis) {
     return axis == 0 ? v.x : axis == 1 ? v.y : v.z;
 }
 
-static bool reserve_nodes(bvh *tree, uint32_t count) {
+static bool reserve_nodes(BVH *tree, uint32_t count) {
 
     if (count <= tree->node_capacity) return true;
 
@@ -71,7 +71,7 @@ static bool reserve_nodes(bvh *tree, uint32_t count) {
         next *= 2u;
     }
 
-    bvh_node *p = realloc(tree->nodes, (size_t)next * sizeof(*p));
+    BVH_NODE *p = realloc(tree->nodes, (size_t)next * sizeof(*p));
 
     if (!p) return false;
     tree->nodes = p;
@@ -80,7 +80,7 @@ static bool reserve_nodes(bvh *tree, uint32_t count) {
     return true;
 }
 
-static uint32_t new_node(bvh *tree) {
+static uint32_t new_node(BVH *tree) {
 
     if (!reserve_nodes(tree, tree->node_count + 1u)) return UINT32_MAX;
 
@@ -91,7 +91,7 @@ static uint32_t new_node(bvh *tree) {
     return index;
 }
 
-static void range_bounds(const build_tri *tris, uint32_t first, uint32_t count, vec3 *bmin, vec3 *bmax, vec3 *cmin, vec3 *cmax) {
+static void range_bounds(const BUILD_TRI *tris, uint32_t first, uint32_t count, VEC3 *bmin, VEC3 *bmax, VEC3 *cmin, VEC3 *cmax) {
 
     *bmin = tris[first].min;
     *bmax = tris[first].max;
@@ -99,7 +99,7 @@ static void range_bounds(const build_tri *tris, uint32_t first, uint32_t count, 
 
     for (uint32_t i = 0; i < count; ++i) {
 
-        const build_tri *t = &tris[first + i];
+        const BUILD_TRI *t = &tris[first + i];
 
         if (t->min.x < bmin->x) bmin->x = t->min.x;
 
@@ -127,14 +127,14 @@ static void range_bounds(const build_tri *tris, uint32_t first, uint32_t count, 
     }
 }
 
-static void swap_tri(build_tri *a, build_tri *b) {
+static void swap_tri(BUILD_TRI *a, BUILD_TRI *b) {
 
-    const build_tri t = *a;
+    const BUILD_TRI t = *a;
     *a = *b;
     *b = t;
 }
 
-static uint32_t partition_range(build_tri *tris, uint32_t first, uint32_t count, int axis, float split) {
+static uint32_t partition_range(BUILD_TRI *tris, uint32_t first, uint32_t count, int axis, float split) {
 
     uint32_t i = first;
     uint32_t j = first + count;
@@ -151,13 +151,13 @@ static uint32_t partition_range(build_tri *tris, uint32_t first, uint32_t count,
     return i;
 }
 
-typedef struct sah_bin {
-    vec3 min, max;
+typedef struct SAH_BIN {
+    VEC3 min, max;
 
     uint32_t count;
-} sah_bin;
+} SAH_BIN;
 
-static void sah_include(sah_bin *bin, vec3 lo, vec3 hi) {
+static void sah_include(SAH_BIN *bin, VEC3 lo, VEC3 hi) {
     if (!bin->count++) {
         bin->min = lo;
         bin->max = hi;
@@ -169,13 +169,13 @@ static void sah_include(sah_bin *bin, vec3 lo, vec3 hi) {
     bin->max = v3(fmaxf(bin->max.x, hi.x), fmaxf(bin->max.y, hi.y), fmaxf(bin->max.z, hi.z));
 }
 
-static float surface_area(vec3 lo, vec3 hi) {
-    vec3 d = v3_sub(hi, lo);
+static float surface_area(VEC3 lo, VEC3 hi) {
+    VEC3 d = v3_sub(hi, lo);
 
     return 2.0f * (d.x * d.y + d.y * d.z + d.z * d.x);
 }
 
-static bool sah_split(const build_tri *tris, uint32_t first, uint32_t count, vec3 bmin, vec3 bmax, vec3 cmin, vec3 cmax, int *best_axis, float *best_position) {
+static bool sah_split(const BUILD_TRI *tris, uint32_t first, uint32_t count, VEC3 bmin, VEC3 bmax, VEC3 cmin, VEC3 cmax, int *best_axis, float *best_position) {
     float parent_area = surface_area(bmin, bmax);
 
     if (parent_area <= BVH_EPSILON) return false;
@@ -189,12 +189,12 @@ static bool sah_split(const build_tri *tris, uint32_t first, uint32_t count, vec
 
         if (span <= BVH_EPSILON) continue;
 
-        sah_bin bins[BVH_SAH_BINS] = {0};
-        sah_bin prefix[BVH_SAH_BINS] = {0};
-        sah_bin suffix[BVH_SAH_BINS] = {0};
+        SAH_BIN bins[BVH_SAH_BINS] = {0};
+        SAH_BIN prefix[BVH_SAH_BINS] = {0};
+        SAH_BIN suffix[BVH_SAH_BINS] = {0};
 
         for (uint32_t i = 0; i < count; ++i) {
-            const build_tri *tri = &tris[first + i];
+            const BUILD_TRI *tri = &tris[first + i];
             uint32_t bin = (uint32_t)((axis_value(tri->centroid, axis) - lo) * (float)BVH_SAH_BINS / span);
 
             if (bin >= BVH_SAH_BINS) bin = BVH_SAH_BINS - 1u;
@@ -203,7 +203,7 @@ static bool sah_split(const build_tri *tris, uint32_t first, uint32_t count, vec
         }
 
         for (uint32_t i = 0; i < BVH_SAH_BINS; ++i) {
-            prefix[i] = i ? prefix[i - 1u] : (sah_bin){0};
+            prefix[i] = i ? prefix[i - 1u] : (SAH_BIN){0};
 
             if (bins[i].count) {
                 uint32_t n = bins[i].count;
@@ -213,7 +213,7 @@ static bool sah_split(const build_tri *tris, uint32_t first, uint32_t count, vec
             }
 
             uint32_t j = BVH_SAH_BINS - 1u - i;
-            suffix[j] = i ? suffix[j + 1u] : (sah_bin){0};
+            suffix[j] = i ? suffix[j + 1u] : (SAH_BIN){0};
 
             if (bins[j].count) {
                 uint32_t n = bins[j].count;
@@ -241,11 +241,11 @@ static bool sah_split(const build_tri *tris, uint32_t first, uint32_t count, vec
     return found;
 }
 
-static bool build_node(bvh *tree, build_tri *tris, uint32_t node_index, uint32_t first, uint32_t count) {
-    vec3 bmin, bmax, cmin, cmax;
+static bool build_node(BVH *tree, BUILD_TRI *tris, uint32_t node_index, uint32_t first, uint32_t count) {
+    VEC3 bmin, bmax, cmin, cmax;
     range_bounds(tris, first, count, &bmin, &bmax, &cmin, &cmax);
 
-    bvh_node *node = &tree->nodes[node_index];
+    BVH_NODE *node = &tree->nodes[node_index];
     node->min[0] = bmin.x;
     node->min[1] = bmin.y;
     node->min[2] = bmin.z;
@@ -274,7 +274,7 @@ static bool build_node(bvh *tree, build_tri *tris, uint32_t node_index, uint32_t
     uint32_t middle = found ? partition_range(tris, first, count, axis, split) : first;
 
     if (middle == first || middle == first + count) {
-        const vec3 extent = v3_sub(cmax, cmin);
+        const VEC3 extent = v3_sub(cmax, cmin);
         axis = extent.y > extent.x ? 1 : 0;
 
         if (axis_value(extent, 2) > axis_value(extent, axis)) axis = 2;
@@ -301,9 +301,9 @@ static bool build_node(bvh *tree, build_tri *tris, uint32_t node_index, uint32_t
     return build_node(tree, tris, left, first, middle - first) && build_node(tree, tris, right, middle, first + count - middle);
 }
 
-static void thread_node(bvh *tree, uint32_t node_index, uint32_t next) {
+static void thread_node(BVH *tree, uint32_t node_index, uint32_t next) {
 
-    bvh_node *node = &tree->nodes[node_index];
+    BVH_NODE *node = &tree->nodes[node_index];
 
     if (node->meta[3] != 0u) {
         node->meta[1] = next;
@@ -319,7 +319,7 @@ static void thread_node(bvh *tree, uint32_t node_index, uint32_t next) {
     thread_node(tree, right, next);
 }
 
-static bool trace_box(trace_ray ray, const bvh_node *node, float max_t) {
+static bool trace_box(TRACE_RAY ray, const BVH_NODE *node, float max_t) {
 
     float lo = ray.tmin;
     float hi = fminf(ray.tmax, max_t);
@@ -356,23 +356,23 @@ static bool trace_box(trace_ray ray, const bvh_node *node, float max_t) {
     return hi >= ray.tmin;
 }
 
-static bool trace_triangle(trace_ray ray, const bvh_triangle *tri, float max_t, float *hit_t) {
+static bool trace_triangle(TRACE_RAY ray, const BVH_TRIANGLE *tri, float max_t, float *hit_t) {
 
-    const vec3 a = v3(tri->a[0], tri->a[1], tri->a[2]);
-    const vec3 e1 = v3_sub(v3(tri->b[0], tri->b[1], tri->b[2]), a);
-    const vec3 e2 = v3_sub(v3(tri->c[0], tri->c[1], tri->c[2]), a);
-    const vec3 p = v3_cross(ray.direction, e2);
+    const VEC3 a = v3(tri->a[0], tri->a[1], tri->a[2]);
+    const VEC3 e1 = v3_sub(v3(tri->b[0], tri->b[1], tri->b[2]), a);
+    const VEC3 e2 = v3_sub(v3(tri->c[0], tri->c[1], tri->c[2]), a);
+    const VEC3 p = v3_cross(ray.direction, e2);
     const float determinant = v3_dot(e1, p);
 
     if (fabsf(determinant) < 1.0e-7f) return false;
 
     const float inverse = 1.0f / determinant;
-    const vec3 s = v3_sub(ray.origin, a);
+    const VEC3 s = v3_sub(ray.origin, a);
     const float u = v3_dot(s, p) * inverse;
 
     if (u < 0.0f || u > 1.0f) return false;
 
-    const vec3 q = v3_cross(s, e1);
+    const VEC3 q = v3_cross(s, e1);
     const float v = v3_dot(ray.direction, q) * inverse;
 
     if (v < 0.0f || u + v > 1.0f) return false;
@@ -385,7 +385,7 @@ static bool trace_triangle(trace_ray ray, const bvh_triangle *tri, float max_t, 
     return true;
 }
 
-bool trace_any(const bvh *tree, trace_ray ray) {
+bool trace_any(const BVH *tree, TRACE_RAY ray) {
 
     if (!tree || !tree->nodes || !tree->triangles || !tree->node_count || !tree->triangle_count || ray.tmax <= ray.tmin) return false;
 
@@ -393,7 +393,7 @@ bool trace_any(const bvh *tree, trace_ray ray) {
 
     while (node_index != UINT32_MAX) {
 
-        const bvh_node *node = &tree->nodes[node_index];
+        const BVH_NODE *node = &tree->nodes[node_index];
 
         if (!trace_box(ray, node, ray.tmax)) {
             node_index = node->meta[1];
@@ -417,20 +417,20 @@ bool trace_any(const bvh *tree, trace_ray ray) {
     return false;
 }
 
-bool trace_closest(const bvh *tree, trace_ray ray, trace_hit *hit) {
+bool trace_closest(const BVH *tree, TRACE_RAY ray, TRACE_HIT *hit) {
 
     if (!hit) return false;
-    *hit = (trace_hit){.t = ray.tmax, .triangle = UINT32_MAX};
+    *hit = (TRACE_HIT){.t = ray.tmax, .triangle = UINT32_MAX};
     if (!tree || !tree->nodes || !tree->triangles || !tree->node_count || !tree->triangle_count || ray.tmax <= ray.tmin) return false;
 
     uint32_t node_index = 0u;
     float closest = ray.tmax;
     bool found = false;
-    trace_hit best = {0};
+    TRACE_HIT best = {0};
 
     while (node_index != UINT32_MAX) {
 
-        const bvh_node *node = &tree->nodes[node_index];
+        const BVH_NODE *node = &tree->nodes[node_index];
 
         if (!trace_box(ray, node, closest)) {
             node_index = node->meta[1];
@@ -441,13 +441,13 @@ bool trace_closest(const bvh *tree, trace_ray ray, trace_hit *hit) {
         if (node->meta[3]) {
             for (uint32_t i = 0; i < node->meta[3]; ++i) {
                 const uint32_t triangle = node->meta[2] + i;
-                const bvh_triangle *tri = &tree->triangles[triangle];
+                const BVH_TRIANGLE *tri = &tree->triangles[triangle];
                 float t;
 
                 if (!trace_triangle(ray, tri, closest, &t)) continue;
 
                 closest = t;
-                vec3 normal = v3_normalize(v3(tri->normal[0], tri->normal[1], tri->normal[2]));
+                VEC3 normal = v3_normalize(v3(tri->normal[0], tri->normal[1], tri->normal[2]));
 
                 if (v3_dot(normal, ray.direction) > 0.0f) normal = v3_scale(normal, -1.0f);
 
@@ -470,21 +470,21 @@ bool trace_closest(const bvh *tree, trace_ray ray, trace_hit *hit) {
     return found;
 }
 
-void bvh_free(bvh *tree) {
+void bvh_free(BVH *tree) {
     if (!tree) return;
     free(tree->nodes);
     free(tree->triangles);
     memset(tree, 0, sizeof(*tree));
 }
 
-bool bvh_build(bvh *tree, const mesh *m, const gltf_scene *visual) {
+bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
 
     if (!tree || !m || !m->faces.count || !m->vertices.count || m->faces.count > UINT32_MAX) return false;
 
     bvh_free(tree);
 
     const uint32_t count = (uint32_t)m->faces.count;
-    build_tri *build = calloc(count, sizeof(*build));
+    BUILD_TRI *build = calloc(count, sizeof(*build));
 
     if (!build) return false;
 
@@ -502,7 +502,7 @@ bool bvh_build(bvh *tree, const mesh *m, const gltf_scene *visual) {
 
         for (uint32_t i = 0; i < visual->image_count; ++i) {
 
-            const gltf_image *source = &visual->images[i];
+            const GLTF_IMAGE *source = &visual->images[i];
 
             if (!source->bytes.data || !source->bytes.size) continue;
 
@@ -522,12 +522,12 @@ bool bvh_build(bvh *tree, const mesh *m, const gltf_scene *visual) {
         }
     }
 
-    const point *points = m->vertices.buffer;
-    const mesh_face *faces = m->faces.buffer;
+    const POINT *points = m->vertices.buffer;
+    const MESH_FACE *faces = m->faces.buffer;
 
     for (uint32_t i = 0; i < count; ++i) {
 
-        const mesh_face f = faces[i];
+        const MESH_FACE f = faces[i];
 
         if (f.indices[0] >= m->vertices.count || f.indices[1] >= m->vertices.count || f.indices[2] >= m->vertices.count) {
             free(build);
@@ -536,32 +536,32 @@ bool bvh_build(bvh *tree, const mesh *m, const gltf_scene *visual) {
             return false;
         }
 
-        const vec3 a = points[f.indices[0]].p;
-        const vec3 b = points[f.indices[1]].p;
-        const vec3 c = points[f.indices[2]].p;
+        const VEC3 a = points[f.indices[0]].p;
+        const VEC3 b = points[f.indices[1]].p;
+        const VEC3 c = points[f.indices[2]].p;
 
-        vec3 n = f.normal;
+        VEC3 n = f.normal;
 
         if (v3_dot(n, n) <= BVH_EPSILON) n = v3_normalize(v3_cross(v3_sub(b, a), v3_sub(c, a)));
 
-        vec3 albedo = v3(0.72f, 0.72f, 0.72f);
+        VEC3 albedo = v3(0.72f, 0.72f, 0.72f);
 
         if (visual && i < visual->vertex_count / 3u) {
             uint32_t material = visual->vertices[i * 3u].material;
 
             if (material < visual->material_count) {
-                const gltf_material *mat = &visual->materials[material];
+                const GLTF_MATERIAL *mat = &visual->materials[material];
                 albedo = v3(mat->base_color[0] * (1.0f - mat->metallic), mat->base_color[1] * (1.0f - mat->metallic), mat->base_color[2] * (1.0f - mat->metallic));
 
                 if (images) {
 
-                    vec3 tex = texture_color(visual, images, mat->base_color_texture, &visual->vertices[i * 3u]);
+                    VEC3 tex = texture_color(visual, images, mat->base_color_texture, &visual->vertices[i * 3u]);
                     albedo = v3(albedo.x * tex.x, albedo.y * tex.y, albedo.z * tex.z);
                 }
             }
         }
 
-        build[i].gpu = (bvh_triangle){.a = {a.x, a.y, a.z, albedo.x}, .b = {b.x, b.y, b.z, albedo.y}, .c = {c.x, c.y, c.z, albedo.z}, .normal = {n.x, n.y, n.z, 0.0f}};
+        build[i].gpu = (BVH_TRIANGLE){.a = {a.x, a.y, a.z, albedo.x}, .b = {b.x, b.y, b.z, albedo.y}, .c = {c.x, c.y, c.z, albedo.z}, .normal = {n.x, n.y, n.z, 0.0f}};
         build[i].centroid = v3_scale(v3_add(v3_add(a, b), c), 1.0f / 3.0f);
         build[i].min = v3(fminf(a.x, fminf(b.x, c.x)), fminf(a.y, fminf(b.y, c.y)), fminf(a.z, fminf(b.z, c.z)));
         build[i].max = v3(fmaxf(a.x, fmaxf(b.x, c.x)), fmaxf(a.y, fmaxf(b.y, c.y)), fmaxf(a.z, fmaxf(b.z, c.z)));

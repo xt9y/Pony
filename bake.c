@@ -9,13 +9,13 @@
 #define PROBE_MAX_SAMPLES 1024u
 #define PROBE_GRID_SPACING 4.0f
 
-typedef enum bake_phase { BAKE_PHASE_INIT = 0, BAKE_PHASE_SUN, BAKE_PHASE_PROBES, BAKE_PHASE_SEED, BAKE_PHASE_LIGHTMAP } bake_phase;
+typedef enum BAKE_PHASE { BAKE_PHASE_INIT = 0, BAKE_PHASE_SUN, BAKE_PHASE_PROBES, BAKE_PHASE_SEED, BAKE_PHASE_LIGHTMAP } BAKE_PHASE;
 
-typedef struct bake_job {
-    renderer *renderer;
-    const mesh *scene;
-    const gltf_scene *visual;
-    const lightmap *layout;
+typedef struct BAKE_JOB {
+    RENDERER *renderer;
+    const MESH *scene;
+    const GLTF_SCENE *visual;
+    const LIGHTMAP *layout;
     char *path;
     char *worker_path;
     uint64_t scene_hash;
@@ -36,9 +36,9 @@ typedef struct bake_job {
     Uint64 save_seen_at;
     uint64_t save_seen_bytes;
     char error[256];
-} bake_job;
+} BAKE_JOB;
 
-static bake_job *g_bake;
+static BAKE_JOB *g_bake;
 static Uint64 g_title_tick;
 
 static double bake_elapsed_ms(Uint64 started) {
@@ -83,7 +83,7 @@ static uint64_t bake_file_size(const char *path) {
 }
 
 static const char *bake_phase_name(int phase) {
-    switch ((bake_phase)phase) {
+    switch ((BAKE_PHASE)phase) {
         case BAKE_PHASE_SUN:
             return "SUN";
         case BAKE_PHASE_PROBES:
@@ -97,8 +97,8 @@ static const char *bake_phase_name(int phase) {
     }
 }
 
-static void bake_set_phase(bake_phase phase, Uint32 done, Uint32 total, Uint32 active) {
-    bake_job *job = g_bake;
+static void bake_set_phase(BAKE_PHASE phase, Uint32 done, Uint32 total, Uint32 active) {
+    BAKE_JOB *job = g_bake;
 
     if (!job) return;
 
@@ -115,7 +115,7 @@ static bool bake_cancelled(void) {
     return g_bake && SDL_GetAtomicInt(&g_bake->cancel) != 0;
 }
 
-static bool bake_probe_stats(const renderer *r, Uint32 *minimum, double *average, Uint32 *maximum, Uint32 *valid_count) {
+static bool bake_probe_stats(const RENDERER *r, Uint32 *minimum, double *average, Uint32 *maximum, Uint32 *valid_count) {
     if (!r || !r->volume_probes.probes) return false;
 
     const uint64_t probe_count = (uint64_t)r->volume_probes.count_x * r->volume_probes.count_y * r->volume_probes.count_z;
@@ -128,7 +128,7 @@ static bool bake_probe_stats(const renderer *r, Uint32 *minimum, double *average
     Uint32 measured = 0u;
 
     for (uint64_t i = 0u; i < probe_count; ++i) {
-        const probe *probe = &r->volume_probes.probes[i];
+        const PROBE *probe = &r->volume_probes.probes[i];
 
         if (probe->position[3] <= 0.0f) continue;
 
@@ -212,7 +212,7 @@ static bool bake_copy_cache(const char *source_path, const char *destination_pat
     return good;
 }
 
-static void bake_set_error(bake_job *job, const char *message) {
+static void bake_set_error(BAKE_JOB *job, const char *message) {
     if (!job) return;
 
     const char *text = message && *message ? message : "unknown bake error";
@@ -225,11 +225,11 @@ static bool bake_probe_progress(Uint32 done, Uint32 total, Uint32 active) {
     return !bake_cancelled();
 }
 
-static bool bake_make_probe_grid(const mesh *m, probe_grid *grid) {
+static bool bake_make_probe_grid(const MESH *m, PROBE_GRID *grid) {
     if (!m || !grid) return false;
     memset(grid, 0, sizeof(*grid));
 
-    const vec3 extent = v3_sub(m->bounds.max, m->bounds.min);
+    const VEC3 extent = v3_sub(m->bounds.max, m->bounds.min);
 
     if (!isfinite(extent.x) || !isfinite(extent.y) || !isfinite(extent.z) || extent.x < 0.0f || extent.y < 0.0f || extent.z < 0.0f) return false;
     grid->count_x = (uint32_t)ceilf(extent.x / PROBE_GRID_SPACING) + 1u;
@@ -250,7 +250,7 @@ static bool bake_make_probe_grid(const mesh *m, probe_grid *grid) {
             for (uint32_t x = 0; x < grid->count_x; ++x) {
                 const size_t index = x + (size_t)grid->count_x * (y + (size_t)grid->count_y * z);
 
-                probe *p = &grid->probes[index];
+                PROBE *p = &grid->probes[index];
                 p->position[0] = grid->origin.x + x * PROBE_GRID_SPACING;
                 p->position[1] = grid->origin.y + y * PROBE_GRID_SPACING;
                 p->position[2] = grid->origin.z + z * PROBE_GRID_SPACING;
@@ -260,9 +260,9 @@ static bool bake_make_probe_grid(const mesh *m, probe_grid *grid) {
     return true;
 }
 
-static bool bake_write_fast_seed(bake_job *job, probe_grid *probes, beam_grid *beams) {
+static bool bake_write_fast_seed(BAKE_JOB *job, PROBE_GRID *probes, BEAM_GRID *beams) {
     unsigned char black_pixel[8] = {0};
-    cached_lightmap seed = {0};
+    CACHED_LIGHTMAP seed = {0};
 
     seed.width = 1u;
     seed.height = 1u;
@@ -277,11 +277,11 @@ static bool bake_write_fast_seed(bake_job *job, probe_grid *probes, beam_grid *b
     return cache_write(job->worker_path, job->scene_hash, stale_layout, job->volume_hash, job->beam_hash, &seed);
 }
 
-static bool bake_prepare_fast_components(bake_job *job, renderer *worker) {
+static bool bake_prepare_fast_components(BAKE_JOB *job, RENDERER *worker) {
     Uint64 started = SDL_GetPerformanceCounter();
-    bvh tree = {0};
-    probe_grid probes = {0};
-    beam_grid beams = {0};
+    BVH tree = {0};
+    PROBE_GRID probes = {0};
+    BEAM_GRID beams = {0};
     bool good = bvh_build(&tree, job->scene, job->visual);
 
     if (good) SDL_Log("B: fast probe BVH built in %.2f ms", bake_elapsed_ms(started));
@@ -310,8 +310,8 @@ static bool bake_prepare_fast_components(bake_job *job, renderer *worker) {
 }
 
 static int SDLCALL bake_thread_main(void *userdata) {
-    bake_job *job = userdata;
-    renderer worker = {0};
+    BAKE_JOB *job = userdata;
+    RENDERER worker = {0};
 
     if (!bake_worker_init(&worker)) {
         bake_set_error(job, SDL_GetError());
@@ -382,14 +382,14 @@ static bool bake_publish_cache(const char *worker_path, const char *path) {
     return true;
 }
 
-static void bake_free_job(bake_job *job) {
+static void bake_free_job(BAKE_JOB *job) {
     if (!job) return;
     free(job->worker_path);
     free(job->path);
     free(job);
 }
 
-bool bake_start(renderer *r, const mesh *scene, const gltf_scene *visual, const lightmap *layout, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
+bool bake_start(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual, const LIGHTMAP *layout, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
                 uint64_t beam_hash) {
     if (!r || !r->device || !scene || !visual || !layout || !path) return false;
 
@@ -399,7 +399,7 @@ bool bake_start(renderer *r, const mesh *scene, const gltf_scene *visual, const 
         return false;
     }
 
-    bake_job *job = calloc(1, sizeof(*job));
+    BAKE_JOB *job = calloc(1, sizeof(*job));
 
     if (!job) return false;
     job->renderer = r;
@@ -446,11 +446,11 @@ bool bake_start(renderer *r, const mesh *scene, const gltf_scene *visual, const 
     return true;
 }
 
-bool bake_active(renderer *r) {
+bool bake_active(RENDERER *r) {
     return g_bake && (!r || g_bake->renderer == r);
 }
 
-void bake_update_title(renderer *r) {
+void bake_update_title(RENDERER *r) {
     if (!r || !r->window) return;
 
     const Uint64 now = SDL_GetTicks();
@@ -462,7 +462,7 @@ void bake_update_title(renderer *r) {
     const double fps = frame_ms > 0.001 ? 1000.0 / frame_ms : 0.0;
     char title[256];
 
-    bake_job *job = g_bake;
+    BAKE_JOB *job = g_bake;
 
     if (job && job->renderer == r) {
         const int phase = SDL_GetAtomicInt(&job->phase);
@@ -526,8 +526,8 @@ void bake_update_title(renderer *r) {
     SDL_SetWindowTitle(r->window, title);
 }
 
-void bake_update(renderer *r) {
-    bake_job *job = g_bake;
+void bake_update(RENDERER *r) {
+    BAKE_JOB *job = g_bake;
 
     if (!job || job->renderer != r || !SDL_GetAtomicInt(&job->done)) return;
     SDL_WaitThread(job->thread, NULL);
@@ -563,8 +563,8 @@ void bake_update(renderer *r) {
     bake_free_job(job);
 }
 
-void bake_cancel(renderer *r) {
-    bake_job *job = g_bake;
+void bake_cancel(RENDERER *r) {
+    BAKE_JOB *job = g_bake;
 
     if (!job || (r && job->renderer != r)) return;
     SDL_SetAtomicInt(&job->cancel, 1);

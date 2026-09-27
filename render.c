@@ -5,15 +5,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct mat4 {
+typedef struct MAT4 {
     float m[16];
-} mat4;
+} MAT4;
 
-typedef struct color4 {
+typedef struct COLOR4 {
     float r, g, b, a;
-} color4;
+} COLOR4;
 
-void bake_progress(renderer *r, const char *stage, Uint32 done, Uint32 total) {
+void bake_progress(RENDERER *r, const char *stage, Uint32 done, Uint32 total) {
     if (!r || !r->window) return;
 
     r->bake_stage = stage;
@@ -42,19 +42,19 @@ static void bake_timing(const char *stage, Uint64 started) {
     SDL_Log("B: %s took %.2f ms", stage, elapsed);
 }
 
-static vec3 scene_sun_direction(void) {
+static VEC3 scene_sun_direction(void) {
     return v3_normalize(v3(0.38f, 0.30f, 0.32f));
 }
 
-static mat4 m4_identity(void) {
-    mat4 r = {0};
+static MAT4 m4_identity(void) {
+    MAT4 r = {0};
     r.m[0] = r.m[5] = r.m[10] = r.m[15] = 1.0f;
 
     return r;
 }
 
-static mat4 m4_mul(mat4 a, mat4 b) {
-    mat4 r = {0};
+static MAT4 m4_mul(MAT4 a, MAT4 b) {
+    MAT4 r = {0};
 
     for (int c = 0; c < 4; ++c) {
         for (int row = 0; row < 4; ++row) {
@@ -65,9 +65,9 @@ static mat4 m4_mul(mat4 a, mat4 b) {
     return r;
 }
 
-static mat4 m4_perspective(float fov_y, float aspect, float znear, float zfar) {
+static MAT4 m4_perspective(float fov_y, float aspect, float znear, float zfar) {
     const float f = 1.0f / tanf(fov_y * 0.5f);
-    mat4 r = {0};
+    MAT4 r = {0};
     r.m[0] = f / aspect;
     r.m[5] = f;
     r.m[10] = zfar / (znear - zfar);
@@ -77,11 +77,11 @@ static mat4 m4_perspective(float fov_y, float aspect, float znear, float zfar) {
     return r;
 }
 
-static mat4 m4_look_at(vec3 eye, vec3 target, vec3 up) {
-    const vec3 f = v3_normalize(v3_sub(target, eye));
-    const vec3 s = v3_normalize(v3_cross(f, up));
-    const vec3 u = v3_cross(s, f);
-    mat4 r = m4_identity();
+static MAT4 m4_look_at(VEC3 eye, VEC3 target, VEC3 up) {
+    const VEC3 f = v3_normalize(v3_sub(target, eye));
+    const VEC3 s = v3_normalize(v3_cross(f, up));
+    const VEC3 u = v3_cross(s, f);
+    MAT4 r = m4_identity();
 
     r.m[0] = s.x;
     r.m[1] = u.x;
@@ -99,7 +99,7 @@ static mat4 m4_look_at(vec3 eye, vec3 target, vec3 up) {
     return r;
 }
 
-static bool reserve_vertices(renderer *r, uint32_t needed) {
+static bool reserve_vertices(RENDERER *r, uint32_t needed) {
     if (needed <= r->vertex_capacity) return true;
 
     uint32_t capacity = r->vertex_capacity ? r->vertex_capacity : 1024u;
@@ -109,7 +109,7 @@ static bool reserve_vertices(renderer *r, uint32_t needed) {
         capacity *= 2u;
     }
 
-    render_vertex *vertices = realloc(r->vertices, (size_t)capacity * sizeof(*vertices));
+    RENDER_VERTEX *vertices = realloc(r->vertices, (size_t)capacity * sizeof(*vertices));
 
     if (!vertices) return false;
     r->vertices = vertices;
@@ -118,9 +118,9 @@ static bool reserve_vertices(renderer *r, uint32_t needed) {
     return true;
 }
 
-static bool push_surface(renderer *r, const gltf_vertex *v, lmap_uv uv) {
+static bool push_surface(RENDERER *r, const GLTF_VERTEX *v, LMAP_UV uv) {
     if (!reserve_vertices(r, r->vertex_count + 1u)) return false;
-    r->vertices[r->vertex_count++] = (render_vertex){.x = v->position.x,
+    r->vertices[r->vertex_count++] = (RENDER_VERTEX){.x = v->position.x,
                                                      .y = v->position.y,
                                                      .z = v->position.z,
                                                      .nx = v->normal.x,
@@ -138,29 +138,29 @@ static bool push_surface(renderer *r, const gltf_vertex *v, lmap_uv uv) {
     return true;
 }
 
-static bool push_line_vertex(renderer *r, vec3 p, color4 c) {
+static bool push_line_vertex(RENDERER *r, VEC3 p, COLOR4 c) {
     if (!reserve_vertices(r, r->vertex_count + 1u)) return false;
-    r->vertices[r->vertex_count++] = (render_vertex){.x = p.x, .y = p.y, .z = p.z, .r = c.r, .g = c.g, .b = c.b, .a = c.a};
+    r->vertices[r->vertex_count++] = (RENDER_VERTEX){.x = p.x, .y = p.y, .z = p.z, .r = c.r, .g = c.g, .b = c.b, .a = c.a};
 
     return true;
 }
 
-static bool add_wire_triangle(renderer *r, vec3 a, vec3 b, vec3 c, color4 color) {
+static bool add_wire_triangle(RENDERER *r, VEC3 a, VEC3 b, VEC3 c, COLOR4 color) {
     return push_line_vertex(r, a, color) && push_line_vertex(r, b, color) && push_line_vertex(r, b, color) && push_line_vertex(r, c, color) && push_line_vertex(r, c, color) &&
            push_line_vertex(r, a, color);
 }
 
-static void free_probe_grid(probe_grid *grid) {
+static void free_probe_grid(PROBE_GRID *grid) {
     if (!grid) return;
     free(grid->probes);
     memset(grid, 0, sizeof(*grid));
 }
 
-static bool make_probe_grid(const mesh *m, float spacing, probe_grid *grid) {
+static bool make_probe_grid(const MESH *m, float spacing, PROBE_GRID *grid) {
     if (!m || !grid || spacing <= 0.0f) return false;
     memset(grid, 0, sizeof(*grid));
 
-    const vec3 extent = v3_sub(m->bounds.max, m->bounds.min);
+    const VEC3 extent = v3_sub(m->bounds.max, m->bounds.min);
 
     if (!isfinite(extent.x) || !isfinite(extent.y) || !isfinite(extent.z) || extent.x < 0.0f || extent.y < 0.0f || extent.z < 0.0f) return false;
 
@@ -185,7 +185,7 @@ static bool make_probe_grid(const mesh *m, float spacing, probe_grid *grid) {
             for (uint32_t x = 0; x < grid->count_x; ++x) {
                 const size_t index = x + (size_t)grid->count_x * (y + (size_t)grid->count_y * z);
 
-                probe *p = &grid->probes[index];
+                PROBE *p = &grid->probes[index];
                 p->position[0] = grid->origin.x + x * spacing;
                 p->position[1] = grid->origin.y + y * spacing;
                 p->position[2] = grid->origin.z + z * spacing;
@@ -197,10 +197,10 @@ static bool make_probe_grid(const mesh *m, float spacing, probe_grid *grid) {
     return true;
 }
 
-bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, const lightmap *lm) {
+bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, const LIGHTMAP *lm) {
     if (!r || !r->device || !lm) return false;
 
-    cached_lightmap cached = {0};
+    CACHED_LIGHTMAP cached = {0};
 
     if (!cache_read(path, scene_hash, layout_hash, volume_hash, beam_hash, &cached)) return false;
 
@@ -260,11 +260,11 @@ bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash, 
     return good;
 }
 
-bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual, const lightmap *lm, const char *path, uint64_t scene_hash, uint64_t layout_hash,
+bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm, const char *path, uint64_t scene_hash, uint64_t layout_hash,
                             uint64_t volume_hash, uint64_t beam_hash) {
     if (!r || !m || !lm || !r->device) return false;
 
-    cached_lightmap previous = {0};
+    CACHED_LIGHTMAP previous = {0};
     bool reuse = cache_read_partial(path, scene_hash, &previous);
 
     if (reuse && previous.layout_hash == layout_hash && previous.volume_hash == volume_hash && previous.beam_hash == beam_hash) reuse = false;
@@ -280,7 +280,7 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
 
     Uint64 started = SDL_GetPerformanceCounter();
 
-    bvh tree = {0};
+    BVH tree = {0};
 
     if (!bvh_build(&tree, m, visual)) {
         cache_free(&previous);
@@ -290,8 +290,8 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
 
     bake_timing("scene geometry", started);
 
-    probe_grid volume_candidate = {0};
-    beam_grid beam_candidate = {0};
+    PROBE_GRID volume_candidate = {0};
+    BEAM_GRID beam_candidate = {0};
 
     bake_progress(r, "volume probes", 0u, 0u);
 
@@ -375,7 +375,7 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
         good = beam_buffer != NULL;
     }
 
-    cached_lightmap candidate = {0};
+    CACHED_LIGHTMAP candidate = {0};
 
     if (good) {
         bake_progress(r, "saving cache", 0u, 0u);
@@ -445,7 +445,7 @@ bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual
     return good;
 }
 
-bool r_build_scene(renderer *r, const mesh *m, const gltf_scene *visual, const lightmap *lm) {
+bool r_build_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm) {
     if (!r || !m || !visual || !lm || !visual->vertex_count || visual->vertex_count % 3u || visual->vertex_count / 3u != m->faces.count || !visual->material_count || !lm->uvs) {
         SDL_Log("render/lightmap geometry mismatch");
 
@@ -471,26 +471,26 @@ bool r_build_scene(renderer *r, const mesh *m, const gltf_scene *visual, const l
         const uint32_t first = r->vertex_count;
 
         for (size_t triangle = 0; triangle < triangle_count; ++triangle) {
-            const gltf_vertex *v = &visual->vertices[triangle * 3u];
+            const GLTF_VERTEX *v = &visual->vertices[triangle * 3u];
 
             if (v[0].material != material) continue;
 
-            const lmap_uv *uv = &lm->uvs[triangle * 6u];
+            const LMAP_UV *uv = &lm->uvs[triangle * 6u];
 
             if (!push_surface(r, &v[0], uv[0]) || !push_surface(r, &v[1], uv[1]) || !push_surface(r, &v[2], uv[2])) return false;
         }
 
         const uint32_t count = r->vertex_count - first;
 
-        if (count) r->draws[r->draw_count++] = (draw_range){first, count, material};
+        if (count) r->draws[r->draw_count++] = (DRAW_RANGE){first, count, material};
     }
 
     r->debug_vertex_start = r->vertex_count;
 
-    const color4 wire = {0.18f, 0.95f, 0.24f, 1.0f};
+    const COLOR4 wire = {0.18f, 0.95f, 0.24f, 1.0f};
 
     for (size_t triangle = 0; triangle < triangle_count; ++triangle) {
-        const gltf_vertex *v = &visual->vertices[triangle * 3u];
+        const GLTF_VERTEX *v = &visual->vertices[triangle * 3u];
 
         if (!add_wire_triangle(r, v[0].position, v[1].position, v[2].position, wire)) return false;
     }
@@ -505,7 +505,7 @@ bool r_build_scene(renderer *r, const mesh *m, const gltf_scene *visual, const l
     return true;
 }
 
-void r_event(renderer *r, const SDL_Event *event) {
+void r_event(RENDERER *r, const SDL_Event *event) {
     if (!r || !event) return;
 
     switch (event->type) {
@@ -558,7 +558,7 @@ void r_event(renderer *r, const SDL_Event *event) {
     }
 }
 
-bool r_draw(renderer *r) {
+bool r_draw(RENDERER *r) {
     if (!r || !r->window) return false;
 
     int width = 0;
@@ -570,19 +570,19 @@ bool r_draw(renderer *r) {
 
     const float fov = 62.0f * 3.14159265358979323846f / 180.0f;
     const float cp = cosf(r->pitch);
-    const vec3 eye = v3(r->target.x + r->distance * cp * cosf(r->yaw), r->target.y + r->distance * sinf(r->pitch), r->target.z + r->distance * cp * sinf(r->yaw));
-    const vec3 forward = v3_normalize(v3_sub(r->target, eye));
-    const vec3 right = v3_normalize(v3_cross(forward, v3(0, 1, 0)));
-    const vec3 up = v3_cross(right, forward);
+    const VEC3 eye = v3(r->target.x + r->distance * cp * cosf(r->yaw), r->target.y + r->distance * sinf(r->pitch), r->target.z + r->distance * cp * sinf(r->yaw));
+    const VEC3 forward = v3_normalize(v3_sub(r->target, eye));
+    const VEC3 right = v3_normalize(v3_cross(forward, v3(0, 1, 0)));
+    const VEC3 up = v3_cross(right, forward);
     const float aspect = (float)width / (float)height;
     const float tan_half = tanf(fov * 0.5f);
     const float znear = fmaxf(0.02f, r->scene_radius * 0.005f);
     const float zfar = fmaxf(100.0f, r->scene_radius * 10.0f);
-    const mat4 view = m4_look_at(eye, r->target, v3(0, 1, 0));
-    const mat4 proj = m4_perspective(fov, aspect, znear, zfar);
-    const mat4 mvp = m4_mul(proj, view);
+    const MAT4 view = m4_look_at(eye, r->target, v3(0, 1, 0));
+    const MAT4 proj = m4_perspective(fov, aspect, znear, zfar);
+    const MAT4 mvp = m4_mul(proj, view);
 
-    render_frame frame = {.eye = eye, .right = right, .up = up, .forward = forward, .sun = scene_sun_direction(), .tan_half_fov = tan_half, .aspect = aspect};
+    RENDER_FRAME frame = {.eye = eye, .right = right, .up = up, .forward = forward, .sun = scene_sun_direction(), .tan_half_fov = tan_half, .aspect = aspect};
 
     memcpy(frame.mvp, mvp.m, sizeof(frame.mvp));
     memcpy(frame.view, view.m, sizeof(frame.view));

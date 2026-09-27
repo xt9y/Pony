@@ -10,14 +10,14 @@
 #define BEAM_TARGET_Z_STEP 1.0f
 #define BEAM_TILE 4u
 
-static vec3 beam_u(vec3 sun) {
+static VEC3 beam_u(VEC3 sun) {
 
     return v3_normalize(v3_cross(v3(0, 1, 0), sun));
 }
 
 #if 0
 /* Reference exact-visibility path. */
-static bool intersects_box(vec3 p, vec3 d, const bvh_node *node) {
+static bool intersects_box(VEC3 p, VEC3 d, const BVH_NODE *node) {
 
     float lo = 0.0f;
     float hi = 1.0e20f;
@@ -41,37 +41,37 @@ static bool intersects_box(vec3 p, vec3 d, const bvh_node *node) {
     return true;
 }
 
-static bool intersects_triangle(vec3 p, vec3 d, const bvh_triangle *t) {
+static bool intersects_triangle(VEC3 p, VEC3 d, const BVH_TRIANGLE *t) {
 
-    const vec3 a = v3(t->a[0], t->a[1], t->a[2]);
-    const vec3 b = v3(t->b[0], t->b[1], t->b[2]);
-    const vec3 c = v3(t->c[0], t->c[1], t->c[2]);
-    const vec3 e1 = v3_sub(b, a);
-    const vec3 e2 = v3_sub(c, a);
-    const vec3 q = v3_cross(d, e2);
+    const VEC3 a = v3(t->a[0], t->a[1], t->a[2]);
+    const VEC3 b = v3(t->b[0], t->b[1], t->b[2]);
+    const VEC3 c = v3(t->c[0], t->c[1], t->c[2]);
+    const VEC3 e1 = v3_sub(b, a);
+    const VEC3 e2 = v3_sub(c, a);
+    const VEC3 q = v3_cross(d, e2);
     const float determinant = v3_dot(e1, q);
 
     if (fabsf(determinant) < 1.0e-7f) return false;
 
     const float inverse = 1.0f / determinant;
-    const vec3 s = v3_sub(p, a);
+    const VEC3 s = v3_sub(p, a);
     const float u = v3_dot(s, q) * inverse;
 
     if (u < 0.0f || u > 1.0f) return false;
 
-    const vec3 r = v3_cross(s, e1);
+    const VEC3 r = v3_cross(s, e1);
     const float v = v3_dot(d, r) * inverse;
 
     return v >= 0.0f && u + v <= 1.0f && v3_dot(e2, r) * inverse > 0.001f;
 }
 
-static bool shaded(const bvh *tree, vec3 p, vec3 sun) {
+static bool shaded(const BVH *tree, VEC3 p, VEC3 sun) {
 
     uint32_t node = 0;
 
     while (node != UINT32_MAX) {
 
-        const bvh_node *n = &tree->nodes[node];
+        const BVH_NODE *n = &tree->nodes[node];
 
         if (!intersects_box(p, sun, n)) {
             node = n->meta[1];
@@ -107,7 +107,7 @@ static uint32_t beam_depth_for_span(float span) {
 
 /* Orthographic depth buffer looking from the sun toward the scene. The
  * largest sun-space z is the first surface a ray from the sun encounters. */
-static void raster_depth(float *depth, const beam_grid *grid, const bvh *tree, vec3 u, vec3 v, vec3 sun) {
+static void raster_depth(float *depth, const BEAM_GRID *grid, const BVH *tree, VEC3 u, VEC3 v, VEC3 sun) {
 
     const size_t columns = (size_t)grid->width * grid->height;
 
@@ -115,8 +115,8 @@ static void raster_depth(float *depth, const beam_grid *grid, const bvh *tree, v
         depth[n] = -INFINITY;
 
     for (uint32_t n = 0; n < tree->triangle_count; ++n) {
-        const bvh_triangle *t = &tree->triangles[n];
-        const vec3 vertices[3] = {v3(t->a[0], t->a[1], t->a[2]), v3(t->b[0], t->b[1], t->b[2]), v3(t->c[0], t->c[1], t->c[2])};
+        const BVH_TRIANGLE *t = &tree->triangles[n];
+        const VEC3 vertices[3] = {v3(t->a[0], t->a[1], t->a[2]), v3(t->b[0], t->b[1], t->b[2]), v3(t->c[0], t->c[1], t->c[2])};
 
         float x[3], y[3], z[3];
 
@@ -160,14 +160,14 @@ static void raster_depth(float *depth, const beam_grid *grid, const bvh *tree, v
 
 /* Classify a coarse tile only when all of its depth pixels agree. A
  * silhouette, an opening, or a depth change falls back to exact BVH rays. */
-typedef struct depth_tile_info {
+typedef struct DEPTH_TILE_INFO {
     float nearest, farthest;
 
     uint32_t covered;
-} depth_tile_info;
+} DEPTH_TILE_INFO;
 
-static depth_tile_info measure_depth_tile(const float *depth, const beam_grid *grid, uint32_t x, uint32_t y) {
-    depth_tile_info info = {INFINITY, -INFINITY, 0};
+static DEPTH_TILE_INFO measure_depth_tile(const float *depth, const BEAM_GRID *grid, uint32_t x, uint32_t y) {
+    DEPTH_TILE_INFO info = {INFINITY, -INFINITY, 0};
 
     for (uint32_t j = y; j < y + BEAM_TILE; ++j) {
         for (uint32_t i = x; i < x + BEAM_TILE; ++i) {
@@ -183,7 +183,7 @@ static depth_tile_info measure_depth_tile(const float *depth, const beam_grid *g
     return info;
 }
 
-static int depth_tile(depth_tile_info info, const beam_grid *grid, uint32_t z) {
+static int depth_tile(DEPTH_TILE_INFO info, const BEAM_GRID *grid, uint32_t z) {
     if (!info.covered) return 1;
 
     if (info.covered != BEAM_TILE * BEAM_TILE || info.farthest - info.nearest > grid->step.z * 0.5f) return -1;
@@ -198,7 +198,7 @@ static int depth_tile(depth_tile_info info, const beam_grid *grid, uint32_t z) {
     return -1;
 }
 
-static bool emit(beam_grid *grid, uint32_t x, uint32_t y, uint32_t z, uint32_t side) {
+static bool emit(BEAM_GRID *grid, uint32_t x, uint32_t y, uint32_t z, uint32_t side) {
 
     const uint64_t max_cells = (uint64_t)grid->width * grid->height * grid->depth;
 
@@ -206,18 +206,18 @@ static bool emit(beam_grid *grid, uint32_t x, uint32_t y, uint32_t z, uint32_t s
 
     if (!grid->count || (grid->count >= 64u && !(grid->count & (grid->count - 1u)))) {
         const uint32_t capacity = grid->count ? grid->count * 2u : 64u;
-        beam_cell *next = realloc(grid->cells, (size_t)capacity * sizeof(*next));
+        BEAM_CELL *next = realloc(grid->cells, (size_t)capacity * sizeof(*next));
 
         if (!next) return false;
         grid->cells = next;
     }
 
-    grid->cells[grid->count++] = (beam_cell){x, y, z, side};
+    grid->cells[grid->count++] = (BEAM_CELL){x, y, z, side};
 
     return true;
 }
 
-static bool compress(beam_grid *grid, const uint32_t *prefix, uint32_t x, uint32_t y, uint32_t z, uint32_t side) {
+static bool compress(BEAM_GRID *grid, const uint32_t *prefix, uint32_t x, uint32_t y, uint32_t z, uint32_t side) {
     const size_t stride = (size_t)grid->width + 1u;
     const uint32_t visible = prefix[(y + side) * stride + x + side] - prefix[y * stride + x + side] - prefix[(y + side) * stride + x] + prefix[y * stride + x];
 
@@ -248,7 +248,7 @@ static void prefix_slice(uint32_t *prefix, const unsigned char *samples, uint32_
     }
 }
 
-void beam_free(beam_grid *grid) {
+void beam_free(BEAM_GRID *grid) {
 
     if (!grid) return;
 
@@ -257,24 +257,24 @@ void beam_free(beam_grid *grid) {
     memset(grid, 0, sizeof(*grid));
 }
 
-bool beam_build(beam_grid *grid, const mesh *scene, const bvh *tree, vec3 sun_direction) {
+bool beam_build(BEAM_GRID *grid, const MESH *scene, const BVH *tree, VEC3 sun_direction) {
 
     if (!grid || !scene || !tree || !tree->node_count) return false;
     memset(grid, 0, sizeof(*grid));
 
-    const vec3 sun = v3_normalize(sun_direction);
-    const vec3 u = beam_u(sun);
-    const vec3 v = v3_cross(sun, u);
+    const VEC3 sun = v3_normalize(sun_direction);
+    const VEC3 u = beam_u(sun);
+    const VEC3 v = v3_cross(sun, u);
 
     if (v3_len_sq(u) < 0.5f) return false;
 
-    vec3 min = v3(INFINITY, INFINITY, INFINITY);
-    vec3 max = v3(-INFINITY, -INFINITY, -INFINITY);
+    VEC3 min = v3(INFINITY, INFINITY, INFINITY);
+    VEC3 max = v3(-INFINITY, -INFINITY, -INFINITY);
 
     for (uint32_t corner = 0; corner < 8u; ++corner) {
-        const vec3 p = v3(corner & 1u ? scene->bounds.max.x : scene->bounds.min.x, corner & 2u ? scene->bounds.max.y : scene->bounds.min.y,
+        const VEC3 p = v3(corner & 1u ? scene->bounds.max.x : scene->bounds.min.x, corner & 2u ? scene->bounds.max.y : scene->bounds.min.y,
                           corner & 4u ? scene->bounds.max.z : scene->bounds.min.z);
-        const vec3 q = v3(v3_dot(p, u), v3_dot(p, v), v3_dot(p, sun));
+        const VEC3 q = v3(v3_dot(p, u), v3_dot(p, v), v3_dot(p, sun));
         min = v3(fminf(min.x, q.x), fminf(min.y, q.y), fminf(min.z, q.z));
         max = v3(fmaxf(max.x, q.x), fmaxf(max.y, q.y), fmaxf(max.z, q.z));
     }
@@ -290,7 +290,7 @@ bool beam_build(beam_grid *grid, const mesh *scene, const bvh *tree, vec3 sun_di
     const size_t depth_count = (size_t)grid->width * grid->height;
     unsigned char *samples = calloc(sample_count, 1);
     float *depth = malloc(depth_count * sizeof(*depth));
-    depth_tile_info *tiles = malloc(depth_count / (BEAM_TILE * BEAM_TILE) * sizeof(*tiles));
+    DEPTH_TILE_INFO *tiles = malloc(depth_count / (BEAM_TILE * BEAM_TILE) * sizeof(*tiles));
 
     uint32_t *prefix = malloc((grid->width + 1u) * (grid->height + 1u) * sizeof(*prefix));
 
@@ -316,7 +316,7 @@ bool beam_build(beam_grid *grid, const mesh *scene, const bvh *tree, vec3 sun_di
     for (uint32_t z = 0; z < grid->depth; ++z) {
         for (uint32_t y = 0; y < grid->height; y += BEAM_TILE) {
             for (uint32_t x = 0; x < grid->width; x += BEAM_TILE) {
-                const depth_tile_info info = tiles[x / BEAM_TILE + (size_t)(grid->width / BEAM_TILE) * (y / BEAM_TILE)];
+                const DEPTH_TILE_INFO info = tiles[x / BEAM_TILE + (size_t)(grid->width / BEAM_TILE) * (y / BEAM_TILE)];
                 const int coarse = depth_tile(info, grid, z);
 
                 for (uint32_t j = y; j < y + BEAM_TILE; ++j) {
@@ -326,9 +326,9 @@ bool beam_build(beam_grid *grid, const mesh *scene, const bvh *tree, vec3 sun_di
                         if (coarse >= 0) {
                             visible = (unsigned char)coarse;
                         } else {
-                            const vec3 q = v3(min.x + (i + 0.5f) * grid->step.x, min.y + (j + 0.5f) * grid->step.y, min.z + (z + 0.5f) * grid->step.z);
-                            const vec3 p = v3_add(v3_add(v3_scale(u, q.x), v3_scale(v, q.y)), v3_scale(sun, q.z));
-                            const trace_ray ray = {.origin = p, .tmin = 0.001f, .direction = sun, .tmax = 1.0e20f};
+                            const VEC3 q = v3(min.x + (i + 0.5f) * grid->step.x, min.y + (j + 0.5f) * grid->step.y, min.z + (z + 0.5f) * grid->step.z);
+                            const VEC3 p = v3_add(v3_add(v3_scale(u, q.x), v3_scale(v, q.y)), v3_scale(sun, q.z));
+                            const TRACE_RAY ray = {.origin = p, .tmin = 0.001f, .direction = sun, .tmax = 1.0e20f};
 
                             visible = !trace_any(tree, ray);
                             ++traced;
@@ -364,7 +364,7 @@ bool beam_build(beam_grid *grid, const mesh *scene, const bvh *tree, vec3 sun_di
     return good;
 }
 
-float *beam_expand(const beam_grid *grid) {
+float *beam_expand(const BEAM_GRID *grid) {
 
     if (!grid || !grid->width || !grid->height || !grid->depth || grid->width > 128u || grid->height > 128u || grid->depth > BEAM_MAX_SLICES || (grid->count && !grid->cells))
         return NULL;
@@ -375,7 +375,7 @@ float *beam_expand(const beam_grid *grid) {
     if (!samples) return NULL;
 
     for (uint32_t n = 0; n < grid->count; ++n) {
-        const beam_cell c = grid->cells[n];
+        const BEAM_CELL c = grid->cells[n];
 
         if (!c.side || c.side > grid->width || c.x > grid->width - c.side || c.y > grid->height - c.side || c.z >= grid->depth) {
             free(samples);

@@ -61,11 +61,14 @@ int main(int argc, char **argv) {
     }
 
     const Uint64 load_begin = SDL_GetPerformanceCounter();
-    glb_doc model = {0};
-    mesh scene = {0};
-    gltf_scene visual = {0};
-    lightmap lm = {0};
-    renderer r = {0};
+    GLB_DOC model = {0};
+    MESH scene = {0};
+    GLTF_SCENE visual = {0};
+    struct MODEL scene_model = {.geometry = &scene, .visual = &visual};
+    OBJECT scene_object = {.state = STATIC, .type = MODEL, .data = &scene_model};
+    struct MODEL *scene_data = scene_object.data;
+    LIGHTMAP lm = {0};
+    RENDERER r = {0};
     const char *startup_stage = NULL;
     const char *startup_detail = NULL;
 
@@ -74,9 +77,9 @@ int main(int argc, char **argv) {
     if (!loaded) {
         startup_stage = "GLB load";
         startup_detail = glb_error(&model);
-    } else if (!glb_extract_mesh(&model, &scene)) {
+    } else if (!glb_extract_mesh(&model, scene_data->geometry)) {
         startup_stage = "mesh extraction";
-    } else if (!gltf_extract(&model, &visual)) {
+    } else if (!gltf_extract(&model, scene_data->visual)) {
         startup_stage = "visual glTF extraction";
     }
 
@@ -84,7 +87,7 @@ int main(int argc, char **argv) {
 
     const Uint64 atlas_begin = SDL_GetPerformanceCounter();
 
-    if (!startup_stage && !lmap_build(&lm, &scene, LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE)) {
+    if (!startup_stage && !lmap_build(&lm, scene_data->geometry, LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE)) {
         startup_stage = "lightmap atlas generation";
     }
 
@@ -95,7 +98,7 @@ int main(int argc, char **argv) {
         startup_detail = SDL_GetError();
     }
 
-    if (!startup_stage && !r_build_scene(&r, &scene, &visual, &lm)) {
+    if (!startup_stage && !r_build_scene(&r, scene_data->geometry, scene_data->visual, &lm)) {
         startup_stage = "GPU scene upload";
         startup_detail = SDL_GetError();
     }
@@ -109,8 +112,8 @@ int main(int argc, char **argv) {
         bake_cancel(&r);
         r_deinit(&r);
         lmap_free(&lm);
-        gltf_free(&visual);
-        mesh_free(&scene);
+        gltf_free(scene_data->visual);
+        mesh_free(scene_data->geometry);
         glb_free(&model);
         SDL_Quit();
         free(bake_path);
@@ -199,7 +202,7 @@ int main(int argc, char **argv) {
                 if (event.key.scancode == SDL_SCANCODE_B || event.key.key == SDLK_B) {
                     SDL_ClearError();
 
-                    if (!bake_start(&r, &scene, &visual, &lm, bake_path, scene_hash, layout_hash, volume_hash, beam_hash)) {
+                    if (!bake_start(&r, scene_data->geometry, scene_data->visual, &lm, bake_path, scene_hash, layout_hash, volume_hash, beam_hash)) {
                         SDL_Log("B: could not start rebake: %s", *SDL_GetError() ? SDL_GetError() : "unknown error");
                     }
                 }
@@ -246,9 +249,9 @@ int main(int argc, char **argv) {
 
     bake_cancel(&r);
     r_deinit(&r);
-    gltf_free(&visual);
+    gltf_free(scene_data->visual);
     lmap_free(&lm);
-    mesh_free(&scene);
+    mesh_free(scene_data->geometry);
     glb_free(&model);
     SDL_Quit();
     free(bake_path);

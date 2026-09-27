@@ -20,11 +20,11 @@
 #define GLB_BIN 0x004e4942u
 #define GLB_MAX_NODE_DEPTH 128u
 
-typedef struct gm4 {
+typedef struct GM4 {
     float m[16];
-} gm4;
+} GM4;
 
-static void set_error(glb_doc *d, const char *fmt, ...) {
+static void set_error(GLB_DOC *d, const char *fmt, ...) {
 
     if (!d) return;
 
@@ -35,7 +35,7 @@ static void set_error(glb_doc *d, const char *fmt, ...) {
     va_end(ap);
 }
 
-static void release_file_data(glb_doc *d) {
+static void release_file_data(GLB_DOC *d) {
 
     if (!d || !d->data) return;
 
@@ -49,7 +49,7 @@ static void release_file_data(glb_doc *d) {
     d->data_size = 0;
 }
 
-static void release_keep_error(glb_doc *d) {
+static void release_keep_error(GLB_DOC *d) {
 
     char error[sizeof(d->error)];
 
@@ -72,7 +72,7 @@ static uint16_t rd16(const unsigned char *p) {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
 
-static bool tok_reserve(glb_doc *d, uint32_t n) {
+static bool tok_reserve(GLB_DOC *d, uint32_t n) {
 
     if (n <= d->token_capacity) return true;
 
@@ -83,7 +83,7 @@ static bool tok_reserve(glb_doc *d, uint32_t n) {
         cap *= 2u;
     }
 
-    glb_token *p = realloc(d->tokens, (size_t)cap * sizeof(*p));
+    GLB_TOKEN *p = realloc(d->tokens, (size_t)cap * sizeof(*p));
 
     if (!p) return false;
 
@@ -93,20 +93,20 @@ static bool tok_reserve(glb_doc *d, uint32_t n) {
     return true;
 }
 
-static int tok_add(glb_doc *d, glb_token_type type, uint32_t start, int parent) {
+static int tok_add(GLB_DOC *d, GLB_TOKEN_TYPE type, uint32_t start, int parent) {
 
     if (!tok_reserve(d, d->token_count + 1u)) return -1;
 
     int idx = (int)d->token_count++;
 
-    d->tokens[idx] = (glb_token){.start = start, .end = start, .parent = parent, .children = 0, .type = type};
+    d->tokens[idx] = (GLB_TOKEN){.start = start, .end = start, .parent = parent, .children = 0, .type = type};
 
     if (parent >= 0) d->tokens[parent].children++;
 
     return idx;
 }
 
-static bool tokenize(glb_doc *d) {
+static bool tokenize(GLB_DOC *d) {
 
     int parent = -1;
     const char *s = d->json;
@@ -235,7 +235,7 @@ static bool tokenize(glb_doc *d) {
     return true;
 }
 
-bool glb_load(glb_doc *d, const char *path) {
+bool glb_load(GLB_DOC *d, const char *path) {
 
     if (!d || !path) return false;
     memset(d, 0, sizeof(*d));
@@ -387,7 +387,7 @@ bool glb_load(glb_doc *d, const char *path) {
     return true;
 }
 
-void glb_free(glb_doc *d) {
+void glb_free(GLB_DOC *d) {
 
     if (!d) return;
     free(d->tokens);
@@ -395,16 +395,16 @@ void glb_free(glb_doc *d) {
     memset(d, 0, sizeof(*d));
 }
 
-const char *glb_error(const glb_doc *d) {
+const char *glb_error(const GLB_DOC *d) {
 
     return d ? d->error : "invalid glb_doc";
 }
 
-int glb_root(const glb_doc *d) {
+int glb_root(const GLB_DOC *d) {
     return d && d->token_count ? 0 : -1;
 }
 
-static bool token_eq(const glb_doc *d, int t, const char *text) {
+static bool token_eq(const GLB_DOC *d, int t, const char *text) {
 
     if (!d || !text || t < 0 || (uint32_t)t >= d->token_count || d->tokens[t].type != GLB_TOKEN_STRING) {
         return false;
@@ -415,7 +415,7 @@ static bool token_eq(const glb_doc *d, int t, const char *text) {
     return strlen(text) == len && memcmp(d->json + d->tokens[t].start, text, len) == 0;
 }
 
-int glb_get(const glb_doc *d, int object, const char *key) {
+int glb_get(const GLB_DOC *d, int object, const char *key) {
 
     if (!d || object < 0 || (uint32_t)object >= d->token_count || d->tokens[object].type != GLB_TOKEN_OBJECT || !key) {
         return -1;
@@ -425,7 +425,7 @@ int glb_get(const glb_doc *d, int object, const char *key) {
 
     for (uint32_t i = (uint32_t)object + 1u; i < d->token_count; ++i) {
 
-        const glb_token *t = &d->tokens[i];
+        const GLB_TOKEN *t = &d->tokens[i];
 
         if (t->start >= d->tokens[object].end) break;
 
@@ -443,7 +443,7 @@ int glb_get(const glb_doc *d, int object, const char *key) {
     return -1;
 }
 
-int glb_at(const glb_doc *d, int array, size_t index) {
+int glb_at(const GLB_DOC *d, int array, size_t index) {
 
     if (!d || array < 0 || (uint32_t)array >= d->token_count || d->tokens[array].type != GLB_TOKEN_ARRAY) {
         return -1;
@@ -453,7 +453,7 @@ int glb_at(const glb_doc *d, int array, size_t index) {
 
     for (uint32_t i = (uint32_t)array + 1u; i < d->token_count; ++i) {
 
-        const glb_token *t = &d->tokens[i];
+        const GLB_TOKEN *t = &d->tokens[i];
 
         if (t->start >= d->tokens[array].end) break;
 
@@ -465,7 +465,7 @@ int glb_at(const glb_doc *d, int array, size_t index) {
     return -1;
 }
 
-size_t glb_count(const glb_doc *d, int token) {
+size_t glb_count(const GLB_DOC *d, int token) {
 
     if (!d || token < 0 || (uint32_t)token >= d->token_count) return 0;
 
@@ -476,7 +476,7 @@ size_t glb_count(const glb_doc *d, int token) {
     return 0;
 }
 
-bool glb_string(const glb_doc *d, int token, const char **data, size_t *length) {
+bool glb_string(const GLB_DOC *d, int token, const char **data, size_t *length) {
 
     if (!d || token < 0 || (uint32_t)token >= d->token_count || d->tokens[token].type != GLB_TOKEN_STRING) {
         return false;
@@ -489,7 +489,7 @@ bool glb_string(const glb_doc *d, int token, const char **data, size_t *length) 
     return true;
 }
 
-bool glb_number(const glb_doc *d, int token, double *value) {
+bool glb_number(const GLB_DOC *d, int token, double *value) {
 
     if (!d || !value || token < 0 || (uint32_t)token >= d->token_count || d->tokens[token].type != GLB_TOKEN_PRIMITIVE) {
         return false;
@@ -515,7 +515,7 @@ bool glb_number(const glb_doc *d, int token, double *value) {
     return true;
 }
 
-bool glb_boolean(const glb_doc *d, int token, bool *value) {
+bool glb_boolean(const GLB_DOC *d, int token, bool *value) {
 
     if (!d || !value || token < 0 || (uint32_t)token >= d->token_count || d->tokens[token].type != GLB_TOKEN_PRIMITIVE) {
         return false;
@@ -537,7 +537,7 @@ bool glb_boolean(const glb_doc *d, int token, bool *value) {
     return false;
 }
 
-static bool tok_size(const glb_doc *d, int token, size_t *value) {
+static bool tok_size(const GLB_DOC *d, int token, size_t *value) {
 
     double n;
 
@@ -550,7 +550,7 @@ static bool tok_size(const glb_doc *d, int token, size_t *value) {
     return true;
 }
 
-static bool tok_u32(const glb_doc *d, int token, uint32_t *value) {
+static bool tok_u32(const GLB_DOC *d, int token, uint32_t *value) {
     size_t n;
 
     if (!tok_size(d, token, &n) || n > UINT32_MAX) return false;
@@ -559,7 +559,7 @@ static bool tok_u32(const glb_doc *d, int token, uint32_t *value) {
     return true;
 }
 
-bool glb_buffer_view(const glb_doc *d, size_t index, glb_span *span, size_t *stride) {
+bool glb_buffer_view(const GLB_DOC *d, size_t index, GLB_SPAN *span, size_t *stride) {
 
     if (!d || !span || !d->bin) return false;
 
@@ -599,7 +599,7 @@ bool glb_buffer_view(const glb_doc *d, size_t index, glb_span *span, size_t *str
     return true;
 }
 
-static uint32_t component_count(const glb_doc *d, int type_token) {
+static uint32_t component_count(const GLB_DOC *d, int type_token) {
 
     const char *p = NULL;
     size_t n = 0;
@@ -649,7 +649,7 @@ static size_t component_size(uint32_t t) {
     }
 }
 
-bool glb_accessor_open(const glb_doc *d, size_t index, glb_accessor *out) {
+bool glb_accessor_open(const GLB_DOC *d, size_t index, GLB_ACCESSOR *out) {
 
     if (!d || !out) return false;
     memset(out, 0, sizeof(*out));
@@ -683,7 +683,7 @@ bool glb_accessor_open(const glb_doc *d, size_t index, glb_accessor *out) {
 
     if (t >= 0 && !tok_size(d, t, &byte_offset)) return false;
 
-    glb_span view;
+    GLB_SPAN view;
     size_t stride = 0;
 
     if (!glb_buffer_view(d, view_index, &view, &stride)) return false;
@@ -768,7 +768,7 @@ static float read_component(const unsigned char *p, uint32_t type, bool normaliz
     }
 }
 
-bool glb_accessor_f32(const glb_accessor *a, size_t element, uint32_t component, float *value) {
+bool glb_accessor_f32(const GLB_ACCESSOR *a, size_t element, uint32_t component, float *value) {
 
     if (!a || !value || !a->data || element >= a->count || component >= a->components || a->sparse_token >= 0) {
         return false;
@@ -782,7 +782,7 @@ bool glb_accessor_f32(const glb_accessor *a, size_t element, uint32_t component,
     return true;
 }
 
-bool glb_accessor_u32(const glb_accessor *a, size_t element, uint32_t *value) {
+bool glb_accessor_u32(const GLB_ACCESSOR *a, size_t element, uint32_t *value) {
 
     if (!a || !value || !a->data || element >= a->count || a->components != 1 || a->sparse_token >= 0) {
         return false;
@@ -809,15 +809,15 @@ bool glb_accessor_u32(const glb_accessor *a, size_t element, uint32_t *value) {
     }
 }
 
-static gm4 m_identity(void) {
-    gm4 r = {{0}};
+static GM4 m_identity(void) {
+    GM4 r = {{0}};
     r.m[0] = r.m[5] = r.m[10] = r.m[15] = 1.0f;
 
     return r;
 }
 
-static gm4 m_mul(gm4 a, gm4 b) {
-    gm4 r = {{0}};
+static GM4 m_mul(GM4 a, GM4 b) {
+    GM4 r = {{0}};
 
     for (int c = 0; c < 4; ++c) {
         for (int row = 0; row < 4; ++row) {
@@ -828,13 +828,13 @@ static gm4 m_mul(gm4 a, gm4 b) {
     return r;
 }
 
-static gm4 m_trs(float tx, float ty, float tz, float qx, float qy, float qz, float qw, float sx, float sy, float sz) {
+static GM4 m_trs(float tx, float ty, float tz, float qx, float qy, float qz, float qw, float sx, float sy, float sz) {
 
     const float xx = qx * qx, yy = qy * qy, zz = qz * qz;
     const float xy = qx * qy, xz = qx * qz, yz = qy * qz;
     const float wx = qw * qx, wy = qw * qy, wz = qw * qz;
 
-    gm4 r = m_identity();
+    GM4 r = m_identity();
 
     r.m[0] = (1 - 2 * (yy + zz)) * sx;
     r.m[1] = (2 * (xy + wz)) * sx;
@@ -853,7 +853,7 @@ static gm4 m_trs(float tx, float ty, float tz, float qx, float qy, float qz, flo
     return r;
 }
 
-static vec3 m_point(gm4 m, vec3 p) {
+static VEC3 m_point(GM4 m, VEC3 p) {
 
     float x = m.m[0] * p.x + m.m[4] * p.y + m.m[8] * p.z + m.m[12];
     float y = m.m[1] * p.x + m.m[5] * p.y + m.m[9] * p.z + m.m[13];
@@ -866,15 +866,15 @@ static vec3 m_point(gm4 m, vec3 p) {
         z /= w;
     }
 
-    return (vec3){x, y, z};
+    return (VEC3){x, y, z};
 }
 
-static float m_det3(gm4 m) {
+static float m_det3(GM4 m) {
 
     return m.m[0] * (m.m[5] * m.m[10] - m.m[9] * m.m[6]) - m.m[4] * (m.m[1] * m.m[10] - m.m[9] * m.m[2]) + m.m[8] * (m.m[1] * m.m[6] - m.m[5] * m.m[2]);
 }
 
-static bool json_float(const glb_doc *d, int token, float *out) {
+static bool json_float(const GLB_DOC *d, int token, float *out) {
     double v;
 
     if (!glb_number(d, token, &v)) return false;
@@ -882,7 +882,7 @@ static bool json_float(const glb_doc *d, int token, float *out) {
     return true;
 }
 
-static bool json_vec(const glb_doc *d, int token, float *v, size_t n) {
+static bool json_vec(const GLB_DOC *d, int token, float *v, size_t n) {
 
     if (token < 0 || glb_count(d, token) != n) return false;
 
@@ -893,12 +893,12 @@ static bool json_vec(const glb_doc *d, int token, float *v, size_t n) {
     return true;
 }
 
-static gm4 node_local(const glb_doc *d, int node) {
+static GM4 node_local(const GLB_DOC *d, int node) {
 
     int t = glb_get(d, node, "matrix");
 
     if (t >= 0 && glb_count(d, t) == 16) {
-        gm4 m = m_identity();
+        GM4 m = m_identity();
         bool ok = true;
 
         for (int i = 0; i < 16; ++i)
@@ -926,7 +926,7 @@ static gm4 node_local(const glb_doc *d, int node) {
     return m_trs(tr[0], tr[1], tr[2], q[0], q[1], q[2], q[3], s[0], s[1], s[2]);
 }
 
-static bool vec_reserve(vector *v, size_t n) {
+static bool vec_reserve(VECTOR *v, size_t n) {
 
     if (n <= v->capacity) return true;
 
@@ -948,51 +948,51 @@ static bool vec_reserve(vector *v, size_t n) {
     return true;
 }
 
-static bool mesh_point_push(mesh *m, vec3 p) {
+static bool mesh_point_push(MESH *m, VEC3 p) {
 
-    vector *v = &m->vertices;
+    VECTOR *v = &m->vertices;
 
     if (!vec_reserve(v, v->count + 1u)) return false;
-    ((point *)v->buffer)[v->count++] = (point){p};
+    ((POINT *)v->buffer)[v->count++] = (POINT){p};
 
     return true;
 }
 
-static vec3 sub3(vec3 a, vec3 b) {
+static VEC3 sub3(VEC3 a, VEC3 b) {
 
-    return (vec3){a.x - b.x, a.y - b.y, a.z - b.z};
+    return (VEC3){a.x - b.x, a.y - b.y, a.z - b.z};
 }
 
-static vec3 cross3(vec3 a, vec3 b) {
+static VEC3 cross3(VEC3 a, VEC3 b) {
 
-    return (vec3){a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+    return (VEC3){a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
 }
 
-static vec3 norm3(vec3 a) {
+static VEC3 norm3(VEC3 a) {
 
     const float l = sqrtf(a.x * a.x + a.y * a.y + a.z * a.z);
 
-    return l > 0.0f ? (vec3){a.x / l, a.y / l, a.z / l} : (vec3){0, 1, 0};
+    return l > 0.0f ? (VEC3){a.x / l, a.y / l, a.z / l} : (VEC3){0, 1, 0};
 }
 
-static bool mesh_face_push(mesh *m, uint32_t a, uint32_t b, uint32_t c) {
+static bool mesh_face_push(MESH *m, uint32_t a, uint32_t b, uint32_t c) {
 
     if (a == b || b == c || c == a || a >= m->vertices.count || b >= m->vertices.count || c >= m->vertices.count) {
         return true;
     }
 
-    vector *v = &m->faces;
+    VECTOR *v = &m->faces;
 
     if (!vec_reserve(v, v->count + 1u)) return false;
 
-    point *p = m->vertices.buffer;
-    const vec3 n = norm3(cross3(sub3(p[b].p, p[a].p), sub3(p[c].p, p[a].p)));
-    ((mesh_face *)v->buffer)[v->count++] = (mesh_face){{a, b, c}, n};
+    POINT *p = m->vertices.buffer;
+    const VEC3 n = norm3(cross3(sub3(p[b].p, p[a].p), sub3(p[c].p, p[a].p)));
+    ((MESH_FACE *)v->buffer)[v->count++] = (MESH_FACE){{a, b, c}, n};
 
     return true;
 }
 
-static bool primitive_index(const glb_accessor *idx, size_t i, size_t vertex_count, uint32_t *out) {
+static bool primitive_index(const GLB_ACCESSOR *idx, size_t i, size_t vertex_count, uint32_t *out) {
 
     if (idx) {
         if (!glb_accessor_u32(idx, i, out)) return false;
@@ -1005,7 +1005,7 @@ static bool primitive_index(const glb_accessor *idx, size_t i, size_t vertex_cou
     return true;
 }
 
-static bool extract_primitive(const glb_doc *d, int prim, gm4 world, mesh *out) {
+static bool extract_primitive(const GLB_DOC *d, int prim, GM4 world, MESH *out) {
 
     const int attrs = glb_get(d, prim, "attributes");
 
@@ -1015,7 +1015,7 @@ static bool extract_primitive(const glb_doc *d, int prim, gm4 world, mesh *out) 
         return true;
     }
 
-    glb_accessor pos;
+    GLB_ACCESSOR pos;
 
     if (!glb_accessor_open(d, pos_index, &pos) || pos.components < 3 || pos.sparse_token >= 0) {
         return false;
@@ -1033,11 +1033,11 @@ static bool extract_primitive(const glb_doc *d, int prim, gm4 world, mesh *out) 
             return false;
         }
 
-        if (!mesh_point_push(out, m_point(world, (vec3){x, y, z}))) return false;
+        if (!mesh_point_push(out, m_point(world, (VEC3){x, y, z}))) return false;
     }
 
-    glb_accessor idx_store;
-    glb_accessor *indices = NULL;
+    GLB_ACCESSOR idx_store;
+    GLB_ACCESSOR *indices = NULL;
 
     uint32_t idx_index;
     const int it = glb_get(d, prim, "indices");
@@ -1127,7 +1127,7 @@ static bool extract_primitive(const glb_doc *d, int prim, gm4 world, mesh *out) 
     return true;
 }
 
-static bool extract_mesh_index(const glb_doc *d, uint32_t index, gm4 world, mesh *out) {
+static bool extract_mesh_index(const GLB_DOC *d, uint32_t index, GM4 world, MESH *out) {
 
     const int meshes = glb_get(d, 0, "meshes");
     const int obj = glb_at(d, meshes, index);
@@ -1145,7 +1145,7 @@ static bool extract_mesh_index(const glb_doc *d, uint32_t index, gm4 world, mesh
     return true;
 }
 
-static bool extract_node(const glb_doc *d, uint32_t index, gm4 parent, mesh *out, unsigned depth) {
+static bool extract_node(const GLB_DOC *d, uint32_t index, GM4 parent, MESH *out, unsigned depth) {
 
     if (depth > GLB_MAX_NODE_DEPTH) return false;
 
@@ -1154,7 +1154,7 @@ static bool extract_node(const glb_doc *d, uint32_t index, gm4 parent, mesh *out
 
     if (node < 0) return false;
 
-    const gm4 world = m_mul(parent, node_local(d, node));
+    const GM4 world = m_mul(parent, node_local(d, node));
     uint32_t mesh_index;
     const int m = glb_get(d, node, "mesh");
 
@@ -1175,17 +1175,17 @@ static bool extract_node(const glb_doc *d, uint32_t index, gm4 parent, mesh *out
     return true;
 }
 
-static void mesh_bounds(mesh *m) {
+static void mesh_bounds(MESH *m) {
 
     if (!m->vertices.count) return;
 
-    point *p = m->vertices.buffer;
-    vec3 mn = p[0].p;
-    vec3 mx = p[0].p;
+    POINT *p = m->vertices.buffer;
+    VEC3 mn = p[0].p;
+    VEC3 mx = p[0].p;
 
     for (size_t i = 1; i < m->vertices.count; ++i) {
 
-        const vec3 v = p[i].p;
+        const VEC3 v = p[i].p;
 
         if (v.x < mn.x) mn.x = v.x;
 
@@ -1202,25 +1202,25 @@ static void mesh_bounds(mesh *m) {
 
     m->bounds.min = mn;
     m->bounds.max = mx;
-    m->bounds.center = (vec3){(mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f, (mn.z + mx.z) * 0.5f};
-    m->bounds.extents = (vec3){(mx.x - mn.x) * 0.5f, (mx.y - mn.y) * 0.5f, (mx.z - mn.z) * 0.5f};
+    m->bounds.center = (VEC3){(mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f, (mn.z + mx.z) * 0.5f};
+    m->bounds.extents = (VEC3){(mx.x - mn.x) * 0.5f, (mx.y - mn.y) * 0.5f, (mx.z - mn.z) * 0.5f};
 }
 
-static void mesh_partial_free(mesh *m) {
+static void mesh_partial_free(MESH *m) {
 
     free(m->vertices.buffer);
     free(m->faces.buffer);
     memset(m, 0, sizeof(*m));
 }
 
-bool glb_extract_mesh(const glb_doc *d, mesh *out) {
+bool glb_extract_mesh(const GLB_DOC *d, MESH *out) {
 
     if (!d || !out || !d->token_count) return false;
     memset(out, 0, sizeof(*out));
-    out->vertices.type_size = sizeof(point);
-    out->faces.type_size = sizeof(mesh_face);
+    out->vertices.type_size = sizeof(POINT);
+    out->faces.type_size = sizeof(MESH_FACE);
 
-    const gm4 identity = m_identity();
+    const GM4 identity = m_identity();
     const int scenes = glb_get(d, 0, "scenes");
 
     if (scenes >= 0 && glb_count(d, scenes)) {

@@ -6,11 +6,11 @@
 
 #define GLTF_MAX_NODE_DEPTH 128u
 
-typedef struct gm4 {
+typedef struct GM4 {
     float m[16];
-} gm4;
+} GM4;
 
-static bool token_number(const glb_doc *d, int token, float *value) {
+static bool token_number(const GLB_DOC *d, int token, float *value) {
 
     double n;
 
@@ -20,7 +20,7 @@ static bool token_number(const glb_doc *d, int token, float *value) {
     return true;
 }
 
-static bool token_u32(const glb_doc *d, int token, uint32_t *value) {
+static bool token_u32(const GLB_DOC *d, int token, uint32_t *value) {
 
     double n;
 
@@ -30,7 +30,7 @@ static bool token_u32(const glb_doc *d, int token, uint32_t *value) {
     return true;
 }
 
-static bool token_vec(const glb_doc *d, int token, float *value, size_t count) {
+static bool token_vec(const GLB_DOC *d, int token, float *value, size_t count) {
 
     if (token < 0 || glb_count(d, token) != count) return false;
 
@@ -40,7 +40,7 @@ static bool token_vec(const glb_doc *d, int token, float *value, size_t count) {
     return true;
 }
 
-static bool token_string_copy(const glb_doc *d, int token, char *dst, size_t capacity) {
+static bool token_string_copy(const GLB_DOC *d, int token, char *dst, size_t capacity) {
     const char *text;
     size_t length;
 
@@ -55,15 +55,15 @@ static bool token_string_copy(const glb_doc *d, int token, char *dst, size_t cap
     return true;
 }
 
-static gm4 m_identity(void) {
-    gm4 r = {{0}};
+static GM4 m_identity(void) {
+    GM4 r = {{0}};
     r.m[0] = r.m[5] = r.m[10] = r.m[15] = 1.0f;
 
     return r;
 }
 
-static gm4 m_mul(gm4 a, gm4 b) {
-    gm4 r = {{0}};
+static GM4 m_mul(GM4 a, GM4 b) {
+    GM4 r = {{0}};
 
     for (int c = 0; c < 4; ++c) {
 
@@ -76,12 +76,12 @@ static gm4 m_mul(gm4 a, gm4 b) {
     return r;
 }
 
-static gm4 m_trs(float tx, float ty, float tz, float qx, float qy, float qz, float qw, float sx, float sy, float sz) {
+static GM4 m_trs(float tx, float ty, float tz, float qx, float qy, float qz, float qw, float sx, float sy, float sz) {
     const float xx = qx * qx, yy = qy * qy, zz = qz * qz;
     const float xy = qx * qy, xz = qx * qz, yz = qy * qz;
     const float wx = qw * qx, wy = qw * qy, wz = qw * qz;
 
-    gm4 r = m_identity();
+    GM4 r = m_identity();
 
     r.m[0] = (1.0f - 2.0f * (yy + zz)) * sx;
     r.m[1] = (2.0f * (xy + wz)) * sx;
@@ -100,13 +100,13 @@ static gm4 m_trs(float tx, float ty, float tz, float qx, float qy, float qz, flo
     return r;
 }
 
-static gm4 node_local(const glb_doc *d, int node) {
+static GM4 node_local(const GLB_DOC *d, int node) {
 
     int t = glb_get(d, node, "matrix");
 
     if (t >= 0 && glb_count(d, t) == 16u) {
 
-        gm4 m = m_identity();
+        GM4 m = m_identity();
         bool ok = true;
 
         for (int i = 0; i < 16; ++i)
@@ -134,7 +134,7 @@ static gm4 node_local(const glb_doc *d, int node) {
     return m_trs(tr[0], tr[1], tr[2], q[0], q[1], q[2], q[3], s[0], s[1], s[2]);
 }
 
-static vec3 m_point(gm4 m, vec3 p) {
+static VEC3 m_point(GM4 m, VEC3 p) {
 
     float x = m.m[0] * p.x + m.m[4] * p.y + m.m[8] * p.z + m.m[12];
     float y = m.m[1] * p.x + m.m[5] * p.y + m.m[9] * p.z + m.m[13];
@@ -150,12 +150,12 @@ static vec3 m_point(gm4 m, vec3 p) {
     return v3(x, y, z);
 }
 
-static float m_det3(gm4 m) {
+static float m_det3(GM4 m) {
 
     return m.m[0] * (m.m[5] * m.m[10] - m.m[9] * m.m[6]) - m.m[4] * (m.m[1] * m.m[10] - m.m[9] * m.m[2]) + m.m[8] * (m.m[1] * m.m[6] - m.m[5] * m.m[2]);
 }
 
-static vec3 m_normal(gm4 m, vec3 n) {
+static VEC3 m_normal(GM4 m, VEC3 n) {
 
     const float a00 = m.m[0], a01 = m.m[4], a02 = m.m[8];
     const float a10 = m.m[1], a11 = m.m[5], a12 = m.m[9];
@@ -165,14 +165,14 @@ static vec3 m_normal(gm4 m, vec3 n) {
     if (fabsf(det) < 1.0e-12f) return v3_normalize(v3(a00 * n.x + a01 * n.y + a02 * n.z, a10 * n.x + a11 * n.y + a12 * n.z, a20 * n.x + a21 * n.y + a22 * n.z));
 
     const float inv = 1.0f / det;
-    const vec3 r = v3(((a11 * a22 - a12 * a21) * n.x + (a12 * a20 - a10 * a22) * n.y + (a10 * a21 - a11 * a20) * n.z) * inv,
+    const VEC3 r = v3(((a11 * a22 - a12 * a21) * n.x + (a12 * a20 - a10 * a22) * n.y + (a10 * a21 - a11 * a20) * n.z) * inv,
                       ((a02 * a21 - a01 * a22) * n.x + (a00 * a22 - a02 * a20) * n.y + (a01 * a20 - a00 * a21) * n.z) * inv,
                       ((a01 * a12 - a02 * a11) * n.x + (a02 * a10 - a00 * a12) * n.y + (a00 * a11 - a01 * a10) * n.z) * inv);
 
     return v3_normalize(r);
 }
 
-static bool reserve_vertices(gltf_scene *s, size_t count) {
+static bool reserve_vertices(GLTF_SCENE *s, size_t count) {
 
     if (count <= s->vertex_capacity) return true;
 
@@ -184,7 +184,7 @@ static bool reserve_vertices(gltf_scene *s, size_t count) {
         capacity *= 2u;
     }
 
-    gltf_vertex *p = realloc(s->vertices, capacity * sizeof(*p));
+    GLTF_VERTEX *p = realloc(s->vertices, capacity * sizeof(*p));
 
     if (!p) return false;
 
@@ -194,11 +194,11 @@ static bool reserve_vertices(gltf_scene *s, size_t count) {
     return true;
 }
 
-static bool push_triangle(gltf_scene *s, gltf_vertex a, gltf_vertex b, gltf_vertex c) {
+static bool push_triangle(GLTF_SCENE *s, GLTF_VERTEX a, GLTF_VERTEX b, GLTF_VERTEX c) {
 
     if (!reserve_vertices(s, s->vertex_count + 3u)) return false;
 
-    const vec3 face = v3_normalize(v3_cross(v3_sub(b.position, a.position), v3_sub(c.position, a.position)));
+    const VEC3 face = v3_normalize(v3_cross(v3_sub(b.position, a.position), v3_sub(c.position, a.position)));
 
     if (v3_len_sq(a.normal) < 1.0e-8f) a.normal = face;
 
@@ -213,7 +213,7 @@ static bool push_triangle(gltf_scene *s, gltf_vertex a, gltf_vertex b, gltf_vert
     return true;
 }
 
-static bool primitive_index(const glb_accessor *indices, size_t i, size_t vertex_count, uint32_t *out) {
+static bool primitive_index(const GLB_ACCESSOR *indices, size_t i, size_t vertex_count, uint32_t *out) {
 
     if (indices) {
         if (!glb_accessor_u32(indices, i, out)) return false;
@@ -226,7 +226,7 @@ static bool primitive_index(const glb_accessor *indices, size_t i, size_t vertex
     return true;
 }
 
-static bool open_attribute(const glb_doc *d, int attrs, const char *name, size_t count, uint32_t min_components, glb_accessor *out) {
+static bool open_attribute(const GLB_DOC *d, int attrs, const char *name, size_t count, uint32_t min_components, GLB_ACCESSOR *out) {
 
     uint32_t index;
     const int token = glb_get(d, attrs, name);
@@ -238,7 +238,7 @@ static bool open_attribute(const glb_doc *d, int attrs, const char *name, size_t
     return true;
 }
 
-static bool read_vertex(const glb_accessor *pos, const glb_accessor *normal, const glb_accessor *uv, uint32_t index, gm4 world, uint32_t material, gltf_vertex *out) {
+static bool read_vertex(const GLB_ACCESSOR *pos, const GLB_ACCESSOR *normal, const GLB_ACCESSOR *uv, uint32_t index, GM4 world, uint32_t material, GLTF_VERTEX *out) {
     float x, y, z;
 
     if (!glb_accessor_f32(pos, index, 0, &x) || !glb_accessor_f32(pos, index, 1, &y) || !glb_accessor_f32(pos, index, 2, &z)) return false;
@@ -261,11 +261,11 @@ static bool read_vertex(const glb_accessor *pos, const glb_accessor *normal, con
     return true;
 }
 
-static bool emit_triangle(gltf_scene *s, const glb_accessor *pos, const glb_accessor *normal, const glb_accessor *uv, gm4 world, uint32_t material, uint32_t a, uint32_t b,
+static bool emit_triangle(GLTF_SCENE *s, const GLB_ACCESSOR *pos, const GLB_ACCESSOR *normal, const GLB_ACCESSOR *uv, GM4 world, uint32_t material, uint32_t a, uint32_t b,
                           uint32_t c) {
 
     if (a == b || b == c || c == a) return true;
-    gltf_vertex va, vb, vc;
+    GLTF_VERTEX va, vb, vc;
 
     if (!read_vertex(pos, normal, uv, a, world, material, &va) || !read_vertex(pos, normal, uv, b, world, material, &vb) || !read_vertex(pos, normal, uv, c, world, material, &vc))
         return false;
@@ -273,22 +273,22 @@ static bool emit_triangle(gltf_scene *s, const glb_accessor *pos, const glb_acce
     return push_triangle(s, va, vb, vc);
 }
 
-static bool extract_primitive(const glb_doc *d, int prim, gm4 world, gltf_scene *s) {
+static bool extract_primitive(const GLB_DOC *d, int prim, GM4 world, GLTF_SCENE *s) {
 
     const int attrs = glb_get(d, prim, "attributes");
     uint32_t pos_index;
 
     if (attrs < 0 || !token_u32(d, glb_get(d, attrs, "POSITION"), &pos_index)) return true;
 
-    glb_accessor pos;
+    GLB_ACCESSOR pos;
 
     if (!glb_accessor_open(d, pos_index, &pos) || pos.components < 3 || pos.sparse_token >= 0) return false;
 
-    glb_accessor normal_store, uv_store;
+    GLB_ACCESSOR normal_store, uv_store;
 
-    glb_accessor *normal = open_attribute(d, attrs, "NORMAL", pos.count, 3u, &normal_store) ? &normal_store : NULL;
+    GLB_ACCESSOR *normal = open_attribute(d, attrs, "NORMAL", pos.count, 3u, &normal_store) ? &normal_store : NULL;
 
-    glb_accessor *uv = open_attribute(d, attrs, "TEXCOORD_0", pos.count, 2u, &uv_store) ? &uv_store : NULL;
+    GLB_ACCESSOR *uv = open_attribute(d, attrs, "TEXCOORD_0", pos.count, 2u, &uv_store) ? &uv_store : NULL;
 
     uint32_t material = s->default_material;
     const int material_token = glb_get(d, prim, "material");
@@ -296,8 +296,8 @@ static bool extract_primitive(const glb_doc *d, int prim, gm4 world, gltf_scene 
 
     if (material_token >= 0 && token_u32(d, material_token, &source_material) && source_material < s->default_material) material = source_material;
 
-    glb_accessor idx_store;
-    glb_accessor *indices = NULL;
+    GLB_ACCESSOR idx_store;
+    GLB_ACCESSOR *indices = NULL;
 
     uint32_t idx_index;
     const int index_token = glb_get(d, prim, "indices");
@@ -385,7 +385,7 @@ static bool extract_primitive(const glb_doc *d, int prim, gm4 world, gltf_scene 
     return true;
 }
 
-static bool extract_mesh(const glb_doc *d, uint32_t index, gm4 world, gltf_scene *s) {
+static bool extract_mesh(const GLB_DOC *d, uint32_t index, GM4 world, GLTF_SCENE *s) {
 
     const int meshes = glb_get(d, 0, "meshes");
     const int mesh = glb_at(d, meshes, index);
@@ -400,7 +400,7 @@ static bool extract_mesh(const glb_doc *d, uint32_t index, gm4 world, gltf_scene
     return true;
 }
 
-static bool extract_node(const glb_doc *d, uint32_t index, gm4 parent, gltf_scene *s, unsigned depth) {
+static bool extract_node(const GLB_DOC *d, uint32_t index, GM4 parent, GLTF_SCENE *s, unsigned depth) {
 
     if (depth > GLTF_MAX_NODE_DEPTH) return false;
 
@@ -409,7 +409,7 @@ static bool extract_node(const glb_doc *d, uint32_t index, gm4 parent, gltf_scen
 
     if (node < 0) return false;
 
-    const gm4 world = m_mul(parent, node_local(d, node));
+    const GM4 world = m_mul(parent, node_local(d, node));
 
     uint32_t mesh_index;
     const int mesh_token = glb_get(d, node, "mesh");
@@ -428,7 +428,7 @@ static bool extract_node(const glb_doc *d, uint32_t index, gm4 parent, gltf_scen
     return true;
 }
 
-static int32_t texture_index(const glb_doc *d, int object, const char *name) {
+static int32_t texture_index(const GLB_DOC *d, int object, const char *name) {
 
     const int texture = glb_get(d, object, name);
 
@@ -439,7 +439,7 @@ static int32_t texture_index(const glb_doc *d, int object, const char *name) {
     return token_u32(d, glb_get(d, texture, "index"), &index) ? (int32_t)index : -1;
 }
 
-static void material_defaults(gltf_material *m) {
+static void material_defaults(GLTF_MATERIAL *m) {
 
     memset(m, 0, sizeof(*m));
 
@@ -455,7 +455,7 @@ static void material_defaults(gltf_material *m) {
     m->emissive_texture = -1;
 }
 
-static bool extract_materials(const glb_doc *d, gltf_scene *s) {
+static bool extract_materials(const GLB_DOC *d, GLTF_SCENE *s) {
 
     const int materials = glb_get(d, 0, "materials");
     const size_t source_count = glb_count(d, materials);
@@ -472,7 +472,7 @@ static bool extract_materials(const glb_doc *d, gltf_scene *s) {
 
     for (uint32_t i = 0; i < (uint32_t)source_count; ++i) {
 
-        gltf_material *m = &s->materials[i];
+        GLTF_MATERIAL *m = &s->materials[i];
         const int material = glb_at(d, materials, i);
         const int pbr = glb_get(d, material, "pbrMetallicRoughness");
 
@@ -520,7 +520,7 @@ static bool extract_materials(const glb_doc *d, gltf_scene *s) {
     return true;
 }
 
-static bool extract_textures(const glb_doc *d, gltf_scene *s) {
+static bool extract_textures(const GLB_DOC *d, GLTF_SCENE *s) {
 
     const int textures = glb_get(d, 0, "textures");
 
@@ -549,7 +549,7 @@ static bool extract_textures(const glb_doc *d, gltf_scene *s) {
     return true;
 }
 
-static bool extract_images(const glb_doc *d, gltf_scene *s) {
+static bool extract_images(const GLB_DOC *d, GLTF_SCENE *s) {
 
     const int images = glb_get(d, 0, "images");
     const size_t count = glb_count(d, images);
@@ -577,7 +577,7 @@ static bool extract_images(const glb_doc *d, gltf_scene *s) {
     return true;
 }
 
-void gltf_free(gltf_scene *s) {
+void gltf_free(GLTF_SCENE *s) {
 
     if (!s) return;
 
@@ -589,14 +589,14 @@ void gltf_free(gltf_scene *s) {
     memset(s, 0, sizeof(*s));
 }
 
-bool gltf_extract(const glb_doc *d, gltf_scene *s) {
+bool gltf_extract(const GLB_DOC *d, GLTF_SCENE *s) {
 
     if (!d || !s || glb_root(d) < 0) return false;
     memset(s, 0, sizeof(*s));
 
     if (!extract_materials(d, s) || !extract_textures(d, s) || !extract_images(d, s)) goto fail;
 
-    const gm4 identity = m_identity();
+    const GM4 identity = m_identity();
     const int scenes = glb_get(d, 0, "scenes");
 
     if (scenes >= 0 && glb_count(d, scenes)) {
