@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+"""felix-format: clang-format + Felix's airy paragraph spacing.
+
+Completly made by AI because wth is python and tf im not wasting my time on formatting my code lmao
+
+Usage:
+  felix-format [-i] [--check] [--diff] [--no-clang] file [file ...]
+  felix-format < file.c            # stdin -> stdout
+
+Pipeline per file: dependency-safe include normalization -> clang-format with
+Felix's built-in style -> airy blank-line pass.
+
+The formatter is intentionally self-contained: it does not depend on a repo
+.clang-format file, and clang-format is never allowed to sort includes.
+"""
+import argparse
+import difflib
+import os
+import re
+import subprocess
+import sys
+
+CONTROL = ("if", "for", "while", "switch", "return", "break", "continue", "goto")
+CONTROL_RE = re.compile(r"^(if|for|while|switch|return|break|continue|goto)\b")
+HEADER_RE = re.compile(r"^(if|for|while|switch|else|do)\b")
+CASE_RE = re.compile(r"^(case\b|default\b)")
+DECL_RE = re.compile(
+    r"^\s*(?:(?:const|static|extern|register|volatile|inline|_Atomic"
+    r"|unsigned|signed|long|short)\s+)*"
+    r"[A-Za-z_]\w*"
+    r"(?:\s+[A-Za-z_]\w*)?"
+    r"\s*\**\s*"
+    r"(?P<name>[A-Za-z_]\w*)"
+    r"\s*(?:\[[^\]]*\]\s*)*"
+    r"\s*(?:=|;)"
+)
+
+FELIX_STYLE = """{
+BasedOnStyle: LLVM,
+Standard: Latest,
+ColumnLimit: 180,
+IndentWidth: 4,
+TabWidth: 4,
+ContinuationIndentWidth: 4,
+UseTab: Never,
+BreakBeforeBraces: Attach,
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse,
+AllowShortFunctionsOnASingleLine: Empty,
+AllowShortBlocksOnASingleLine: Empty,
+AllowAllParametersOfDeclarationOnNextLine: true,
+AllowAllArgumentsOnNextLine: true,
+BinPackParameters: true,
+BinPackArguments: true,
+DerivePointerAlignment: false,
+PointerAlignment: Right,
+ReferenceAlignment: Right,
+AlignAfterOpenBracket: Align,
+AlignOperands: Align,
+SpaceBeforeParens: ControlStatements,
+SpaceAfterCStyleCast: false,
+SpaceBeforeCpp11BracedList: false,
+Cpp11BracedListStyle: true,
+SortIncludes: false,
+IncludeBlocks: Preserve,
+MaxEmptyLinesToKeep: 2,
+IndentCaseLabels: true,
+IndentGotoLabels: false,
+ReflowComments: false,
+BreakBeforeBinaryOperators: None
+}""".replace("\n", " ")
+
+# A line ending in ';', '{', '}' or ':' is a complete statement boundary.
+# Anything else (operators, commas, openers) means the statement continues.
+CONT_START = (
+    "?", ":", ",", ".", ")", "]", "*", "&", "|", "^", "%", "+",
+    "-", "/", "<", ">", "=", "!",
+)
+
+
+def strip_code(s):
+    """Remove string/char literals and // comments for brace counting."""
+    out = []
+    i, n = 0, len(s)
+    quote = None
+    while i < n:
+        c = s[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and s[i + 1] == "/":
+            break
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def is_blank(s):
+    return s.strip() == ""
+
+
+def is_preproc(s):
+    return s.lstrip().startswith("#")
+
+
+def is_comment_only(s):
+    t = s.lstrip()
+    return t.startswith("//") or t.startswith("/*") or t.startswith("*")
+
+
+def is_control(s):
+    return bool(CONTROL_RE.match(s.lstrip()))
+
+
+def is_decl(s):
+    t = s.lstrip()
+    if CONTROL_RE.match(t) or HEADER_RE.match(t) or CASE_RE.match(t):
+        return False
+    if t.startswith("}") or t.startswith("{"):
+        return False
+    return bool(DECL_RE.match(s))
+
+
+def decl_name(s):
+    m = DECL_RE.match(s)
+    return m.group("name") if m else None
+
+
+def depths(lines):
+    """Paren/bracket/brace depth at the START of each line."""
+    res = []
+    paren = brack = brace = 0
+    in_block = False
+    for ln in lines:
+        code = strip_code(ln)
+        if in_block:
+            end = code.find("*/")
+            if end == -1:
+                res.append((paren, brack, brace))
+                continue
+            code = code[end + 2 :]
+            in_block = False
+        while True:
+            start = code.find("/*")
+            if start == -1:
+                break
+            end = code.find("*/", start + 2)
+            if end == -1:
+                code = code[:start]
+                in_block = True
+                break
+            code = code[:start] + code[end + 2 :]
+        res.append((paren, brack, brace))
+        paren += code.count("(") - code.count(")")
+        brack += code.count("[") - code.count("]")
+        brace += code.count("{") - code.count("}")
+    return res
+
+
+def collapse(lines):
+    out = []
+    blanks = 0
+    for ln in lines:
+        if is_blank(ln):
+            blanks += 1
+            if blanks <= 2:
+                out.append("")
+            continue
+        blanks = 0
+        out.append(ln.rstrip())
+    while out and is_blank(out[0]):
+        out.pop(0)
+    while out and is_blank(out[-1]):
+        out.pop()
+    return out
+
+
+def continuation_blocked(prev, cur, dprev, dcur):
+    if dcur[0] != 0 or dcur[1] != 0 or dprev[0] != 0 or dprev[1] != 0:
+        return True
+    ps, cs = prev.rstrip(), cur.lstrip()
+    if ps.endswith("\\"):
+        return True
+    if ps != "" and not ps.endswith((";", "{", "}", ":")):
+        return True
+    if cs.startswith(CONT_START):
+        return True
+    return False
+
+
+def prev_decl_run_names(lines, idx):
+    names = []
+    j = idx - 1
+    while j >= 0 and len(names) < 12:
+        s = lines[j]
+        if is_blank(s) or is_preproc(s) or is_comment_only(s):
+            break
+        t = s.lstrip()
+        if t.startswith(("{", "}", "#")) or HEADER_RE.match(t) or CASE_RE.match(t):
+            break
+        if not is_decl(s) or not s.rstrip().endswith(";"):
+            break
+        nm = decl_name(s)
+        if nm:
+            names.append(nm)
+        j -= 1
+    return names
+
+
+def null_guard_lines(lines):
+    """Original indices of 'if (!p)' / 'if (p == NULL)' null guards whose body
+    is a single return: they stay glued to the alloc above them."""
+    glued = set()
+    for k, ln in enumerate(lines):
+        if is_blank(ln) or not ln.lstrip().startswith("if"):
+            continue
+        j = k - 1
+        while j >= 0 and is_blank(lines[j]):
+            j -= 1
+        if j < 0 or not is_decl(lines[j]):
+            continue
+        names = prev_decl_run_names(lines, k)
+        m = re.match(r"^if\s*\(\s*!?\s*\(?\s*([A-Za-z_]\w*)", ln.lstrip())
+        if not m or m.group(1) not in names:
+            continue
+        if "NULL" not in ln and "!" not in ln.split("//")[0]:
+            continue
+        n = k + 1
+        while n < len(lines) and is_blank(lines[n]):
+            n += 1
+        if n < len(lines) and lines[n].lstrip().startswith("return"):
+            glued.add(k)
+    return glued
+
+
+def needs_blank_before(lines, i, dlist, glued=False):
+    cur = lines[i]
+    if is_blank(cur) or is_preproc(cur) or is_comment_only(cur):
+        return False
+    ct = cur.lstrip()
+    if ct.startswith("}") or ct.startswith("{") or ct == ";" or ct.startswith(";"):
+        return False
+    if re.match(r"^else\b", ct):
+        return False
+    m_while = re.match(r"^while\b", ct)
+    if m_while and ct.rstrip().endswith(";"):
+        return False
+    if CASE_RE.match(ct):
+        return False
+    j = i - 1
+    while j >= 0 and is_blank(lines[j]):
+        j -= 1
+    if j < 0:
+        return False
+    prev = lines[j]
+    if is_preproc(prev) or is_comment_only(prev):
+        return False
+    pt = prev.lstrip()
+    if pt.endswith("{") or pt == "{":
+        return False
+    if pt.endswith(":"):
+        return False
+    if HEADER_RE.match(pt) and (pt.endswith(")") or pt in ("else", "do")):
+        return False
+    if continuation_blocked(prev, cur, dlist[j], dlist[i]):
+        return False
+    if pt.startswith("}"):
+        return True
+    if is_control(cur):
+        if glued:
+            return False
+        return True
+    if is_decl(cur) and not is_decl(prev):
+        return True
+    if not is_decl(cur) and not is_control(cur) and is_decl(prev):
+        code = strip_code(cur).split("//")[0]
+        for nm in prev_decl_run_names(lines, i):
+            if re.search(r"\b" + re.escape(nm) + r"\b", code):
+                return False
+        return True
+    return False
+
+
+def airy_pass(text):
+    lines = collapse(text.split("\n"))
+    if not lines:
+        return "\n"
+    dlist = depths(lines)
+    glued = null_guard_lines(lines)
+    out = []
+    dout = []
+    for i, ln in enumerate(lines):
+        if i > 0 and out and not is_blank(out[-1]):
+            if needs_blank_before(out + [ln], len(out), dout + [dlist[i]], i in glued):
+                out.append("")
+                dout.append(dout[-1])
+        out.append(ln)
+        dout.append(dlist[i])
+    return "\n".join(out) + "\n"
+
+
+def normalize_dependency_includes(text):
+    """Repair dependency-sensitive include orders the old formatter could break."""
+    lines = text.splitlines(True)
+    nri = None
+    extensions = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "#include <NRI.h>":
+            nri = i
+        elif stripped.startswith("#include <Extensions/NRI"):
+            extensions.append(i)
+
+    if nri is not None and extensions and nri > min(extensions):
+        nri_line = lines.pop(nri)
+        first_extension = next(
+            i for i, line in enumerate(lines)
+            if line.strip().startswith("#include <Extensions/NRI")
+        )
+        lines.insert(first_extension, nri_line)
+
+    return "".join(lines)
+
+
+def run_clang_format(text, filename, exe="clang-format"):
+    cmd = [
+        exe,
+        "--sort-includes=0",
+        "--style=" + FELIX_STYLE,
+        "--assume-filename=" + os.path.abspath(filename),
+    ]
+    try:
+        p = subprocess.run(
+            cmd, input=text, capture_output=True, text=True,
+            cwd=os.path.dirname(os.path.abspath(filename)) or ".",
+        )
+    except FileNotFoundError:
+        print(f"felix-format: '{exe}' not found (use --no-clang)", file=sys.stderr)
+        sys.exit(2)
+    if p.returncode != 0:
+        print(f"felix-format: clang-format failed on {filename}:\n{p.stderr}", file=sys.stderr)
+        sys.exit(2)
+    return p.stdout
+
+
+def format_text(text, filename, use_clang=True, clang_exe="clang-format"):
+    text = normalize_dependency_includes(text)
+    if use_clang:
+        text = run_clang_format(text, filename, clang_exe)
+    return airy_pass(text)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="felix-format", description="clang-format + airy paragraph spacing")
+    ap.add_argument("-i", "--in-place", action="store_true", help="edit files in place")
+    ap.add_argument("--check", action="store_true", help="exit 1 if any file would change")
+    ap.add_argument("--diff", action="store_true", help="show unified diffs")
+    ap.add_argument("--no-clang", action="store_true", help="skip clang-format, airy pass only")
+    ap.add_argument("--clang-format", default="clang-format", help="clang-format binary")
+    ap.add_argument("files", nargs="*", help="C files (shell expands *.c)")
+    args = ap.parse_args(argv)
+
+    if not args.files:
+        if sys.stdin.isatty():
+            ap.print_help()
+            return 2
+        sys.stdout.write(format_text(sys.stdin.read(), "stdin.c", not args.no_clang, args.clang_format))
+        return 0
+
+    results = []
+    rc = 0
+    for path in args.files:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                orig = f.read()
+        except OSError as e:
+            print(f"felix-format: cannot read {path}: {e}", file=sys.stderr)
+            rc = 2
+            continue
+        new = format_text(orig, path, not args.no_clang, args.clang_format)
+        results.append((path, orig, new))
+
+    changed = [(p, o, n) for p, o, n in results if o != n]
+
+    if args.check:
+        for p, _o, _n in changed:
+            print(f"would reformat: {p}")
+        return 1 if changed else rc
+
+    if args.in_place:
+        for p, _o, n in changed:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(n)
+        return rc
+
+    if args.diff or len(results) > 1:
+        for p, o, n in changed:
+            sys.stdout.write("".join(difflib.unified_diff(
+                o.splitlines(True), n.splitlines(True),
+                fromfile=p + " (orig)", tofile=p + " (felix)")))
+        return rc
+
+    sys.stdout.write(results[0][2])
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -52,12 +52,7 @@ void mesh_free(mesh *m);
 
 //// glb: container + JSON tokenizer + accessors
 
-typedef enum glb_token_type {
-    GLB_TOKEN_OBJECT,
-    GLB_TOKEN_ARRAY,
-    GLB_TOKEN_STRING,
-    GLB_TOKEN_PRIMITIVE
-} glb_token_type;
+typedef enum glb_token_type { GLB_TOKEN_OBJECT, GLB_TOKEN_ARRAY, GLB_TOKEN_STRING, GLB_TOKEN_PRIMITIVE } glb_token_type;
 
 typedef struct glb_token {
     uint32_t start;
@@ -108,13 +103,10 @@ bool glb_string(const glb_doc *doc, int token, const char **data, size_t *length
 bool glb_number(const glb_doc *doc, int token, double *value);
 bool glb_boolean(const glb_doc *doc, int token, bool *value);
 
-bool glb_buffer_view(const glb_doc *doc, size_t index, glb_span *span,
-                     size_t *stride);
+bool glb_buffer_view(const glb_doc *doc, size_t index, glb_span *span, size_t *stride);
 bool glb_accessor_open(const glb_doc *doc, size_t index, glb_accessor *out);
-bool glb_accessor_f32(const glb_accessor *accessor, size_t element,
-                      uint32_t component, float *value);
-bool glb_accessor_u32(const glb_accessor *accessor, size_t element,
-                      uint32_t *value);
+bool glb_accessor_f32(const glb_accessor *accessor, size_t element, uint32_t component, float *value);
+bool glb_accessor_u32(const glb_accessor *accessor, size_t element, uint32_t *value);
 
 bool glb_extract_mesh(const glb_doc *doc, mesh *out);
 
@@ -123,7 +115,9 @@ bool glb_extract_mesh(const glb_doc *doc, mesh *out);
 typedef struct gltf_vertex {
     vec3 position;
     vec3 normal;
+
     float u, v;
+
     uint32_t material;
 } gltf_vertex;
 
@@ -233,19 +227,20 @@ typedef struct lightmap {
     uint32_t sample_count;
 } lightmap;
 
-bool lmap_build(lightmap *lm, const mesh *m,
-                uint32_t preferred_texels_per_unit, uint32_t max_size);
+bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit, uint32_t max_size);
 void lmap_free(lightmap *lm);
 
 typedef struct probe {
-    float position[4]; /* xyz and validity */
+    float position[4];        /* xyz and validity */
     float coefficients[9][4]; /* RGB SH9; coefficient[1].w is sun visibility */
 } probe;
 
 typedef struct probe_grid {
     vec3 origin;
     float spacing;
+
     uint32_t count_x, count_y, count_z;
+
     probe *probes;
 } probe_grid;
 
@@ -257,13 +252,13 @@ typedef struct beam_grid {
     vec3 origin;
     vec3 step; /* world-space spacing along the three sun-space axes */
     uint32_t width, height, depth;
+
     uint32_t count;
-    beam_cell *cells; /* visible quadtree squares; all other voxels are shaded */
+    beam_cell *cells;    /* visible quadtree squares; all other voxels are shaded */
     float *shadow_depth; /* first sun-facing surface for each x/y column */
 } beam_grid;
 
-bool beam_build(beam_grid *grid, const mesh *scene, const bvh *tree,
-                   vec3 sun_direction);
+bool beam_build(beam_grid *grid, const mesh *scene, const bvh *tree, vec3 sun_direction);
 void beam_free(beam_grid *grid);
 float *beam_expand(const beam_grid *grid);
 
@@ -282,39 +277,26 @@ typedef struct cached_lightmap {
 } cached_lightmap;
 
 uint64_t hash_bytes(uint64_t seed, const void *bytes, size_t size);
-bool cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash,
-                   uint64_t volume_hash, uint64_t beam_hash,
-                   cached_lightmap *out);
-bool cache_read_partial(const char *path, uint64_t scene_hash,
-                           cached_lightmap *out);
-bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash,
-                    uint64_t volume_hash, uint64_t beam_hash,
-                    const cached_lightmap *data);
+bool cache_read(const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, cached_lightmap *out);
+bool cache_read_partial(const char *path, uint64_t scene_hash, cached_lightmap *out);
+bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, const cached_lightmap *data);
 void cache_free(cached_lightmap *data);
 
 #include "gpu.h"
 
 /* Renderer and bake orchestration. */
 bool r_init(renderer *r, const char *title, int width, int height);
-bool r_build_scene(renderer *r, const mesh *m, const gltf_scene *visual,
-                   const lightmap *lm);
-bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash,
-                            uint64_t layout_hash, uint64_t volume_hash,
-                            uint64_t beam_hash, const lightmap *lm);
-bool r_rebake_current_scene(renderer *r, const mesh *m,
-                            const gltf_scene *visual, const lightmap *lm,
-                            const char *path, uint64_t scene_hash,
-                            uint64_t layout_hash, uint64_t volume_hash,
-                            uint64_t beam_hash);
+bool r_build_scene(renderer *r, const mesh *m, const gltf_scene *visual, const lightmap *lm);
+bool r_load_cached_lightmap(renderer *r, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, const lightmap *lm);
+bool r_rebake_current_scene(renderer *r, const mesh *m, const gltf_scene *visual, const lightmap *lm, const char *path, uint64_t scene_hash, uint64_t layout_hash,
+                            uint64_t volume_hash, uint64_t beam_hash);
 void r_event(renderer *r, const SDL_Event *event);
 bool r_draw(renderer *r);
 void r_deinit(renderer *r);
 
 void bake_progress(renderer *r, const char *stage, Uint32 done, Uint32 total);
-bool bake_start(renderer *r, const mesh *scene, const gltf_scene *visual,
-                const lightmap *layout, const char *path,
-                uint64_t scene_hash, uint64_t layout_hash,
-                uint64_t volume_hash, uint64_t beam_hash);
+bool bake_start(renderer *r, const mesh *scene, const gltf_scene *visual, const lightmap *layout, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
+                uint64_t beam_hash);
 void bake_update(renderer *r);
 void bake_cancel(renderer *r);
 bool bake_active(renderer *r);

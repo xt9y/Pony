@@ -13,12 +13,12 @@
 #define BAKE_IDLE_SLEEP_MS 2u
 
 static double elapsed_ms(Uint64 begin) {
-    return (double)(SDL_GetPerformanceCounter() - begin) * 1000.0 /
-           (double)SDL_GetPerformanceFrequency();
+    return (double)(SDL_GetPerformanceCounter() - begin) * 1000.0 / (double)SDL_GetPerformanceFrequency();
 }
 
 static bool input_event(const SDL_Event *event) {
     if (!event) return false;
+
     switch (event->type) {
         case SDL_EVENT_KEY_DOWN:
         case SDL_EVENT_KEY_UP:
@@ -36,21 +36,27 @@ int main(int argc, char **argv) {
     const char *model_path = argc > 1 ? argv[1] : "concrete_temple.glb";
     const char *filename = strrchr(model_path, '/');
     const char *windows_filename = strrchr(model_path, '\\');
+
     if (windows_filename && (!filename || windows_filename > filename)) filename = windows_filename;
+
     const char *extension = strrchr(model_path, '.');
-    size_t stem_length = extension && (!filename || extension > filename)
-        ? (size_t)(extension - model_path) : strlen(model_path);
+    size_t stem_length = extension && (!filename || extension > filename) ? (size_t)(extension - model_path) : strlen(model_path);
+
     const char *cache_suffix = ".baked";
     char *bake_path = malloc(stem_length + strlen(cache_suffix) + 1u);
+
     if (!bake_path) return 1;
     memcpy(bake_path, model_path, stem_length);
     strcpy(bake_path + stem_length, cache_suffix);
 
     char title[512];
+
     snprintf(title, sizeof(title), "INIT | %s", filename ? filename + 1 : model_path);
+
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "Could not initialize SDL: %s\n", SDL_GetError());
         free(bake_path);
+
         return 1;
     }
 
@@ -73,20 +79,22 @@ int main(int argc, char **argv) {
     } else if (!gltf_extract(&model, &visual)) {
         startup_stage = "visual glTF extraction";
     }
+
     const double load_ms = elapsed_ms(load_begin);
 
     const Uint64 atlas_begin = SDL_GetPerformanceCounter();
-    if (!startup_stage &&
-        !lmap_build(&lm, &scene, LIGHTMAP_TEXELS_PER_UNIT,
-                    LIGHTMAP_MAX_SIZE)) {
+
+    if (!startup_stage && !lmap_build(&lm, &scene, LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE)) {
         startup_stage = "lightmap atlas generation";
     }
+
     const double atlas_ms = elapsed_ms(atlas_begin);
 
     if (!startup_stage && !r_init(&r, title, 1280, 720)) {
         startup_stage = "renderer initialization";
         startup_detail = SDL_GetError();
     }
+
     if (!startup_stage && !r_build_scene(&r, &scene, &visual, &lm)) {
         startup_stage = "GPU scene upload";
         startup_detail = SDL_GetError();
@@ -94,8 +102,8 @@ int main(int argc, char **argv) {
 
     if (startup_stage) {
         fprintf(stderr, "Startup failed at %s", startup_stage);
-        if (startup_detail && *startup_detail)
-            fprintf(stderr, ": %s", startup_detail);
+
+        if (startup_detail && *startup_detail) fprintf(stderr, ": %s", startup_detail);
         fputc('\n', stderr);
 
         bake_cancel(&r);
@@ -106,52 +114,71 @@ int main(int argc, char **argv) {
         glb_free(&model);
         SDL_Quit();
         free(bake_path);
+
         return 1;
     }
 
     const uint64_t scene_hash = hash_bytes(0, model.data, model.data_size);
     uint64_t layout_hash = hash_bytes(0, &lm.width, sizeof(lm.width));
     layout_hash = hash_bytes(layout_hash, &lm.height, sizeof(lm.height));
-    layout_hash = hash_bytes(layout_hash, lm.uvs,
-                                scene.faces.count * 6u * sizeof(*lm.uvs));
+    layout_hash = hash_bytes(layout_hash, lm.uvs, scene.faces.count * 6u * sizeof(*lm.uvs));
+
     const uint32_t bake_settings[] = {
-        LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE, 128u, 3u, 4u,
-        32u, 2u,                    // convergence
-        32u, 8u, 50u, 75u, 1u,     // atlas density
-        4u, 16u, 2u,               // separate direct lighting
-        1u,                        // cached secondary hits
-        1u, 4u, 995u, 25u, 60u, 100u // indirect patches
+        LIGHTMAP_TEXELS_PER_UNIT,
+        LIGHTMAP_MAX_SIZE,
+        128u,
+        3u,
+        4u,
+        32u,
+        2u, // convergence
+        32u,
+        8u,
+        50u,
+        75u,
+        1u, // atlas density
+        4u,
+        16u,
+        2u, // separate direct lighting
+        1u, // cached secondary hits
+        1u,
+        4u,
+        995u,
+        25u,
+        60u,
+        100u // indirect patches
     };
+
     layout_hash = hash_bytes(layout_hash, bake_settings, sizeof(bake_settings));
 
-    const float lighting_settings[] = {
-        0.38f, 0.30f, 0.32f, 2.4f, 1.0f, 0.94f, 0.84f, 0.00465f,
-        0.22f, 0.42f, 0.78f, 0.68f, 0.76f, 0.88f
-    };
+    const float lighting_settings[] = {0.38f, 0.30f, 0.32f, 2.4f, 1.0f, 0.94f, 0.84f, 0.00465f, 0.22f, 0.42f, 0.78f, 0.68f, 0.76f, 0.88f};
+
     layout_hash = hash_bytes(layout_hash, lighting_settings, sizeof(lighting_settings));
 
     const uint32_t volume_settings[] = {1024u, 4u, 3u, 2u};
     uint64_t volume_hash = hash_bytes(scene_hash, volume_settings, sizeof(volume_settings));
+
     volume_hash = hash_bytes(volume_hash, lighting_settings, sizeof(lighting_settings));
+
     const uint32_t beam_settings[] = {64u, 16u, 5u};
     uint64_t beam_hash = hash_bytes(scene_hash, beam_settings, sizeof(beam_settings));
+
     beam_hash = hash_bytes(beam_hash, lighting_settings, 3u * sizeof(float));
 
-    const bool cached = r_load_cached_lightmap(&r, bake_path, scene_hash, layout_hash,
-                                                volume_hash, beam_hash, &lm);
+    const bool cached = r_load_cached_lightmap(&r, bake_path, scene_hash, layout_hash, volume_hash, beam_hash, &lm);
+
     SDL_SetWindowTitle(r.window, cached ? "READY" : "UNBAKED");
 
-    printf("%s: %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n",
-           model_path, load_ms, scene.vertices.count, scene.faces.count,
+    printf("%s: %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n", model_path, load_ms, scene.vertices.count, scene.faces.count,
            (double)model.bin_size / (1024.0 * 1024.0));
-    printf("Visual: %zu vertices | %u materials | %u textures | %u images\n",
-           visual.vertex_count, visual.material_count, visual.texture_count, visual.image_count);
-    printf("Lightmap: %.2f ms atlas | %ux%u | %u charts | %.2f texels/unit | %u valid texels\n",
+    printf("Visual: %zu vertices | %u materials | %u textures | %u images\n", visual.vertex_count, visual.material_count, visual.texture_count, visual.image_count);
+    printf("Lightmap: %.2f ms atlas | %ux%u | %u charts | %.2f texels/unit | %u "
+           "valid texels\n",
            atlas_ms, lm.width, lm.height, lm.chart_count, lm.texel_density, lm.sample_count);
-    printf("Lighting: %s. Press B to rebake this scene in the renderer.\n",
-           cached ? "loaded saved bake" : "unbaked fallback");
-    printf("Runtime: PBR + sun beams + volume probes -> HDR -> bloom -> ACES + GPU LUT\n");
-    printf("LMB drag: orbit | wheel: zoom | B: rebake | F5: fog on/off | Tab: wireframe | F11: fullscreen | Esc: quit\n");
+    printf("Lighting: %s. Press B to rebake this scene in the renderer.\n", cached ? "loaded saved bake" : "unbaked fallback");
+    printf("Runtime: PBR + sun beams + volume probes -> HDR -> bloom -> ACES + "
+           "GPU LUT\n");
+    printf("LMB drag: orbit | wheel: zoom | B: rebake | F5: fog on/off | Tab: "
+           "wireframe | F11: fullscreen | Esc: quit\n");
 
     bool running = true;
     Uint64 last_frame_print = SDL_GetTicks();
@@ -160,34 +187,45 @@ int main(int argc, char **argv) {
 
     while (running) {
         SDL_Event event;
+
         while (SDL_PollEvent(&event)) {
             if (input_event(&event)) last_input = SDL_GetTicks();
+
             if (event.type == SDL_EVENT_QUIT) running = false;
+
             if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
                 if (event.key.key == SDLK_ESCAPE) running = false;
+
                 if (event.key.scancode == SDL_SCANCODE_B || event.key.key == SDLK_B) {
                     SDL_ClearError();
-                    if (!bake_start(&r, &scene, &visual, &lm, bake_path,
-                                    scene_hash, layout_hash, volume_hash, beam_hash)) {
-                        SDL_Log("B: could not start rebake: %s",
-                                *SDL_GetError() ? SDL_GetError() : "unknown error");
+
+                    if (!bake_start(&r, &scene, &visual, &lm, bake_path, scene_hash, layout_hash, volume_hash, beam_hash)) {
+                        SDL_Log("B: could not start rebake: %s", *SDL_GetError() ? SDL_GetError() : "unknown error");
                     }
                 }
             }
+
             r_event(&r, &event);
         }
+
         if (!running) break;
 
         const Uint64 now = SDL_GetTicks();
         const bool idle_bake = bake_active(&r) && now - last_input >= BAKE_IDLE_GRACE_MS;
+
         const bool render_due = !idle_bake || now - last_render >= BAKE_IDLE_RENDER_MS;
+
         if (render_due) {
             const Uint64 frame_begin = SDL_GetPerformanceCounter();
+
             if (!r_draw(&r)) {
                 SDL_Log("draw failed: %s", SDL_GetError());
+
                 running = false;
             }
+
             r.frame_time_ms = elapsed_ms(frame_begin);
+
             last_render = now;
         } else {
             SDL_Delay(BAKE_IDLE_SLEEP_MS);
@@ -197,9 +235,11 @@ int main(int argc, char **argv) {
         bake_update_title(&r);
 
         const Uint64 tick = SDL_GetTicks();
+
         if (tick - last_frame_print >= 1000u) {
             printf("frame time: %.2f ms\n", r.frame_time_ms);
             fflush(stdout);
+
             last_frame_print = tick;
         }
     }
@@ -212,5 +252,6 @@ int main(int argc, char **argv) {
     glb_free(&model);
     SDL_Quit();
     free(bake_path);
+
     return 0;
 }
