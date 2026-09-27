@@ -382,7 +382,7 @@ void cache_free(CACHED_LIGHTMAP *data);
 /* Renderer and bake orchestration. */
 bool r_init(RENDERER *r, const char *title, int width, int height);
 bool r_build_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm);
-bool r_dynamic_init(RENDERER *r, const MESH *static_scene, const LIGHTMAP *lm, const DYNAMIC_LIGHTING *settings);
+bool r_dynamic_init(RENDERER *r, const MESH *static_scene, const GLTF_SCENE *static_visual, const LIGHTMAP *lm, const DYNAMIC_LIGHTING *settings);
 bool r_add_dynamic_object(RENDERER *r, OBJECT *object);
 void r_remove_dynamic_object(RENDERER *r, OBJECT *object);
 bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, const LIGHTMAP *lm);

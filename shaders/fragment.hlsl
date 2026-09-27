@@ -87,6 +87,7 @@ static const uint RT_NODE_WORDS = 12u;
 static const uint RT_STATIC_TRIANGLE_WORDS = 20u;
 static const uint RT_OBJECT_WORDS = 8u;
 static const uint RT_DYNAMIC_TRIANGLE_WORDS = 9u;
+static const uint RT_EMITTER_WORDS = 16u;
 static const uint RT_INVALID_NODE = 0xffffffffu;
 static const uint RT_EMITTER_SAMPLES = 8u;
 
@@ -270,6 +271,91 @@ bool rt_dynamic_any(float3 origin, float3 direction, float tmin, float tmax)
     return false;
 }
 
+float3 rt_integrate_edge(float3 v1, float3 v2)
+{
+    float x = clamp(dot(v1, v2), -0.999999f, 0.999999f);
+    float y = abs(x);
+    float a = 0.8543985f + (0.4965155f + 0.0145206f * y) * y;
+    float b = 3.4175940f + (4.1616724f + y) * y;
+    float v = a / b;
+    float theta_sintheta = x > 0.0f
+        ? v
+        : 0.5f * rsqrt(max(1.0f - x * x, 1.0e-7f)) - v;
+    return cross(v1, v2) * theta_sintheta;
+}
+
+float rt_triangle_projected_irradiance(float3 position, float3 normal,
+                                       float3 a, float3 b, float3 c,
+                                       float3 light_normal)
+{
+    float3 center = (a + b + c) / 3.0f;
+    if (dot(light_normal, position - center) <= 0.0f) return 0.0f;
+
+    float3 input_vertices[3];
+    input_vertices[0] = a;
+    input_vertices[1] = b;
+    input_vertices[2] = c;
+
+    float3 clipped[4];
+    uint clipped_count = 0u;
+    [unroll] for (uint i = 0u; i < 3u; ++i)
+    {
+        float3 current = input_vertices[i];
+        float3 next = input_vertices[(i + 1u) % 3u];
+        float current_distance = dot(normal, current - position);
+        float next_distance = dot(normal, next - position);
+        bool current_inside = current_distance > 1.0e-7f;
+        bool next_inside = next_distance > 1.0e-7f;
+
+        if (current_inside && clipped_count < 4u)
+            clipped[clipped_count++] = current;
+
+        if (current_inside != next_inside && clipped_count < 4u)
+        {
+            float t = current_distance / (current_distance - next_distance);
+            clipped[clipped_count++] = lerp(current, next, saturate(t));
+        }
+    }
+
+    if (clipped_count < 3u) return 0.0f;
+
+    float3 edge_sum = 0.0f;
+    [loop] for (uint i = 0u; i < clipped_count; ++i)
+    {
+        float3 from = clipped[i] - position;
+        float3 to = clipped[(i + 1u) % clipped_count] - position;
+        float from_length2 = dot(from, from);
+        float to_length2 = dot(to, to);
+        if (from_length2 <= 1.0e-12f || to_length2 <= 1.0e-12f) continue;
+        edge_sum += rt_integrate_edge(from * rsqrt(from_length2), to * rsqrt(to_length2));
+    }
+
+    return max(PI * abs(dot(normal, edge_sum)), 0.0f);
+}
+
+float3 rt_analytic_emitter_irradiance(float3 position, float3 normal)
+{
+    if (!rt_ready()) return 0.0f;
+    uint emitter_count = rt_word(9u);
+    uint emitter_offset = rt_word(13u);
+    float3 irradiance = 0.0f;
+
+    [loop] for (uint emitter_index = 0u; emitter_index < emitter_count; ++emitter_index)
+    {
+        uint base = emitter_offset + emitter_index * RT_EMITTER_WORDS;
+        float3 a = rt_float3(base + 0u);
+        float3 b = rt_float3(base + 3u);
+        float3 c = rt_float3(base + 6u);
+        float3 light_normal = normalize(rt_float3(base + 9u));
+        float3 radiance = max(rt_float3(base + 12u), 0.0f);
+        float projected = rt_triangle_projected_irradiance(
+            position, normal, a, b, c, light_normal);
+        irradiance += radiance * projected;
+    }
+
+    return max(irradiance, 0.0f);
+}
+
 bool rt_emitter_sample(uint sample_index, out float3 light_position,
                        out float3 light_normal, out float3 light_radiance,
                        out float pdf_area)
@@ -280,40 +366,36 @@ bool rt_emitter_sample(uint sample_index, out float3 light_position,
     pdf_area = 0.0f;
     if (!rt_ready()) return false;
 
-    uint source_bytes = 0u;
-    StaticTraceTriangles.GetDimensions(source_bytes);
-    uint source_words = source_bytes / 4u;
-    uint triangle_count = rt_word(9u);
+    uint emitter_count = rt_word(9u);
+    uint emitter_offset = rt_word(13u);
     float total_weight = asfloat(rt_word(10u));
-    if (triangle_count == 0u || total_weight <= 0.0f ||
-        triangle_count > source_words / RT_STATIC_TRIANGLE_WORDS)
-        return false;
+    if (emitter_count == 0u || total_weight <= 0.0f) return false;
 
     float sequence = ((float)sample_index + 0.5f) / (float)RT_EMITTER_SAMPLES;
     float target = sequence * total_weight;
     uint lo = 0u;
-    uint hi = triangle_count;
+    uint hi = emitter_count;
     while (lo < hi)
     {
         uint mid = lo + (hi - lo) / 2u;
-        float cumulative = source_float(mid * RT_STATIC_TRIANGLE_WORDS + 19u);
+        float cumulative = rt_float(emitter_offset + mid * RT_EMITTER_WORDS + 15u);
         if (cumulative > target) hi = mid;
         else lo = mid + 1u;
     }
-    if (lo >= triangle_count) return false;
+    if (lo >= emitter_count) return false;
 
-    uint base = lo * RT_STATIC_TRIANGLE_WORDS;
-    float cumulative = source_float(base + 19u);
-    float previous = lo == 0u ? 0.0f : source_float((lo - 1u) * RT_STATIC_TRIANGLE_WORDS + 19u);
+    uint base = emitter_offset + lo * RT_EMITTER_WORDS;
+    float cumulative = rt_float(base + 15u);
+    float previous = lo == 0u
+        ? 0.0f
+        : rt_float(emitter_offset + (lo - 1u) * RT_EMITTER_WORDS + 15u);
     float triangle_weight = cumulative - previous;
     if (triangle_weight <= 0.0f) return false;
 
-    float3 a = source_float3(base + 0u);
-    float3 b = source_float3(base + 4u);
-    float3 c = source_float3(base + 8u);
-    float3 edge1 = b - a;
-    float3 edge2 = c - a;
-    float area = 0.5f * length(cross(edge1, edge2));
+    float3 a = rt_float3(base + 0u);
+    float3 b = rt_float3(base + 3u);
+    float3 c = rt_float3(base + 6u);
+    float area = 0.5f * length(cross(b - a, c - a));
     if (area <= 1.0e-10f) return false;
 
     float sample_u = frac(((float)sample_index + 0.5f) * 0.754877666f);
@@ -322,8 +404,8 @@ bool rt_emitter_sample(uint sample_index, out float3 light_position,
     light_position = a * (1.0f - root) +
                      b * (root * (1.0f - sample_v)) +
                      c * (root * sample_v);
-    light_normal = normalize(source_float3(base + 12u));
-    light_radiance = max(source_float3(base + 16u), 0.0f);
+    light_normal = normalize(rt_float3(base + 9u));
+    light_radiance = max(rt_float3(base + 12u), 0.0f);
     pdf_area = (triangle_weight / total_weight) / area;
     return pdf_area > 1.0e-12f && all(isfinite(light_position)) &&
            all(isfinite(light_normal));
@@ -331,10 +413,14 @@ bool rt_emitter_sample(uint sample_index, out float3 light_position,
 
 float3 realtime_emitter_shadow_delta(float3 position, float3 normal)
 {
-    if (!rt_ready() || rt_word(5u) == 0u) return 0.0f;
+    if (!rt_ready() || rt_word(5u) == 0u || rt_word(9u) == 0u) return 0.0f;
+
+    float3 full_direct = rt_analytic_emitter_irradiance(position, normal);
+    if (all(full_direct <= 1.0e-8f)) return 0.0f;
 
     float epsilon = max(asfloat(rt_word(11u)), 1.0e-4f);
-    float3 correction = 0.0f;
+    float total_weight = 0.0f;
+    float blocked_weight = 0.0f;
 
     [unroll] for (uint sample_index = 0u; sample_index < RT_EMITTER_SAMPLES; ++sample_index)
     {
@@ -356,21 +442,24 @@ float3 realtime_emitter_shadow_delta(float3 position, float3 normal)
         float emitter_cosine = saturate(dot(light_normal, -direction));
         if (receiver_cosine <= 0.0f || emitter_cosine <= 0.0f) continue;
 
+        float luminance = dot(light_radiance, float3(0.2126f, 0.7152f, 0.0722f));
+        float sample_weight = luminance * receiver_cosine * emitter_cosine /
+            max(distance2 * pdf_area, 1.0e-8f);
+        if (sample_weight <= 0.0f) continue;
+        total_weight += sample_weight;
+
         float3 origin = position + normal * epsilon;
         float tmax = distance - 2.0f * epsilon;
         if (tmax <= epsilon) continue;
 
-        // Most pixels never intersect dynamic bounds. Only pay for the static BVH
-        // when a dynamic object actually blocks this emitter sample.
         if (!rt_dynamic_any(origin, direction, epsilon, tmax)) continue;
         if (rt_static_any(origin, direction, epsilon, tmax)) continue;
-
-        correction -= light_radiance *
-            (receiver_cosine * emitter_cosine /
-             max(distance2 * pdf_area, 1.0e-8f));
+        blocked_weight += sample_weight;
     }
 
-    return correction / (float)RT_EMITTER_SAMPLES;
+    if (total_weight <= 1.0e-8f) return 0.0f;
+    float blocked_fraction = saturate(blocked_weight / total_weight);
+    return -full_direct * blocked_fraction;
 }
 
 float3 surface_probe_value(SurfaceProbe probe, float3 normal)

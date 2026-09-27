@@ -11,6 +11,7 @@
 #define RT_STATIC_TRIANGLE_WORDS 20u
 #define RT_OBJECT_WORDS 8u
 #define RT_DYNAMIC_TRIANGLE_WORDS 9u
+#define RT_EMITTER_WORDS 16u
 
 typedef struct DYNAMIC_OBJECT_ENTRY {
     OBJECT *object;
@@ -204,24 +205,44 @@ static bool dynamic_triangle_count(const DYNAMIC_STATE *s, uint32_t *out) {
     return true;
 }
 
+static bool static_emitter_count(const BVH *tree, uint32_t *out) {
+    if (!tree || !out) return false;
+    uint32_t count = 0u;
+    float previous = 0.0f;
+    for (uint32_t i = 0u; i < tree->triangle_count; ++i) {
+        const float cumulative = tree->triangles[i].emissive[3];
+        if (!isfinite(cumulative) || cumulative + 1.0e-6f < previous) return false;
+        if (cumulative > previous + 1.0e-8f) ++count;
+        previous = cumulative;
+    }
+    *out = count;
+    return true;
+}
+
 static bool rt_upload(RENDERER *r) {
     if (!r || !r->dynamic || !r->device || !r->bvh_triangle_buffer) return false;
     DYNAMIC_STATE *s = r->dynamic;
 
     uint32_t dynamic_triangles = 0u;
-    if (!dynamic_triangle_count(s, &dynamic_triangles)) return false;
+    uint32_t emitter_count = 0u;
+    if (!dynamic_triangle_count(s, &dynamic_triangles) ||
+        !static_emitter_count(&s->static_bvh, &emitter_count))
+        return false;
 
     const uint64_t node_words = (uint64_t)s->static_bvh.node_count * RT_NODE_WORDS;
     const uint64_t static_triangle_words = (uint64_t)s->static_bvh.triangle_count * RT_STATIC_TRIANGLE_WORDS;
     const uint64_t object_words = (uint64_t)s->object_count * RT_OBJECT_WORDS;
     const uint64_t dynamic_triangle_words = (uint64_t)dynamic_triangles * RT_DYNAMIC_TRIANGLE_WORDS;
-    const uint64_t total_words = RT_HEADER_WORDS + node_words + static_triangle_words + object_words + dynamic_triangle_words;
+    const uint64_t emitter_words = (uint64_t)emitter_count * RT_EMITTER_WORDS;
+    const uint64_t total_words = RT_HEADER_WORDS + node_words + static_triangle_words +
+                                 object_words + dynamic_triangle_words + emitter_words;
     if (!total_words || total_words > SIZE_MAX / sizeof(uint32_t)) return false;
 
     const uint32_t static_node_offset = RT_HEADER_WORDS;
     const uint32_t static_triangle_offset = static_node_offset + (uint32_t)node_words;
     const uint32_t object_offset = static_triangle_offset + (uint32_t)static_triangle_words;
     const uint32_t dynamic_triangle_offset = object_offset + (uint32_t)object_words;
+    const uint32_t emitter_offset = dynamic_triangle_offset + (uint32_t)dynamic_triangle_words;
 
     uint32_t *words = calloc((size_t)total_words, sizeof(*words));
     if (!words) return false;
@@ -235,10 +256,11 @@ static bool rt_upload(RENDERER *r) {
     words[6] = object_offset;
     words[7] = dynamic_triangles;
     words[8] = dynamic_triangle_offset;
-    words[9] = r->bvh_triangle_count;
-    words[10] = float_bits(r->bvh_emissive_weight);
+    words[9] = emitter_count;
+    words[10] = float_bits(s->static_bvh.emissive_weight);
     words[11] = float_bits(fmaxf(1.0e-4f, r->scene_radius * 1.0e-5f));
     words[12] = s->object_generation;
+    words[13] = emitter_offset;
 
     memcpy(words + static_node_offset, s->static_bvh.nodes,
            (size_t)s->static_bvh.node_count * sizeof(*s->static_bvh.nodes));
@@ -271,6 +293,32 @@ static bool rt_upload(RENDERER *r) {
             }
         }
         triangle_cursor += count;
+    }
+
+    float previous_importance = 0.0f;
+    uint32_t emitter_cursor = 0u;
+    for (uint32_t i = 0u; i < s->static_bvh.triangle_count; ++i) {
+        const BVH_TRIANGLE *triangle = &s->static_bvh.triangles[i];
+        const float cumulative = triangle->emissive[3];
+        const float importance = cumulative - previous_importance;
+        previous_importance = cumulative;
+        if (importance <= 1.0e-8f) continue;
+
+        uint32_t *emitter = words + emitter_offset + emitter_cursor * RT_EMITTER_WORDS;
+        const float values[15] = {
+            triangle->a[0], triangle->a[1], triangle->a[2],
+            triangle->b[0], triangle->b[1], triangle->b[2],
+            triangle->c[0], triangle->c[1], triangle->c[2],
+            triangle->normal[0], triangle->normal[1], triangle->normal[2],
+            triangle->emissive[0], triangle->emissive[1], triangle->emissive[2]
+        };
+        for (uint32_t word = 0u; word < 15u; ++word) emitter[word] = float_bits(values[word]);
+        emitter[15] = float_bits(cumulative);
+        ++emitter_cursor;
+    }
+    if (emitter_cursor != emitter_count) {
+        free(words);
+        return false;
     }
 
     const uint64_t bytes = total_words * sizeof(uint32_t);
@@ -306,8 +354,9 @@ void dynamic_deinit(RENDERER *r) {
     memset(&r->dynamic_lighting, 0, sizeof(r->dynamic_lighting));
 }
 
-bool r_dynamic_init(RENDERER *r, const MESH *static_scene, const LIGHTMAP *lm, const DYNAMIC_LIGHTING *settings) {
-    if (!r || !r->device || !static_scene || !lm || !settings || !settings->texels_per_frame ||
+bool r_dynamic_init(RENDERER *r, const MESH *static_scene, const GLTF_SCENE *static_visual,
+                    const LIGHTMAP *lm, const DYNAMIC_LIGHTING *settings) {
+    if (!r || !r->device || !static_scene || !static_visual || !lm || !settings || !settings->texels_per_frame ||
         !settings->rays_per_texel || !settings->target_samples || !settings->shadow_map_size ||
         !isfinite(settings->gi_radius) || settings->gi_radius < 0.0f ||
         !isfinite(settings->shadow_bias) || settings->shadow_bias < 0.0f)
@@ -321,7 +370,7 @@ bool r_dynamic_init(RENDERER *r, const MESH *static_scene, const LIGHTMAP *lm, c
     if (!s) return false;
     s->settings = *settings;
     s->object_generation = 1u;
-    if (!bvh_build(&s->static_bvh, static_scene, NULL)) {
+    if (!bvh_build(&s->static_bvh, static_scene, static_visual)) {
         free(s);
         return false;
     }

@@ -213,7 +213,7 @@ int main(int argc, char **argv) {
         startup_detail = SDL_GetError();
     }
 
-    if (!startup_stage && !r_dynamic_init(&r, scene_data->geometry, &lm, &dynamic_lighting)) {
+    if (!startup_stage && !r_dynamic_init(&r, scene_data->geometry, scene_data->visual, &lm, &dynamic_lighting)) {
         startup_stage = "dynamic lighting initialization";
         startup_detail = SDL_GetError();
     }
