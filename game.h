@@ -160,6 +160,23 @@ typedef struct gltf_scene {
     uint32_t image_count;
 } gltf_scene;
 
+//// object: scene entity + attached components
+
+typedef enum object_state { STATIC, DYNAMIC } object_state;
+
+struct model {
+    mesh *geometry;
+    gltf_scene *visual;
+};
+
+struct light;
+
+typedef struct object {
+    object_state state;
+    struct model *model;
+    struct light *light;
+} object;
+
 bool gltf_extract(const glb_doc *doc, gltf_scene *scene);
 void gltf_free(gltf_scene *scene);
 
