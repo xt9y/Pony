@@ -4,18 +4,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define DYNAMIC_MAX_CELLS (1u << 20u)
-#define DYNAMIC_GI_JOB_SLICE 64u
-#define DYNAMIC_VISIBILITY_TEXEL_MULTIPLIER 8u
-
-typedef struct DYNAMIC_CELL {
-    uint32_t first, count, generation;
-    bool pending, rerun;
-} DYNAMIC_CELL;
-
-typedef struct DYNAMIC_CELL_JOB {
-    uint32_t cell, generation, cursor, pass;
-} DYNAMIC_CELL_JOB;
+#define RT_BUFFER_COUNT 3u
+#define RT_MAGIC 0x50525431u
+#define RT_HEADER_WORDS 16u
+#define RT_NODE_WORDS 12u
+#define RT_STATIC_TRIANGLE_WORDS 20u
+#define RT_OBJECT_WORDS 8u
+#define RT_DYNAMIC_TRIANGLE_WORDS 9u
 
 typedef struct DYNAMIC_OBJECT_ENTRY {
     OBJECT *object;
@@ -26,19 +21,11 @@ typedef struct DYNAMIC_OBJECT_ENTRY {
 
 struct DYNAMIC_STATE {
     DYNAMIC_LIGHTING settings;
-    const LMAP_SAMPLE *samples;
-    VEC3 origin;
-    float cell_size;
-    uint32_t dims[3], cell_count;
-    uint32_t lightmap_width, lightmap_height;
-    uint32_t *sample_ids;
-    DYNAMIC_CELL *cells;
-    DYNAMIC_CELL_JOB *jobs;
-    uint32_t job_count, job_capacity, job_cursor;
-    DYNAMIC_CELL_UPDATE *updates;
-    uint32_t update_count, update_capacity;
+    BVH static_bvh;
     DYNAMIC_OBJECT_ENTRY *objects;
     uint32_t object_count, object_capacity, object_generation;
+    NriBuffer *rt_buffers[RT_BUFFER_COUNT];
+    uint64_t rt_capacity;
 };
 
 static bool finite3(VEC3 v) {
@@ -140,13 +127,6 @@ static AABB transform_bounds(AABB local, const float world[16]) {
     return make_bounds(min, max);
 }
 
-static AABB swept(AABB a, AABB b, float r) {
-    return make_bounds(
-        (VEC3){fminf(a.min.x, b.min.x) - r, fminf(a.min.y, b.min.y) - r, fminf(a.min.z, b.min.z) - r},
-        (VEC3){fmaxf(a.max.x, b.max.x) + r, fmaxf(a.max.y, b.max.y) + r, fmaxf(a.max.z, b.max.z) + r}
-    );
-}
-
 static bool fill_entry(DYNAMIC_OBJECT_ENTRY *entry, OBJECT *object) {
     if (!entry || !object || !object->data || !transform_valid(&object->transform)) return false;
     struct MODEL *model = object->data;
@@ -155,159 +135,171 @@ static bool fill_entry(DYNAMIC_OBJECT_ENTRY *entry, OBJECT *object) {
     entry->transform = object->transform;
     matrices(&object->transform, entry->world, entry->inverse, entry->normal);
     entry->bounds = transform_bounds(model->geometry->bounds, entry->world);
-    if (!finite3(entry->bounds.min) || !finite3(entry->bounds.max)) return false;
-    return true;
+    return finite3(entry->bounds.min) && finite3(entry->bounds.max);
 }
 
-static uint32_t cell_index(const DYNAMIC_STATE *s, VEC3 p) {
-    int64_t x = (int64_t)floorf((p.x - s->origin.x) / s->cell_size);
-    int64_t y = (int64_t)floorf((p.y - s->origin.y) / s->cell_size);
-    int64_t z = (int64_t)floorf((p.z - s->origin.z) / s->cell_size);
-    if (x < 0) x = 0; if (y < 0) y = 0; if (z < 0) z = 0;
-    if (x >= s->dims[0]) x = s->dims[0] - 1u;
-    if (y >= s->dims[1]) y = s->dims[1] - 1u;
-    if (z >= s->dims[2]) z = s->dims[2] - 1u;
-    return (uint32_t)x + s->dims[0] * ((uint32_t)y + s->dims[1] * (uint32_t)z);
+static uint32_t float_bits(float value) {
+    uint32_t bits = 0u;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
 }
 
-static bool grid_dims(DYNAMIC_STATE *s, VEC3 min, VEC3 max) {
-    s->cell_size = fmaxf(0.5f, s->settings.gi_radius * 0.5f);
-    for (;;) {
-        uint64_t total = 1u;
-        const float span[3] = {max.x - min.x, max.y - min.y, max.z - min.z};
-        for (uint32_t axis = 0; axis < 3u; ++axis) {
-            double n = floor((double)span[axis] / s->cell_size) + 1.0;
-            if (n < 1.0 || n > UINT32_MAX) return false;
-            s->dims[axis] = (uint32_t)n;
-            total *= s->dims[axis];
-        }
-        if (total <= DYNAMIC_MAX_CELLS) {
-            s->cell_count = (uint32_t)total;
-            return true;
-        }
-        s->cell_size *= 2.0f;
-    }
+static bool rt_owned(const DYNAMIC_STATE *s, const NriBuffer *buffer) {
+    if (!s || !buffer) return false;
+    for (uint32_t i = 0; i < RT_BUFFER_COUNT; ++i)
+        if (s->rt_buffers[i] == buffer) return true;
+    return false;
 }
 
-static bool build_grid(DYNAMIC_STATE *s, const LIGHTMAP *lm) {
-    if (!lm->samples || !lm->sample_count) return false;
-    VEC3 min = {INFINITY, INFINITY, INFINITY}, max = {-INFINITY, -INFINITY, -INFINITY};
-    for (uint32_t i = 0; i < lm->sample_count; ++i) {
-        VEC3 p = {lm->samples[i].position[0], lm->samples[i].position[1], lm->samples[i].position[2]};
-        if (!finite3(p)) return false;
-        min.x = fminf(min.x, p.x); min.y = fminf(min.y, p.y); min.z = fminf(min.z, p.z);
-        max.x = fmaxf(max.x, p.x); max.y = fmaxf(max.y, p.y); max.z = fmaxf(max.z, p.z);
+static void rt_destroy(RENDERER *r, DYNAMIC_STATE *s) {
+    if (!r || !s) return;
+    if (rt_owned(s, r->dynamic_overlay_generation)) r->dynamic_overlay_generation = NULL;
+    if (r->dynamic_cell_generation == r->bvh_triangle_buffer) r->dynamic_cell_generation = NULL;
+    for (uint32_t i = 0; i < RT_BUFFER_COUNT; ++i) {
+        if (s->rt_buffers[i]) r->core.DestroyBuffer(s->rt_buffers[i]);
+        s->rt_buffers[i] = NULL;
     }
-
-    s->origin = min;
-    s->samples = lm->samples;
-    s->lightmap_width = lm->width;
-    s->lightmap_height = lm->height;
-    if (!grid_dims(s, min, max)) return false;
-
-    s->cells = calloc(s->cell_count, sizeof(*s->cells));
-    s->sample_ids = malloc((size_t)lm->sample_count * sizeof(*s->sample_ids));
-    uint32_t *cursor = calloc(s->cell_count, sizeof(*cursor));
-    if (!s->cells || !s->sample_ids || !cursor) { free(cursor); return false; }
-
-    for (uint32_t i = 0; i < lm->sample_count; ++i) {
-        VEC3 p = {lm->samples[i].position[0], lm->samples[i].position[1], lm->samples[i].position[2]};
-        s->cells[cell_index(s, p)].count++;
-    }
-
-    uint32_t offset = 0u;
-    for (uint32_t i = 0; i < s->cell_count; ++i) {
-        s->cells[i].first = offset;
-        cursor[i] = offset;
-        offset += s->cells[i].count;
-    }
-
-    for (uint32_t i = 0; i < lm->sample_count; ++i) {
-        VEC3 p = {lm->samples[i].position[0], lm->samples[i].position[1], lm->samples[i].position[2]};
-        uint32_t cell = cell_index(s, p);
-        s->sample_ids[cursor[cell]++] = i;
-    }
-
-    free(cursor);
-    return true;
+    s->rt_capacity = 0u;
 }
 
-static bool queue_cell(DYNAMIC_STATE *s, uint32_t cell, bool force_generation) {
-    DYNAMIC_CELL *entry = &s->cells[cell];
-    if (!entry->count) return true;
+static bool rt_ensure_capacity(RENDERER *r, DYNAMIC_STATE *s, uint64_t bytes) {
+    if (!r || !s || !bytes) return false;
+    bool complete = s->rt_capacity >= bytes;
+    for (uint32_t i = 0; i < RT_BUFFER_COUNT; ++i) complete = complete && s->rt_buffers[i] != NULL;
+    if (complete) return true;
 
-    if (entry->pending && !force_generation) {
-        entry->rerun = true;
-        return true;
+    if (r->graphics_queue && r->core.QueueWaitIdle(r->graphics_queue) != NriResult_SUCCESS) return false;
+    rt_destroy(r, s);
+
+    uint64_t capacity = 4096u;
+    while (capacity < bytes) {
+        if (capacity > UINT64_MAX / 2u) return false;
+        capacity *= 2u;
     }
 
-    if (!grow((void **)&s->jobs, &s->job_capacity, s->job_count + 1u, sizeof(*s->jobs), 64u) ||
-        !grow((void **)&s->updates, &s->update_capacity, s->update_count + 1u, sizeof(*s->updates), 64u))
-        return false;
-
-    uint32_t generation = ++entry->generation;
-    if (!generation) generation = entry->generation = 1u;
-    entry->pending = true;
-    entry->rerun = false;
-    s->jobs[s->job_count++] = (DYNAMIC_CELL_JOB){cell, generation, 0u, 0u};
-    s->updates[s->update_count++] = (DYNAMIC_CELL_UPDATE){cell, generation};
-    return true;
-}
-
-static bool invalidate(DYNAMIC_STATE *s, AABB b, bool force_generation) {
-    const VEC3 grid_max = {
-        s->origin.x + s->dims[0] * s->cell_size,
-        s->origin.y + s->dims[1] * s->cell_size,
-        s->origin.z + s->dims[2] * s->cell_size
+    const NriBufferDesc desc = {
+        .size = capacity,
+        .structureStride = sizeof(uint32_t),
+        .usage = NriBufferUsageBits_SHADER_RESOURCE
     };
-    if (b.max.x < s->origin.x || b.max.y < s->origin.y || b.max.z < s->origin.z ||
-        b.min.x >= grid_max.x || b.min.y >= grid_max.y || b.min.z >= grid_max.z)
-        return true;
-
-    int min_x = (int)floorf((b.min.x - s->origin.x) / s->cell_size);
-    int min_y = (int)floorf((b.min.y - s->origin.y) / s->cell_size);
-    int min_z = (int)floorf((b.min.z - s->origin.z) / s->cell_size);
-    int max_x = (int)floorf((b.max.x - s->origin.x) / s->cell_size);
-    int max_y = (int)floorf((b.max.y - s->origin.y) / s->cell_size);
-    int max_z = (int)floorf((b.max.z - s->origin.z) / s->cell_size);
-    if (min_x < 0) min_x = 0; if (min_y < 0) min_y = 0; if (min_z < 0) min_z = 0;
-    if (max_x >= (int)s->dims[0]) max_x = (int)s->dims[0] - 1;
-    if (max_y >= (int)s->dims[1]) max_y = (int)s->dims[1] - 1;
-    if (max_z >= (int)s->dims[2]) max_z = (int)s->dims[2] - 1;
-
-    for (int z = min_z; z <= max_z; ++z)
-        for (int y = min_y; y <= max_y; ++y)
-            for (int x = min_x; x <= max_x; ++x)
-                if (!queue_cell(s, (uint32_t)x + s->dims[0] * ((uint32_t)y + s->dims[1] * (uint32_t)z), force_generation))
-                    return false;
+    for (uint32_t i = 0; i < RT_BUFFER_COUNT; ++i) {
+        if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_UPLOAD, 0.0f, &desc, &s->rt_buffers[i]) != NriResult_SUCCESS) {
+            rt_destroy(r, s);
+            return false;
+        }
+    }
+    s->rt_capacity = capacity;
     return true;
 }
 
-static void erase_job(DYNAMIC_STATE *s, uint32_t index) {
-    if (index + 1u < s->job_count)
-        memmove(s->jobs + index, s->jobs + index + 1u, (size_t)(s->job_count - index - 1u) * sizeof(*s->jobs));
-    s->job_count--;
-    if (!s->job_count) s->job_cursor = 0u;
-    else if (s->job_cursor >= s->job_count) s->job_cursor = 0u;
+static bool dynamic_triangle_count(const DYNAMIC_STATE *s, uint32_t *out) {
+    uint64_t count = 0u;
+    for (uint32_t i = 0; i < s->object_count; ++i) {
+        const struct MODEL *model = s->objects[i].object ? s->objects[i].object->data : NULL;
+        if (!model || !model->visual || model->visual->vertex_count % 3u) return false;
+        count += model->visual->vertex_count / 3u;
+    }
+    if (count > UINT32_MAX) return false;
+    *out = (uint32_t)count;
+    return true;
 }
 
-static void clear_pending_jobs(DYNAMIC_STATE *s) {
-    if (!s) return;
-    for (uint32_t i = 0; i < s->cell_count; ++i) {
-        s->cells[i].pending = false;
-        s->cells[i].rerun = false;
+static bool rt_upload(RENDERER *r) {
+    if (!r || !r->dynamic || !r->device || !r->bvh_triangle_buffer) return false;
+    DYNAMIC_STATE *s = r->dynamic;
+
+    uint32_t dynamic_triangles = 0u;
+    if (!dynamic_triangle_count(s, &dynamic_triangles)) return false;
+
+    const uint64_t node_words = (uint64_t)s->static_bvh.node_count * RT_NODE_WORDS;
+    const uint64_t static_triangle_words = (uint64_t)s->static_bvh.triangle_count * RT_STATIC_TRIANGLE_WORDS;
+    const uint64_t object_words = (uint64_t)s->object_count * RT_OBJECT_WORDS;
+    const uint64_t dynamic_triangle_words = (uint64_t)dynamic_triangles * RT_DYNAMIC_TRIANGLE_WORDS;
+    const uint64_t total_words = RT_HEADER_WORDS + node_words + static_triangle_words + object_words + dynamic_triangle_words;
+    if (!total_words || total_words > SIZE_MAX / sizeof(uint32_t)) return false;
+
+    const uint32_t static_node_offset = RT_HEADER_WORDS;
+    const uint32_t static_triangle_offset = static_node_offset + (uint32_t)node_words;
+    const uint32_t object_offset = static_triangle_offset + (uint32_t)static_triangle_words;
+    const uint32_t dynamic_triangle_offset = object_offset + (uint32_t)object_words;
+
+    uint32_t *words = calloc((size_t)total_words, sizeof(*words));
+    if (!words) return false;
+
+    words[0] = RT_MAGIC;
+    words[1] = s->static_bvh.node_count;
+    words[2] = s->static_bvh.triangle_count;
+    words[3] = static_node_offset;
+    words[4] = static_triangle_offset;
+    words[5] = s->object_count;
+    words[6] = object_offset;
+    words[7] = dynamic_triangles;
+    words[8] = dynamic_triangle_offset;
+    words[9] = r->bvh_triangle_count;
+    words[10] = float_bits(r->bvh_emissive_weight);
+    words[11] = float_bits(fmaxf(1.0e-4f, r->scene_radius * 1.0e-5f));
+    words[12] = s->object_generation;
+
+    memcpy(words + static_node_offset, s->static_bvh.nodes,
+           (size_t)s->static_bvh.node_count * sizeof(*s->static_bvh.nodes));
+    memcpy(words + static_triangle_offset, s->static_bvh.triangles,
+           (size_t)s->static_bvh.triangle_count * sizeof(*s->static_bvh.triangles));
+
+    uint32_t triangle_cursor = 0u;
+    for (uint32_t i = 0; i < s->object_count; ++i) {
+        const DYNAMIC_OBJECT_ENTRY *entry = &s->objects[i];
+        const struct MODEL *model = entry->object->data;
+        const GLTF_SCENE *visual = model->visual;
+        const uint32_t count = (uint32_t)(visual->vertex_count / 3u);
+        uint32_t *object = words + object_offset + i * RT_OBJECT_WORDS;
+        object[0] = float_bits(entry->bounds.min.x);
+        object[1] = float_bits(entry->bounds.min.y);
+        object[2] = float_bits(entry->bounds.min.z);
+        object[3] = float_bits(entry->bounds.max.x);
+        object[4] = float_bits(entry->bounds.max.y);
+        object[5] = float_bits(entry->bounds.max.z);
+        object[6] = triangle_cursor;
+        object[7] = count;
+
+        for (uint32_t t = 0u; t < count; ++t) {
+            uint32_t *triangle = words + dynamic_triangle_offset + (triangle_cursor + t) * RT_DYNAMIC_TRIANGLE_WORDS;
+            for (uint32_t v = 0u; v < 3u; ++v) {
+                VEC3 p = matrix_point(entry->world, visual->vertices[t * 3u + v].position);
+                triangle[v * 3u + 0u] = float_bits(p.x);
+                triangle[v * 3u + 1u] = float_bits(p.y);
+                triangle[v * 3u + 2u] = float_bits(p.z);
+            }
+        }
+        triangle_cursor += count;
     }
-    s->job_count = 0u;
-    s->job_cursor = 0u;
+
+    const uint64_t bytes = total_words * sizeof(uint32_t);
+    if (!rt_ensure_capacity(r, s, bytes)) {
+        free(words);
+        return false;
+    }
+
+    const uint32_t slot = (uint32_t)(r->frame_index % RT_BUFFER_COUNT);
+    void *mapped = r->core.MapBuffer(s->rt_buffers[slot], 0u, bytes);
+    if (!mapped) {
+        free(words);
+        return false;
+    }
+    memcpy(mapped, words, (size_t)bytes);
+    r->core.UnmapBuffer(s->rt_buffers[slot]);
+    free(words);
+
+    r->dynamic_cell_generation = r->bvh_triangle_buffer;
+    r->dynamic_overlay_generation = s->rt_buffers[slot];
+    return true;
 }
 
 void dynamic_deinit(RENDERER *r) {
     if (!r || !r->dynamic) return;
     DYNAMIC_STATE *s = r->dynamic;
-    free(s->sample_ids);
-    free(s->cells);
-    free(s->jobs);
-    free(s->updates);
+    if (r->device && r->graphics_queue) (void)r->core.QueueWaitIdle(r->graphics_queue);
+    rt_destroy(r, s);
+    bvh_free(&s->static_bvh);
     free(s->objects);
     free(s);
     r->dynamic = NULL;
@@ -315,28 +307,29 @@ void dynamic_deinit(RENDERER *r) {
 }
 
 bool r_dynamic_init(RENDERER *r, const MESH *static_scene, const LIGHTMAP *lm, const DYNAMIC_LIGHTING *settings) {
-    if (!r || !static_scene || !lm || !settings || !settings->texels_per_frame || !settings->rays_per_texel ||
-        !settings->target_samples || !settings->shadow_map_size || !isfinite(settings->gi_radius) ||
-        settings->gi_radius < 0.0f || !isfinite(settings->shadow_bias) || settings->shadow_bias < 0.0f)
+    if (!r || !r->device || !static_scene || !lm || !settings || !settings->texels_per_frame ||
+        !settings->rays_per_texel || !settings->target_samples || !settings->shadow_map_size ||
+        !isfinite(settings->gi_radius) || settings->gi_radius < 0.0f ||
+        !isfinite(settings->shadow_bias) || settings->shadow_bias < 0.0f)
         return false;
 
-    if (r->dynamic_model_count && r->graphics_queue && r->core.QueueWaitIdle(r->graphics_queue) != NriResult_SUCCESS) return false;
-    gpu_dynamic_deinit(r);
+    if (r->graphics_queue && r->core.QueueWaitIdle(r->graphics_queue) != NriResult_SUCCESS) return false;
     dynamic_deinit(r);
+    gpu_dynamic_deinit(r);
 
     DYNAMIC_STATE *s = calloc(1, sizeof(*s));
     if (!s) return false;
     s->settings = *settings;
-    if (s->settings.texels_per_frame > UINT32_MAX / DYNAMIC_VISIBILITY_TEXEL_MULTIPLIER) {
+    s->object_generation = 1u;
+    if (!bvh_build(&s->static_bvh, static_scene, NULL)) {
         free(s);
         return false;
     }
-    s->settings.texels_per_frame *= DYNAMIC_VISIBILITY_TEXEL_MULTIPLIER;
-    s->object_generation = 1u;
-    r->dynamic = s;
-    r->dynamic_lighting = s->settings;
 
-    if (!build_grid(s, lm)) {
+    r->dynamic = s;
+    r->dynamic_lighting = *settings;
+    r->dynamic_lighting.texels_per_frame = 0u;
+    if (!rt_upload(r)) {
         dynamic_deinit(r);
         return false;
     }
@@ -352,8 +345,8 @@ bool r_add_dynamic_object(RENDERER *r, OBJECT *object) {
     for (uint32_t i = 0; i < s->object_count; ++i)
         if (s->objects[i].object == object) return false;
 
-    if (!grow((void **)&s->objects, &s->object_capacity, s->object_count + 1u, sizeof(*s->objects), 8u) ||
-        (!s->object_count && !gpu_dynamic_runtime_init(r)) || !gpu_dynamic_register_model(r, object->data))
+    if (!grow((void **)&s->objects, &s->object_capacity, s->object_count + 1u,
+              sizeof(*s->objects), 8u) || !gpu_dynamic_register_model(r, object->data))
         return false;
 
     DYNAMIC_OBJECT_ENTRY entry = {0};
@@ -363,13 +356,12 @@ bool r_add_dynamic_object(RENDERER *r, OBJECT *object) {
     }
 
     s->objects[s->object_count++] = entry;
-    AABB expanded = swept(entry.bounds, entry.bounds, s->settings.gi_radius);
-    if (!invalidate(s, expanded, false)) {
+    s->object_generation++;
+    if (!rt_upload(r)) {
         s->object_count--;
         gpu_dynamic_unregister_model(r, object->data);
         return false;
     }
-    s->object_generation++;
     return true;
 }
 
@@ -378,13 +370,11 @@ void r_remove_dynamic_object(RENDERER *r, OBJECT *object) {
     DYNAMIC_STATE *s = r->dynamic;
     for (uint32_t i = 0; i < s->object_count; ++i) {
         if (s->objects[i].object != object) continue;
-        AABB expanded = swept(s->objects[i].bounds, s->objects[i].bounds, s->settings.gi_radius);
-        (void)invalidate(s, expanded, true);
         struct MODEL *model = object->data;
         s->objects[i] = s->objects[--s->object_count];
         if (model) gpu_dynamic_unregister_model(r, model);
         s->object_generation++;
-        if (!s->object_count) clear_pending_jobs(s);
+        (void)rt_upload(r);
         return;
     }
 }
@@ -392,97 +382,25 @@ void r_remove_dynamic_object(RENDERER *r, OBJECT *object) {
 bool dynamic_sync(RENDERER *r) {
     if (!r || !r->dynamic) return false;
     DYNAMIC_STATE *s = r->dynamic;
+    bool changed = false;
     for (uint32_t i = 0; i < s->object_count; ++i) {
         DYNAMIC_OBJECT_ENTRY *entry = &s->objects[i];
         OBJECT *object = entry->object;
         if (!object || !transform_valid(&object->transform)) return false;
         if (transform_equal(&object->transform, &entry->transform)) continue;
-
         DYNAMIC_OBJECT_ENTRY current = {0};
-        if (!fill_entry(&current, object) ||
-            !invalidate(s, swept(entry->bounds, current.bounds, s->settings.gi_radius), false))
-            return false;
+        if (!fill_entry(&current, object)) return false;
         *entry = current;
-        s->object_generation++;
+        changed = true;
     }
-    return true;
-}
-
-uint32_t dynamic_take_gi_jobs(RENDERER *r, DYNAMIC_GI_JOB *out, uint32_t capacity) {
-    if (!r || !r->dynamic || !out || !capacity) return 0u;
-    DYNAMIC_STATE *s = r->dynamic;
-    if (!s->object_count) { clear_pending_jobs(s); return 0u; }
-
-    uint32_t limit = capacity < s->settings.texels_per_frame ? capacity : s->settings.texels_per_frame;
-    uint32_t count = 0u;
-
-    while (s->job_count && count < limit) {
-        if (s->job_cursor >= s->job_count) s->job_cursor = 0u;
-        const uint32_t j = s->job_cursor;
-        DYNAMIC_CELL_JOB *job = &s->jobs[j];
-        if (job->cell >= s->cell_count || job->generation != s->cells[job->cell].generation) {
-            erase_job(s, j);
-            continue;
-        }
-
-        DYNAMIC_CELL *cell = &s->cells[job->cell];
-        uint32_t slice_end = count + DYNAMIC_GI_JOB_SLICE;
-        if (slice_end > limit) slice_end = limit;
-
-        while (job->cursor < cell->count && count < slice_end) {
-            uint32_t sample_index = s->sample_ids[cell->first + job->cursor++];
-            const LMAP_SAMPLE *sample = &s->samples[sample_index];
-            DYNAMIC_GI_JOB *dst = &out[count++];
-            memcpy(dst->position, sample->position, sizeof(dst->position));
-            memcpy(dst->normal, sample->normal, sizeof(dst->normal));
-            dst->cell_index = job->cell;
-            dst->generation = job->generation;
-            dst->flags = (job->pass == 0u ? 2u : 0u) | (job->pass == 0u && job->cursor == cell->count ? 1u : 0u);
-            dst->_pad = 0u;
-        }
-
-        bool removed = false;
-        if (job->cursor == cell->count) {
-            job->cursor = 0u;
-            if (cell->rerun) {
-                cell->rerun = false;
-                job->pass = 0u;
-            } else {
-                job->pass++;
-                if (job->pass >= s->settings.target_samples) {
-                    cell->pending = false;
-                    erase_job(s, j);
-                    removed = true;
-                }
-            }
-        }
-
-        if (!removed && s->job_count) s->job_cursor = (j + 1u) % s->job_count;
-    }
-    return count;
-}
-
-uint32_t dynamic_take_cell_updates(RENDERER *r, DYNAMIC_CELL_UPDATE *out, uint32_t capacity) {
-    if (!r || !r->dynamic || !out || !capacity) return 0u;
-    DYNAMIC_STATE *s = r->dynamic;
-    uint32_t count = 0u;
-    while (count < capacity && s->update_count) {
-        DYNAMIC_CELL_UPDATE update = s->updates[--s->update_count];
-        if (update.cell_index < s->cell_count && s->cells[update.cell_index].generation == update.generation)
-            out[count++] = update;
-    }
-    return count;
+    if (changed) s->object_generation++;
+    return rt_upload(r);
 }
 
 bool dynamic_grid_info(const RENDERER *r, DYNAMIC_GRID_INFO *out) {
-    if (!r || !r->dynamic || !out) return false;
-    const DYNAMIC_STATE *s = r->dynamic;
-    *out = (DYNAMIC_GRID_INFO){
-        .origin_cell = {s->origin.x, s->origin.y, s->origin.z, s->cell_size},
-        .dims = {s->dims[0], s->dims[1], s->dims[2], s->cell_count},
-        .lightmap = {s->lightmap_width, s->lightmap_height}
-    };
-    return true;
+    (void)r;
+    (void)out;
+    return false;
 }
 
 uint32_t dynamic_instance_generation(const RENDERER *r) {
@@ -503,4 +421,18 @@ bool dynamic_instance_data(RENDERER *r, uint32_t index, DYNAMIC_INSTANCE_DATA *o
     memcpy(out->inverse_world, entry->inverse, sizeof(out->inverse_world));
     memcpy(out->normal_world, entry->normal, sizeof(out->normal_world));
     return true;
+}
+
+uint32_t dynamic_take_gi_jobs(RENDERER *r, DYNAMIC_GI_JOB *out, uint32_t capacity) {
+    (void)r;
+    (void)out;
+    (void)capacity;
+    return 0u;
+}
+
+uint32_t dynamic_take_cell_updates(RENDERER *r, DYNAMIC_CELL_UPDATE *out, uint32_t capacity) {
+    (void)r;
+    (void)out;
+    (void)capacity;
+    return 0u;
 }
