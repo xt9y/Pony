@@ -1,6 +1,6 @@
 BasedOnStyle: LLVM
 Standard: Latest
-ColumnLimit: 180
+ColumnLimit: 70
 IndentWidth: 4
 TabWidth: 4
 ContinuationIndentWidth: 4
@@ -12,8 +12,8 @@ AllowShortFunctionsOnASingleLine: Empty
 AllowShortBlocksOnASingleLine: Empty
 AllowAllParametersOfDeclarationOnNextLine: true
 AllowAllArgumentsOnNextLine: true
-BinPackParameters: true
-BinPackArguments: true
+BinPackParameters: false
+BinPackArguments: false
 BinPackLongBracedList: true
 BreakAfterOpenBracketBracedList: true
 BreakBeforeCloseBracketBracedList: true
@@ -47,3 +47,4 @@ IndentGotoLabels: false
 ReflowComments: Never
 BreakBeforeBinaryOperators: None
 AlwaysBreakAfterReturnType: None
+

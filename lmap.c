@@ -6,7 +6,10 @@
 
 #define LMAP_PADDING 3u
 #define LMAP_MIN_DENSITY 1.0f
-#define LMAP_CHART_DOT 0.984807753f
+/* Face-to-face joining is transitive: a loose normal threshold lets a folded
+ * surface merge into one chart and project different locations onto the same
+ * texel. Keep connected charts effectively planar. */
+#define LMAP_CHART_DOT 0.99999f
 
 
 typedef struct edge_ref {
@@ -218,14 +221,50 @@ static bool pack_charts(chart *charts, uint32_t chart_count, float density, uint
 static bool barycentric(float px, float py, lmap_uv a, lmap_uv b, lmap_uv c, float *w0, float *w1, float *w2) {
 
     const float den = (b.v - c.v) * (a.u - c.u) + (c.u - b.u) * (a.v - c.v);
-    if (fabsf(den) < 1.0e-8f) return false;
+    const lmap_uv corners[3] = {a, b, c};
 
-    *w0 = ((b.v - c.v) * (px - c.u) + (c.u - b.u) * (py - c.v)) / den;
-    *w1 = ((c.v - a.v) * (px - c.u) + (a.u - c.u) * (py - c.v)) / den;
-    *w2 = 1.0f - *w0 - *w1;
+    /* Cover every texel square touched by a triangle. Center-only coverage
+     * drops entire subpixel charts on dense meshes. */
+    for (uint32_t i = 0; i < 3u; ++i) {
+        const lmap_uv p = corners[i], q = corners[(i + 1u) % 3u];
+        const lmap_uv opposite = corners[(i + 2u) % 3u];
+        const float ex = q.u - p.u, ey = q.v - p.v;
+        const float side = ex * (opposite.v - p.v) - ey * (opposite.u - p.u);
+        const float center = ex * (py - p.v) - ey * (px - p.u);
+        const float radius = 0.5f * (fabsf(ex) + fabsf(ey));
+        if (side >= 0.0f ? center < -radius : center > radius) return false;
+    }
 
-    const float eps = -1.0e-4f;
-    return *w0 >= eps && *w1 >= eps && *w2 >= eps;
+    if (fabsf(den) >= 1.0e-8f) {
+        *w0 = ((b.v - c.v) * (px - c.u) + (c.u - b.u) * (py - c.v)) / den;
+        *w1 = ((c.v - a.v) * (px - c.u) + (a.u - c.u) * (py - c.v)) / den;
+        *w2 = 1.0f - *w0 - *w1;
+        if (*w0 >= 0.0f && *w1 >= 0.0f && *w2 >= 0.0f) return true;
+    }
+
+    /* For a conservatively covered pixel outside the triangle, sample the
+     * closest point on its surface instead of extrapolating world position. */
+    float closest = INFINITY;
+    for (uint32_t i = 0; i < 3u; ++i) {
+        const lmap_uv p = corners[i], q = corners[(i + 1u) % 3u];
+        const float dx = q.u - p.u, dy = q.v - p.v;
+        const float length_sq = dx * dx + dy * dy;
+        const float t = length_sq > 1.0e-12f
+            ? fminf(fmaxf(((px - p.u) * dx + (py - p.v) * dy) / length_sq, 0.0f), 1.0f)
+            : 0.0f;
+        const float offset_x = px - p.u - dx * t, offset_y = py - p.v - dy * t;
+        const float distance_sq = offset_x * offset_x + offset_y * offset_y;
+        if (distance_sq < closest) {
+            closest = distance_sq;
+            float weights[3] = {0.0f, 0.0f, 0.0f};
+            weights[i] = 1.0f - t;
+            weights[(i + 1u) % 3u] = t;
+            *w0 = weights[0];
+            *w1 = weights[1];
+            *w2 = weights[2];
+        }
+    }
+    return true;
 }
 
 static void vertex_normals(const mesh *m, vec3 *normals) {
@@ -385,11 +424,12 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
     if (!width || !height) goto fail;
 
-    lm->uvs = malloc((size_t)face_count * 3u * sizeof(*lm->uvs));
+    if (height > max_size || height > UINT32_MAX / 2u) goto fail;
+    lm->uvs = malloc((size_t)face_count * 6u * sizeof(*lm->uvs));
     if (!lm->uvs) goto fail;
 
     lm->width = width;
-    lm->height = height;
+    lm->height = height * 2u;
     lm->padding = LMAP_PADDING;
     lm->chart_count = chart_count;
     lm->texel_density = density;
@@ -410,7 +450,9 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
             if (px > max_x) px = max_x;
             if (py > max_y) py = max_y;
-            lm->uvs[i * 3u + k] = (lmap_uv){px / (float)width, py / (float)height};
+            lm->uvs[i * 6u + k] = (lmap_uv){px / (float)width, py / (float)lm->height};
+            lm->uvs[i * 6u + 3u + k] = (lmap_uv){px / (float)width,
+                                                    (py + (float)height) / (float)lm->height};
         }
     }
 
@@ -425,9 +467,9 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
         lmap_uv uv[3];
         for (uint32_t k = 0; k < 3u; ++k) {
 
-            uv[k] = lm->uvs[i * 3u + k];
+            uv[k] = lm->uvs[i * 6u + k];
             uv[k].u *= width;
-            uv[k].v *= height;
+            uv[k].v *= lm->height;
         }
 
         int min_x = (int)floorf(fminf(uv[0].u, fminf(uv[1].u, uv[2].u)));
@@ -461,6 +503,11 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
     }
 
 
+    if (sample_count > UINT32_MAX / 2u) {
+        free(occupied);
+        goto fail;
+    }
+    sample_count *= 2u;
     lm->samples = malloc((size_t)sample_count * sizeof(*lm->samples));
     if (!lm->samples && sample_count) {
         free(occupied);
@@ -479,9 +526,9 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
 
         for (uint32_t k = 0; k < 3u; ++k) {
 
-            uv[k] = lm->uvs[i * 3u + k];
+            uv[k] = lm->uvs[i * 6u + k];
             uv[k].u *= width;
-            uv[k].v *= height;
+            uv[k].v *= lm->height;
         }
 
 
@@ -530,6 +577,14 @@ bool lmap_build(lightmap *lm, const mesh *m, uint32_t preferred_texels_per_unit,
                 s->normal[1] = n.y;
                 s->normal[2] = n.z;
                 s->normal[3] = 0.0f;
+
+                lmap_sample *back = &lm->samples[out_sample++];
+                *back = *s;
+                bits.u = (uint32_t)(pixel + pixel_count);
+                back->position[3] = bits.f;
+                back->normal[0] = -n.x;
+                back->normal[1] = -n.y;
+                back->normal[2] = -n.z;
             }
         }
     

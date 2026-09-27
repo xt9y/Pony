@@ -1,5 +1,5 @@
 #if defined(BUILD_SURFACE_VS)
-cbuffer Camera : register(b0, space1)
+GPU_BIND_B(0, 1) cbuffer Camera : register(b0, space1)
 {
     float4x4 mvp;
     float4x4 view;
@@ -22,11 +22,12 @@ struct SurfaceOutput
     float2 lightmap_uv : TEXCOORD3;
     float3 view_normal : TEXCOORD4;
     float view_depth : TEXCOORD5;
+    float2 back_lightmap_uv : TEXCOORD6;
 };
 
 SurfaceOutput surface_vs(SurfaceInput input)
 {
-    SurfaceOutput output;
+    SurfaceOutput output; 
     float4 world = float4(input.position, 1.0f);
     float4 view_position = mul(view, world);
     output.position = mul(mvp, world);
@@ -34,8 +35,14 @@ SurfaceOutput surface_vs(SurfaceInput input)
     output.world_normal = normalize(input.normal);
     output.uv = input.uv;
     output.lightmap_uv = input.lightmap_uv;
+    output.back_lightmap_uv = input.lightmap_uv + float2(0.0f, 0.5f);
     output.view_normal = normalize(mul((float3x3)view, input.normal));
-    output.view_depth = max(-view_position.z, 0.0f);
+    // output.view_depth = max(-view_position.z, 0.0f);
+    // output.view_depth = max(dot(input.position - camera_eye.xyz, camera_forward.xyz), 0.0f);
+    // output.view_depth = dot(input.position - camera_eye.xyz, camera_forward.xyz);
+    // output.view_depth = input.position.z;
+    // output.view_depth = max(output.position.w, 0.0f);
+    output.view_depth = -view_position.z;
     return output;
 }
 #elif defined(BUILD_FULLSCREEN_VS)
@@ -58,7 +65,7 @@ FullscreenOutput fullscreen_vs(uint vertex_id : SV_VertexID)
     return output;
 }
 #elif defined(BUILD_WIREFRAME_VS)
-cbuffer Camera : register(b0, space1)
+GPU_BIND_B(0, 1) cbuffer Camera : register(b0, space1)
 {
     float4x4 mvp;
 };

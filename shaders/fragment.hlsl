@@ -1,18 +1,18 @@
 #if defined(BUILD_SURFACE_FS)
-Texture2D<float4> BaseColor : register(t0, space2);
-SamplerState BaseColorSampler : register(s0, space2);
-Texture2D<float4> MetallicRoughness : register(t1, space2);
-SamplerState MetallicRoughnessSampler : register(s1, space2);
-Texture2D<float4> NormalMap : register(t2, space2);
-SamplerState NormalMapSampler : register(s2, space2);
-Texture2D<float4> Occlusion : register(t3, space2);
-SamplerState OcclusionSampler : register(s3, space2);
-Texture2D<float4> Emissive : register(t4, space2);
-SamplerState EmissiveSampler : register(s4, space2);
-Texture2D<float4> Lightmap : register(t5, space2);
-SamplerState LightmapSampler : register(s5, space2);
+GPU_BIND_T(0, 2) Texture2D<float4> BaseColor : register(t0, space2);
+GPU_BIND_S(0, 2) SamplerState BaseColorSampler : register(s0, space2);
+GPU_BIND_T(1, 2) Texture2D<float4> MetallicRoughness : register(t1, space2);
+GPU_BIND_S(1, 2) SamplerState MetallicRoughnessSampler : register(s1, space2);
+GPU_BIND_T(2, 2) Texture2D<float4> NormalMap : register(t2, space2);
+GPU_BIND_S(2, 2) SamplerState NormalMapSampler : register(s2, space2);
+GPU_BIND_T(3, 2) Texture2D<float4> Occlusion : register(t3, space2);
+GPU_BIND_S(3, 2) SamplerState OcclusionSampler : register(s3, space2);
+GPU_BIND_T(4, 2) Texture2D<float4> Emissive : register(t4, space2);
+GPU_BIND_S(4, 2) SamplerState EmissiveSampler : register(s4, space2);
+GPU_BIND_T(5, 2) Texture2D<float4> Lightmap : register(t5, space2);
+GPU_BIND_S(5, 2) SamplerState LightmapSampler : register(s5, space2);
 
-cbuffer MaterialData : register(b0, space3)
+GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3)
 {
     float4 base_color_factor;
     float4 emissive_metallic;
@@ -20,6 +20,7 @@ cbuffer MaterialData : register(b0, space3)
     float4 sun_direction;
     float4 sun_color;
     float4 camera_position;
+    // float4 camera_forward; // Fragment depth diagnostic.
 };
 
 struct SurfaceInput
@@ -31,6 +32,7 @@ struct SurfaceInput
     float2 lightmap_uv : TEXCOORD3;
     float3 view_normal : TEXCOORD4;
     float view_depth : TEXCOORD5;
+    float2 back_lightmap_uv : TEXCOORD6;
 };
 
 struct SurfaceOutput
@@ -88,21 +90,85 @@ float3 mapped_normal(SurfaceInput input, float scale)
     return normalize(t * sample_normal.x + b * sample_normal.y + n * sample_normal.z);
 }
 
-SurfaceOutput surface_fs(SurfaceInput input)
+SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace)
 {
     SurfaceOutput output;
 
+    // float3 relative = input.world_position - camera_position.xyz;
+
+    // float error = abs(input.view_depth - dot(relative, camera_forward.xyz));
+    // float error = abs(input.view_depth - dot(input.world_position - camera_position.xyz, camera_forward.xyz));
+    // float error = abs(input.view_depth - dot(input.world_position - camera_position.xyz, camera_forward.xyz));
+    // output.hdr = float4(0, 0, 0, 1);
+    // output.normal_depth = float4(normalize(input.view_normal) * 0.5f + 0.5f, max(input.view_depth, 0.0f));
+    // output.normal_depth = float4(saturate(error * 2.0f), 0, 0, max(input.view_depth, 0.0f));
+    // return output;
+
+    // float error = abs(input.view_depth - input.world_position.z);
+    // output.normal_depth = float4(saturate(error * 2.0f), 0, 0, 1.0f);
+
+    // float raster_depth = 1.0f / max(input.position.w, 1.0e-6f);
+    // float error = abs(input.view_depth - raster_depth);
+
+    // output.hdr = float4(0, 0, 0, 1);
+    // output.normal_depth = float4(camera_forward.xyz, input.view_depth);
+    // output.normal_depth = float4(saturate(error * 2.0f), 0, 0, input.view_depth);
+    // output.normal_depth = float4(camera_position.xyz, input.view_depth);
+    // return output;
+
     float4 base_sample = BaseColor.Sample(BaseColorSampler, input.uv);
     float3 base = srgb_to_linear(base_sample.rgb) * base_color_factor.rgb;
+    // output.hdr = float4(base, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+
     float4 mr = MetallicRoughness.Sample(MetallicRoughnessSampler, input.uv);
     float metallic = saturate(emissive_metallic.w * mr.b);
+    // output.hdr = float4(metallic.xxx, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+
     float roughness = clamp(roughness_normal_ao_sun.x * mr.g, 0.045f, 1.0f);
+    // output.hdr = float4(roughness.xxx, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+
     float ao_sample = Occlusion.Sample(OcclusionSampler, input.uv).r;
     float material_ao = lerp(1.0f, ao_sample, saturate(roughness_normal_ao_sun.z));
+    // output.hdr = float4(material_ao.xxx, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+
     float3 emissive = srgb_to_linear(Emissive.Sample(EmissiveSampler, input.uv).rgb) *
                       emissive_metallic.rgb;
-
+    // output.hdr = float4(emissive, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+    
     float3 n = mapped_normal(input, roughness_normal_ao_sun.y);
+    if (!front_face) n = -n;
+    // output.hdr = float4(n * 0.5f + 0.5f, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+ 
     float3 v = normalize(camera_position.xyz - input.world_position);
     float3 l = normalize(sun_direction.xyz);
     float3 h = normalize(v + l);
@@ -118,12 +184,13 @@ SurfaceOutput surface_fs(SurfaceInput input)
     float3 specular = d * g * f / max(4.0f * n_dot_v * max(n_dot_l, 0.001f), 1.0e-4f);
 
     float3 baked = camera_position.w > 0.5f
-        ? max(Lightmap.Sample(LightmapSampler, input.lightmap_uv).rgb, 0.0f)
+        ? max(Lightmap.Sample(LightmapSampler,
+                              front_face ? input.lightmap_uv : input.back_lightmap_uv).rgb, 0.0f)
         : float3(0.12f, 0.12f, 0.12f);
     if (camera_position.w > 1.5f) {
         output.hdr=float4(baked,1.0f);
-        output.normal_depth=float4(normalize(input.view_normal)*0.5f+0.5f,
-                                    input.view_depth);
+        output.normal_depth=float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f,
+                                    max(input.view_depth, 0.0f));
         return output;
     }
     float baked_luma = dot(baked, float3(0.2126f, 0.7152f, 0.0722f));
@@ -131,19 +198,40 @@ SurfaceOutput surface_fs(SurfaceInput input)
         ? saturate(baked_luma * 0.55f) : 1.0f;
     float3 direct_specular = specular * sun_color.rgb * roughness_normal_ao_sun.w *
                              n_dot_l * sun_visibility;
+    // output.hdr = float4(direct_specular, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
+
     float3 environment_specular = f0 * (0.025f + 0.10f * (1.0f - roughness)) *
                                   material_ao * (camera_position.w > 0.5f
                                   ? saturate(baked_luma * 2.0f) : 1.0f);
+    // output.hdr = float4(environment_specular, 1.0f);
+    // output.normal_depth = float4(
+    //      normalize(input.view_normal) * 0.5f + 0.5f, 
+    //      input.view_depth
+    // );
+    // return output;
 
     float3 diffuse = base * baked * material_ao * (1.0f - metallic);
     output.hdr = float4(max(diffuse + direct_specular + environment_specular + emissive, 0.0f),
                         base_sample.a * base_color_factor.a);
-    output.normal_depth = float4(normalize(input.view_normal) * 0.5f + 0.5f,
-                                 input.view_depth);
+
+    // output.normal_depth = float4(input.world_position, input.view_depth);
+
+    // output.normal_depth = float4(input.world_position - camera_position.xyz,
+    //                              input.view_depth);
+
+    output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f,
+                                 max(input.view_depth, 0.0f));
+
+
     return output;
 }
 #elif defined(BUILD_SKY_FS)
-cbuffer SkyData : register(b0, space3)
+GPU_BIND_B(0, 3) cbuffer SkyData : register(b0, space3)
 {
     float4 camera_right;
     float4 camera_up;
@@ -192,16 +280,16 @@ SkyOutput sky_fs(SkyInput input)
     return output;
 }
 #elif defined(BUILD_COMPOSE_FS)
-Texture2D<float4> Hdr : register(t0, space2);
-SamplerState HdrSampler : register(s0, space2);
-Texture2D<float4> Ao : register(t1, space2);
-SamplerState AoSampler : register(s1, space2);
-Texture2D<float4> Bloom : register(t2, space2);
-SamplerState BloomSampler : register(s2, space2);
-Texture2D<float4> Lut : register(t3, space2);
-SamplerState LutSampler : register(s3, space2);
+GPU_BIND_T(0, 2) Texture2D<float4> Hdr : register(t0, space2);
+GPU_BIND_S(0, 2) SamplerState HdrSampler : register(s0, space2);
+GPU_BIND_T(1, 2) Texture2D<float4> Ao : register(t1, space2);
+GPU_BIND_S(1, 2) SamplerState AoSampler : register(s1, space2);
+GPU_BIND_T(2, 2) Texture2D<float4> Bloom : register(t2, space2);
+GPU_BIND_S(2, 2) SamplerState BloomSampler : register(s2, space2);
+GPU_BIND_T(3, 2) Texture2D<float4> Lut : register(t3, space2);
+GPU_BIND_S(3, 2) SamplerState LutSampler : register(s3, space2);
 
-cbuffer ComposeData : register(b0, space3)
+GPU_BIND_B(0, 3) cbuffer ComposeData : register(b0, space3)
 {
     float exposure;
     float ao_strength;
@@ -249,6 +337,11 @@ float4 compose_fs(ComposeInput input) : SV_Target0
     uint width, height;
     Hdr.GetDimensions(width, height);
     float2 uv = input.position.xy / float2(width, height);
+    
+
+    if (exposure < 0.0f) 
+        return float4(saturate(Hdr.SampleLevel(HdrSampler, uv, 0.0f).rgb), 1.0f);
+
 
     float3 hdr = Hdr.SampleLevel(HdrSampler, uv, 0.0f).rgb * exposure;
     float ao = Ao.SampleLevel(AoSampler, uv, 0.0f).r;

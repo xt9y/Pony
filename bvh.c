@@ -7,6 +7,8 @@
 #include <string.h>
 
 #define BVH_LEAF_TRIANGLES 4u
+#define BVH_MAX_LEAF_TRIANGLES 8u
+#define BVH_SAH_BINS 16u
 #define BVH_EPSILON 1.0e-6f
 
 typedef struct build_tri {
@@ -135,6 +137,79 @@ static uint32_t partition_range(build_tri *tris, uint32_t first, uint32_t count,
 
 }
 
+typedef struct sah_bin {
+    vec3 min, max;
+    uint32_t count;
+} sah_bin;
+
+static void sah_include(sah_bin *bin, vec3 lo, vec3 hi) {
+    if (!bin->count++) {
+        bin->min = lo;
+        bin->max = hi;
+        return;
+    }
+    bin->min = v3(fminf(bin->min.x, lo.x), fminf(bin->min.y, lo.y), fminf(bin->min.z, lo.z));
+    bin->max = v3(fmaxf(bin->max.x, hi.x), fmaxf(bin->max.y, hi.y), fmaxf(bin->max.z, hi.z));
+}
+
+static float surface_area(vec3 lo, vec3 hi) {
+    vec3 d = v3_sub(hi, lo);
+    return 2.0f * (d.x * d.y + d.y * d.z + d.z * d.x);
+}
+
+static bool sah_split(const build_tri *tris, uint32_t first, uint32_t count,
+                      vec3 bmin, vec3 bmax, vec3 cmin, vec3 cmax,
+                      int *best_axis, float *best_position) {
+    float parent_area = surface_area(bmin, bmax);
+    if (parent_area <= BVH_EPSILON) return false;
+    float best_cost = (float)count;
+    bool found = false;
+    for (int axis = 0; axis < 3; ++axis) {
+        float lo = axis_value(cmin, axis);
+        float span = axis_value(cmax, axis) - lo;
+        if (span <= BVH_EPSILON) continue;
+        sah_bin bins[BVH_SAH_BINS] = {0};
+        sah_bin prefix[BVH_SAH_BINS] = {0};
+        sah_bin suffix[BVH_SAH_BINS] = {0};
+        for (uint32_t i = 0; i < count; ++i) {
+            const build_tri *tri = &tris[first + i];
+            uint32_t bin = (uint32_t)((axis_value(tri->centroid, axis) - lo) *
+                                       (float)BVH_SAH_BINS / span);
+            if (bin >= BVH_SAH_BINS) bin = BVH_SAH_BINS - 1u;
+            sah_include(&bins[bin], tri->min, tri->max);
+        }
+        for (uint32_t i = 0; i < BVH_SAH_BINS; ++i) {
+            prefix[i] = i ? prefix[i - 1u] : (sah_bin){0};
+            if (bins[i].count) {
+                uint32_t n = bins[i].count;
+                sah_include(&prefix[i], bins[i].min, bins[i].max);
+                prefix[i].count += n - 1u;
+            }
+            uint32_t j = BVH_SAH_BINS - 1u - i;
+            suffix[j] = i ? suffix[j + 1u] : (sah_bin){0};
+            if (bins[j].count) {
+                uint32_t n = bins[j].count;
+                sah_include(&suffix[j], bins[j].min, bins[j].max);
+                suffix[j].count += n - 1u;
+            }
+        }
+        for (uint32_t i = 0; i + 1u < BVH_SAH_BINS; ++i) {
+            if (!prefix[i].count || !suffix[i + 1u].count) continue;
+            float cost = 1.0f +
+                (surface_area(prefix[i].min, prefix[i].max) * prefix[i].count +
+                 surface_area(suffix[i + 1u].min, suffix[i + 1u].max) * suffix[i + 1u].count) /
+                parent_area;
+            if (cost < best_cost) {
+                best_cost = cost;
+                *best_axis = axis;
+                *best_position = lo + span * (float)(i + 1u) / (float)BVH_SAH_BINS;
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
 static bool build_node(bvh *tree, build_tri *tris, uint32_t node_index, uint32_t first, uint32_t count) {
     vec3 bmin, bmax, cmin, cmax;
     range_bounds(tris, first, count, &bmin, &bmax, &cmin, &cmax);
@@ -153,19 +228,23 @@ static bool build_node(bvh *tree, build_tri *tris, uint32_t node_index, uint32_t
         return true;
     }
 
-    const vec3 extent = v3_sub(cmax, cmin);
     int axis = 0;
-    if (extent.y > extent.x) axis = 1;
-    if (axis_value(extent, 2) > axis_value(extent, axis)) axis = 2;
-
-    const float lo = axis_value(cmin, axis);
-    const float hi = axis_value(cmax, axis);
-    uint32_t middle;
-
-    if (hi - lo <= BVH_EPSILON) {
-        middle = first + count / 2u;
-    } else {
-        middle = partition_range(tris, first, count, axis, (lo + hi) * 0.5f);
+    float split = 0.0f;
+    bool found = sah_split(tris, first, count, bmin, bmax, cmin, cmax,
+                           &axis, &split);
+    if (!found && count <= BVH_MAX_LEAF_TRIANGLES) {
+        node->meta[2] = first;
+        node->meta[3] = count;
+        return true;
+    }
+    uint32_t middle = found ? partition_range(tris, first, count, axis, split) : first;
+    if (middle == first || middle == first + count) {
+        const vec3 extent = v3_sub(cmax, cmin);
+        axis = extent.y > extent.x ? 1 : 0;
+        if (axis_value(extent, 2) > axis_value(extent, axis)) axis = 2;
+        float lo = axis_value(cmin, axis), hi = axis_value(cmax, axis);
+        if (hi - lo > BVH_EPSILON)
+            middle = partition_range(tris, first, count, axis, lo + (hi - lo) * 0.5f);
         if (middle == first || middle == first + count) middle = first + count / 2u;
     }
 
@@ -195,6 +274,143 @@ static void thread_node(bvh *tree, uint32_t node_index, uint32_t next) {
     node->meta[1] = next;
     thread_node(tree, left, right);
     thread_node(tree, right, next);
+}
+
+static bool trace_box(dm_trace_ray ray, const bvh_node *node, float max_t) {
+
+    float lo = ray.tmin;
+    float hi = fminf(ray.tmax, max_t);
+    const float origin[3] = {ray.origin.x, ray.origin.y, ray.origin.z};
+    const float direction[3] = {ray.direction.x, ray.direction.y, ray.direction.z};
+
+    if (hi < lo) return false;
+
+    for (uint32_t axis = 0; axis < 3u; ++axis) {
+
+        if (fabsf(direction[axis]) < 1.0e-7f) {
+            if (origin[axis] < node->min[axis] || origin[axis] > node->max[axis]) return false;
+            continue;
+        }
+
+        const float inverse = 1.0f / direction[axis];
+        float a = (node->min[axis] - origin[axis]) * inverse;
+        float b = (node->max[axis] - origin[axis]) * inverse;
+        if (a > b) {
+            const float t = a;
+            a = b;
+            b = t;
+        }
+        lo = fmaxf(lo, a);
+        hi = fminf(hi, b);
+        if (lo > hi) return false;
+    }
+
+    return hi >= ray.tmin;
+}
+
+static bool trace_triangle(dm_trace_ray ray, const bvh_triangle *tri,
+                           float max_t, float *hit_t) {
+
+    const vec3 a = v3(tri->a[0], tri->a[1], tri->a[2]);
+    const vec3 e1 = v3_sub(v3(tri->b[0], tri->b[1], tri->b[2]), a);
+    const vec3 e2 = v3_sub(v3(tri->c[0], tri->c[1], tri->c[2]), a);
+    const vec3 p = v3_cross(ray.direction, e2);
+    const float determinant = v3_dot(e1, p);
+    if (fabsf(determinant) < 1.0e-7f) return false;
+
+    const float inverse = 1.0f / determinant;
+    const vec3 s = v3_sub(ray.origin, a);
+    const float u = v3_dot(s, p) * inverse;
+    if (u < 0.0f || u > 1.0f) return false;
+
+    const vec3 q = v3_cross(s, e1);
+    const float v = v3_dot(ray.direction, q) * inverse;
+    if (v < 0.0f || u + v > 1.0f) return false;
+
+    const float t = v3_dot(e2, q) * inverse;
+    if (t <= ray.tmin || t >= fminf(ray.tmax, max_t)) return false;
+
+    *hit_t = t;
+    return true;
+}
+
+bool dm_trace_any(const bvh *tree, dm_trace_ray ray) {
+
+    if (!tree || !tree->nodes || !tree->triangles || !tree->node_count ||
+        !tree->triangle_count || ray.tmax <= ray.tmin) return false;
+
+    uint32_t node_index = 0u;
+    while (node_index != UINT32_MAX) {
+
+        const bvh_node *node = &tree->nodes[node_index];
+        if (!trace_box(ray, node, ray.tmax)) {
+            node_index = node->meta[1];
+            continue;
+        }
+
+        if (node->meta[3]) {
+            for (uint32_t i = 0; i < node->meta[3]; ++i) {
+                float t;
+                if (trace_triangle(ray, &tree->triangles[node->meta[2] + i], ray.tmax, &t))
+                    return true;
+            }
+            node_index = node->meta[1];
+        } else {
+            node_index = node->meta[0];
+        }
+    }
+
+    return false;
+}
+
+bool dm_trace_closest(const bvh *tree, dm_trace_ray ray, dm_trace_hit *hit) {
+
+    if (!hit) return false;
+    *hit = (dm_trace_hit){.t = ray.tmax, .triangle = UINT32_MAX};
+    if (!tree || !tree->nodes || !tree->triangles || !tree->node_count ||
+        !tree->triangle_count || ray.tmax <= ray.tmin) return false;
+
+    uint32_t node_index = 0u;
+    float closest = ray.tmax;
+    bool found = false;
+    dm_trace_hit best = {0};
+
+    while (node_index != UINT32_MAX) {
+
+        const bvh_node *node = &tree->nodes[node_index];
+        if (!trace_box(ray, node, closest)) {
+            node_index = node->meta[1];
+            continue;
+        }
+
+        if (node->meta[3]) {
+            for (uint32_t i = 0; i < node->meta[3]; ++i) {
+                const uint32_t triangle = node->meta[2] + i;
+                const bvh_triangle *tri = &tree->triangles[triangle];
+                float t;
+                if (!trace_triangle(ray, tri, closest, &t)) continue;
+
+                closest = t;
+                vec3 normal = v3_normalize(v3(tri->normal[0], tri->normal[1], tri->normal[2]));
+                if (v3_dot(normal, ray.direction) > 0.0f)
+                    normal = v3_scale(normal, -1.0f);
+
+                best.t = t;
+                best.normal = normal;
+                best.albedo = v3(fminf(fmaxf(tri->a[3], 0.0f), 1.0f),
+                                 fminf(fmaxf(tri->b[3], 0.0f), 1.0f),
+                                 fminf(fmaxf(tri->c[3], 0.0f), 1.0f));
+                best.triangle = triangle;
+                found = true;
+            }
+            node_index = node->meta[1];
+        } else {
+            node_index = node->meta[0];
+        }
+    }
+
+    if (found) *hit = best;
+    return found;
 }
 
 void bvh_free(bvh *tree) {

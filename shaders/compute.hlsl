@@ -1,11 +1,11 @@
 #if defined(BUILD_VOLUME_CS)
-Texture2D<float4> NormalDepth : register(t0, space0);
-SamplerState DepthSampler : register(s0, space0);
+GPU_BIND_T(0, 0) Texture2D<float4> NormalDepth : register(t0, space0);
+GPU_BIND_S(0, 0) SamplerState DepthSampler : register(s0, space0);
 struct VolumeProbe { float4 position; float4 coefficient[9]; };
-StructuredBuffer<VolumeProbe> VolumeProbes : register(t1, space0);
-StructuredBuffer<float> SunBeams : register(t2, space0);
-RWTexture2D<float4> Output : register(u0, space1);
-cbuffer VolumeData : register(b0, space2)
+GPU_BIND_T(1, 0) StructuredBuffer<VolumeProbe> VolumeProbes : register(t1, space0);
+GPU_BIND_T(2, 0) StructuredBuffer<float> SunBeams : register(t2, space0);
+GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
+GPU_BIND_B(0, 2) cbuffer VolumeData : register(b0, space2)
 {
     float4 eye_density;
     float4 right_tan;
@@ -61,7 +61,8 @@ float integrate_beam_interval(float3 ray_origin, float3 ray_direction,
         float2 axis_weight = lerp(1.0f - fraction, fraction, float2(x, y));
         float weight = axis_weight.x * axis_weight.y;
         float blocker = SunBeams[beam_shadow_index((uint)index.x, (uint)index.y, beam_depth)];
-        bool interval_has_light = blocker < -1.0e20f || interval_max_z > blocker + blocker_guard;
+        bool interval_has_light = blocker >= -1.0e20f && interval_max_z > blocker + blocker_guard;
+        // bool interval_has_light = blocker < -1.0e20f || interval_max_z > blocker + blocker_guard;
         raw_visibility += interval_has_light ? weight : 0.0f;
     }
 
@@ -85,6 +86,7 @@ float integrate_beam_interval(float3 ray_origin, float3 ray_direction,
         float a = t0;
         float b = t1;
         float blocker = SunBeams[beam_shadow_index((uint)index.x, (uint)index.y, beam_depth)];
+        if (blocker < -1.0e20f) continue;
 
         if (blocker >= -1.0e20f)
         {
@@ -231,7 +233,8 @@ float integrate_sun_grid(float3 world_origin, float3 world_direction,
     return integrated;
 }
 
-float3 volume_radiance(float3 p)
+float3 volume_radiance(float3 p, float3 surface_position,
+                       float3 surface_normal, bool has_surface)
 {
     float3 coord = clamp((p - grid_origin_spacing.xyz) / grid_origin_spacing.w,
                          0.0f, float3(grid_dims_width.xyz) - 1.0f);
@@ -247,6 +250,12 @@ float3 volume_radiance(float3 p)
         float weight = w.x*w.y*w.z;
         VolumeProbe probe = VolumeProbes[cell.x + grid_dims_width.x *
             (cell.y + grid_dims_width.y * cell.z)];
+        // Do not interpolate light from a probe behind the visible surface.
+        // Probes embedded in thick walls or roofs can otherwise brighten fog
+        // in front of those surfaces even though their own validity is true.
+        if (has_surface && dot(probe.position.xyz - surface_position,
+                               surface_normal) < -0.01f)
+            continue;
         weight *= probe.position.w;
         float3 indirect = probe.coefficient[0].rgb * 0.2820947918f;
         radiance += max(indirect, 0.0f) * weight;
@@ -267,7 +276,15 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     float3 maximum = minimum + grid_origin_spacing.w *
         float3(grid_dims_width.xyz - 1u);
     float enter = 0.0f, leave = 10000.0f;
+
+    // [unroll] for (uint axis = 0; axis < 3u; ++axis) {
+    //
+    //     if (abs(direction[axis]) < 1.0e-6f) {
+    //         if (eye_density[axis] < minimum[axis] ||
+    //             eye_density[axis] > maximum[axis]) { Output[id.xy] = float4(0,0,0,1); return; }
+    //     } else {
     [unroll] for (uint axis = 0; axis < 3u; ++axis) {
+
         if (abs(direction[axis]) < 1.0e-6f) {
             if (eye_density[axis] < minimum[axis] ||
                 eye_density[axis] > maximum[axis]) { Output[id.xy] = float4(0,0,0,1); return; }
@@ -278,9 +295,122 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
             leave = min(leave, max(a,b));
         }
     }
-    float depth = NormalDepth.SampleLevel(DepthSampler, uv, 0.0f).w;
+
+
+    float4 surface = NormalDepth.SampleLevel(DepthSampler, uv, 0.0f);
+    float depth = surface.w;
+
+    // if (height_debug.y == 3u) {
+    //     if (depth <= 0.0f) {
+    //         Output[id.xy] = float4(0, 0, 0, 1);
+    //         return;
+    //     }
+    //
+    //     float distance = depth / max(dot(direction, forward_g.xyz), 0.01f);
+    //     float3 reconstructed = eye_density.xyz + direction * distance;
+    //     float error = length(reconstructed - surface.xyz);
+    //
+    //     Output[id.xy] = error < 0.2f
+    //         ? float4(0, 1, 0, 1)   // camera ray reaches the actual surface
+    //         : float4(1, 0, 0, 1);  // depth/ray reconstruction disagrees
+    //     return;
+    // }
+
+    // if (height_debug.y == 3u) {
+    //     Output[id.xy] = depth > 0.0f
+    //         ? float4(surface.r, 0, 0, 1)
+    //         : float4(0, 0, 0, 1);
+    //     return;
+    // } 
+    // if (height_debug.y == 3u) {
+    //     if (depth <= 0.0f) {
+    //         Output[id.xy] = float4(0, 0, 0, 1);
+    //         return;
+    //     }
+    //     float mismatch = length(surface.xyz - eye_density.xyz);
+    //     Output[id.xy] = float4(saturate(mismatch * 5.0f), 0, 0, 1);
+    //     return;
+    // }
+
+    // if (height_debug.y == 3u) {
+    //     float mismatch = length(surface.xyz - forward_g.xyz);
+    //     Output[id.xy] = float4(saturate(mismatch * 5.0f), 0, 0, 1);
+    //     // Output[id.xy] = float4(surface.rgb, 1.0f);
+    //     return;
+    // }
+
+
+    // if (height_debug.y == 3u) {
+    //     if (depth <= 0.0f) {
+    //         Output[id.xy] = float4(0, 0, 0, 1);
+    //         return;
+    //     }
+    //
+    //
+    //     // float3 actual = surface.xyz - eye_density.xyz;
+    //
+    //     float3 actual = surface.xyz;
+    //
+    //
+    //     float depth_error = abs(depth - dot(actual, forward_g.xyz));
+    //     float direction_error = length(direction - normalize(actual));
+    //
+    //     Output[id.xy] = float4(
+    //         saturate(depth_error * 2.0f),      // red: view-depth disagreement
+    //         0.0f,
+    //         saturate(direction_error * 25.0f), // blue: camera-ray disagreement
+    //         1.0f);
+    //     return;
+    // }
+
+
+    // if (height_debug.y == 3u) {
+    //
+    //     if (depth <= 0.0f) {
+    //         Output[id.xy] = float4(0, 0, 0, 1);
+    //         return;
+    //     }
+    //
+    //     float surface_t = depth / max(dot(direction, forward_g.xyz), 0.01f);
+    //     float3 p = eye_density.xyz + direction * max(surface_t - 0.02f, 0.0f);
+    //     float3 sun = normalize(sun_intensity.xyz);
+    //     float3 u = normalize(cross(float3(0, 1, 0), sun));
+    //     float3 v = cross(sun, u);
+    //
+    //     float2 xy = float2(dot(p, u), dot(p, v));
+    //     int2 pixel = clamp(
+    //         int2(floor((xy - beam_origin.xy) / beam_step.xy)),
+    //         int2(0, 0), int2(63, 63));
+    //
+    //     float blocker = SunBeams[64u * 64u * height_debug.z +
+    //                              (uint)pixel.x + 64u * (uint)pixel.y];
+    //
+    //     // Magenta: no blocker. Red: blocker says ceiling is sunlit.
+    //     // Green: ceiling is correctly shadowed at its own position.
+    //     Output[id.xy] = blocker < -1.0e20f ? float4(1, 0, 1, 1) :
+    //         dot(p, sun) > blocker + 0.02f ? float4(1, 0, 0, 1) :
+    //                                         float4(0, 1, 0, 1);
+    //     return;
+    // }
+
+    // if (height_debug.y == 3u) {
+    //     Output[id.xy] = depth > 0.0f
+    //         ? float4(0.0f, 1.0f, 0.0f, 1.0f)  // surface depth exists
+    //         : float4(1.0f, 0.0f, 0.0f, 1.0f); // shader sees sky/no surface
+    //     return;
+    // }
+
+
     if (depth > 0.0f) leave = min(leave, depth / max(dot(direction,forward_g.xyz),0.01f));
     if (leave <= enter) { Output[id.xy] = float4(0,0,0,1); return; }
+    float3 surface_position = eye_density.xyz + direction *
+        (depth / max(dot(direction, forward_g.xyz), 0.01f));
+    float3 view_normal = normalize(surface.xyz * 2.0f - 1.0f);
+    float3 surface_normal = normalize(normalize(right_tan.xyz) * view_normal.x +
+                                      normalize(up_tan.xyz) * view_normal.y -
+                                      forward_g.xyz * view_normal.z);
+    if (dot(eye_density.xyz - surface_position, surface_normal) < 0.0f)
+        surface_normal = -surface_normal;
     float step_size = (leave-enter) * 0.25f;
     float3 sum = 0.0f;
     float sun_fraction = 0.0f;
@@ -289,7 +419,9 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     [unroll] for (uint i = 0; i < 4u; ++i) {
         float t = enter + (float(i) + 0.5f) * step_size;
         float integral = probe_remaining * (1.0f - probe_transmission);
-        sum += volume_radiance(eye_density.xyz + direction * t) * integral * 0.15f;
+        sum += volume_radiance(eye_density.xyz + direction * t,
+                               surface_position, surface_normal, depth > 0.0f) *
+               integral * 0.15f;
         probe_remaining *= probe_transmission;
     }
     float g = forward_g.w;
@@ -299,15 +431,126 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     float sun_integral = integrate_sun_grid(eye_density.xyz, direction, enter, leave,
                                             eye_density.w, sun_fraction);
     sum += sun_integral * sun_intensity.w * hg * float3(1.0f, 0.94f, 0.84f);
-    if (height_debug.y == 3u) {
-        Output[id.xy] = float4(sun_fraction, sun_fraction, sun_fraction, 1.0f);
-        return;
-    }
-    if (height_debug.y == 4u) {
-        Output[id.xy] = float4(sum, 1.0f);
-        return;
-    }
+    // float T = exp(-eye_density.w * (leave - enter));
+    // Output[id.xy] = float4(T.xxx, 1.0f);
+    // return;
     Output[id.xy] = float4(sum, exp(-eye_density.w * (leave-enter)));
+}
+#elif defined(BUILD_PROBE_CS)
+#define probe_cs probe_cs_base
+#include "compute_base.hlsl"
+#undef probe_cs
+
+groupshared uint ProbeStableChecks;
+
+[numthreads(64, 1, 1)]
+void probe_cs(uint3 group_id : SV_GroupID, uint3 local_id : SV_GroupThreadID)
+{
+    uint probe_index = group_id.x;
+    uint lane = local_id.x;
+    float4 input = ProbePositions[probe_index];
+    if (lane == 0u) {
+        ProbeValid = input.w;
+        ProbeSampleCount = item_count;
+        ProbeContinue = 1u;
+        ProbeStableChecks = 0u;
+        float3 axes[6] = {
+            float3(1,0,0), float3(-1,0,0), float3(0,1,0),
+            float3(0,-1,0), float3(0,0,1), float3(0,0,-1)
+        };
+        for (uint axis = 0; axis < 6u && ProbeValid > 0.0f; ++axis) {
+            TraceRay ray = make_trace_ray(input.xyz, axes[axis], bake_params.x, 0.15f);
+            TraceHit hit;
+            if (trace_closest(ray, hit))
+                ProbeValid = 0.0f;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    float3 partial[9];
+    [unroll] for (uint j = 0; j < 9; ++j) partial[j] = 0.0f;
+    float4 sh_mean = 0.0f;
+    float4 sh_square = 0.0f;
+    uint seed = hash_u32(probe_index * 9781u + lane * 6271u + iteration * 13007u);
+
+    if (ProbeValid > 0.0f) {
+        for (uint block = 0u; block < item_count && ProbeContinue != 0u; block += 64u) {
+            uint sample_index = block + lane;
+            if (sample_index < item_count) {
+                float3 d = uniform_sphere(seed);
+                TraceRay ray = make_trace_ray(input.xyz + d * bake_params.x,
+                                              d, bake_params.x, 1.0e20f);
+                TraceHit hit;
+                float3 incoming;
+                if (trace_closest(ray, hit)) {
+                    float3 position = ray.origin + ray.direction * hit.t;
+                    incoming = trace_path(position, hit.normal, seed) * (hit.albedo / PI);
+                } else {
+                    incoming = sky_radiance(d);
+                }
+                float sh[9];
+                probe_basis(d, sh);
+                [unroll] for (uint j = 0; j < 9; ++j)
+                    partial[j] += incoming * sh[j];
+                float luma = dot(incoming, float3(0.2126f, 0.7152f, 0.0722f));
+                float4 sh_value = luma * float4(sh[0], sh[1], sh[2], sh[3]);
+                sh_mean += sh_value;
+                sh_square += sh_value * sh_value;
+            }
+
+            if ((block + 64u) % 128u == 0u && block + 64u >= 256u &&
+                block + 64u < item_count) {
+                ProbeSHMeans[lane] = sh_mean;
+                ProbeSHSquares[lane] = sh_square;
+                GroupMemoryBarrierWithGroupSync();
+                if (lane == 0u) {
+                    float4 total_mean = 0.0f;
+                    float4 total_square = 0.0f;
+                    for (uint i = 0u; i < 64u; ++i) {
+                        total_mean += ProbeSHMeans[i];
+                        total_square += ProbeSHSquares[i];
+                    }
+                    float sample_count = (float)(block + 64u);
+                    float4 mean = total_mean / sample_count;
+                    float4 variance = max(total_square / sample_count - mean * mean, 0.0f);
+                    float4 stderr = sqrt(variance / sample_count);
+                    float worst = max(max(stderr.x, stderr.y), max(stderr.z, stderr.w));
+                    bool stable = worst < 0.01f + 0.025f * abs(mean.x);
+                    ProbeStableChecks = stable ? ProbeStableChecks + 1u : 0u;
+                    if (ProbeStableChecks >= 2u) {
+                        ProbeSampleCount = block + 64u;
+                        ProbeContinue = 0u;
+                    }
+                }
+                GroupMemoryBarrierWithGroupSync();
+            }
+        }
+    }
+
+    [unroll] for (uint j = 0; j < 9; ++j)
+        ProbePartial[lane][j] = partial[j];
+    GroupMemoryBarrierWithGroupSync();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            [unroll] for (uint j = 0; j < 9; ++j)
+                ProbePartial[lane][j] += ProbePartial[lane + stride][j];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    if (lane < 9u) {
+        float scale = 4.0f * PI / max((float)ProbeSampleCount, 1.0f);
+        float3 sun = normalize(sun_direction_intensity.xyz);
+        TraceRay sun_ray = make_trace_ray(input.xyz + sun * bake_params.x,
+                                          sun, bake_params.x, 1.0e20f);
+        float sun_visible = lane == 1u && ProbeValid > 0.0f &&
+            !trace_any(sun_ray) ? 1.0f : 0.0f;
+        float metadata = lane == 0u ? ProbeValid :
+                         lane == 1u ? sun_visible :
+                         lane == 2u ? (float)ProbeSampleCount : 0.0f;
+        ProbeCoefficients[probe_index * 9u + lane] =
+            float4(ProbePartial[0][lane] * scale, metadata);
+    }
 }
 #else
 #include "compute_base.hlsl"
