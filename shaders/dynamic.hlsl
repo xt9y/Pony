@@ -104,7 +104,7 @@ GPU_BIND_B(0, 2) cbuffer GiData : register(b0, space2)
 };
 
 static const uint INVALID_NODE = 0xffffffffu;
-static const uint EMITTER_VISIBILITY_SAMPLES = 8u;
+static const uint EMITTER_VISIBILITY_SAMPLES = 1u;
 
 uint hash_u32(uint x)
 {
