@@ -27,8 +27,8 @@ struct SurfaceProbe { float4 position; float4 coefficient[9]; };
 GPU_BIND_T(8, 2) StructuredBuffer<SurfaceProbe> SurfaceProbes : register(t8, space2);
 GPU_BIND_T(9, 2) StructuredBuffer<float> SurfaceBeams : register(t9, space2);
 GPU_BIND_T(10, 2) Texture2D<float4> DynamicOverlay : register(t10, space2);
-GPU_BIND_T(11, 2) StructuredBuffer<uint> StaticTraceTriangles : register(t11, space2);
-GPU_BIND_T(12, 2) StructuredBuffer<uint> RealtimeTrace : register(t12, space2);
+GPU_BIND_T(11, 2) ByteAddressBuffer StaticTraceTriangles : register(t11, space2);
+GPU_BIND_T(12, 2) ByteAddressBuffer RealtimeTrace : register(t12, space2);
 
 GPU_BIND_B(0, 1) cbuffer Camera : register(b0, space1)
 {
@@ -116,17 +116,26 @@ float3 fresnel_schlick(float cos_theta, float3 f0)
     return f0 + (1.0f - f0) * pow(1.0f - saturate(cos_theta), 5.0f);
 }
 
+uint rt_word(uint index)
+{
+    return RealtimeTrace.Load(index * 4u);
+}
+
+uint source_word(uint index)
+{
+    return StaticTraceTriangles.Load(index * 4u);
+}
+
 bool rt_ready()
 {
-    uint count = 0u;
-    uint stride = 0u;
-    RealtimeTrace.GetDimensions(count, stride);
-    return count >= RT_HEADER_WORDS && RealtimeTrace[0] == RT_MAGIC;
+    uint bytes = 0u;
+    RealtimeTrace.GetDimensions(bytes);
+    return bytes >= RT_HEADER_WORDS * 4u && rt_word(0u) == RT_MAGIC;
 }
 
 float rt_float(uint index)
 {
-    return asfloat(RealtimeTrace[index]);
+    return asfloat(rt_word(index));
 }
 
 float3 rt_float3(uint index)
@@ -136,7 +145,7 @@ float3 rt_float3(uint index)
 
 float source_float(uint index)
 {
-    return asfloat(StaticTraceTriangles[index]);
+    return asfloat(source_word(index));
 }
 
 float3 source_float3(uint index)
@@ -150,13 +159,13 @@ bool rt_emitter_point(out float3 light_position, out float3 light_normal)
     light_normal = 0.0f;
     if (!rt_ready()) return false;
 
-    uint source_words = 0u;
-    uint source_stride = 0u;
-    StaticTraceTriangles.GetDimensions(source_words, source_stride);
-    uint triangle_count = RealtimeTrace[9];
-    float total_weight = asfloat(RealtimeTrace[10]);
+    uint source_bytes = 0u;
+    StaticTraceTriangles.GetDimensions(source_bytes);
+    uint source_words = source_bytes / 4u;
+    uint triangle_count = rt_word(9u);
+    float total_weight = asfloat(rt_word(10u));
     if (triangle_count == 0u || total_weight <= 0.0f ||
-        (uint64_t)triangle_count * RT_STATIC_TRIANGLE_WORDS > source_words)
+        triangle_count > source_words / RT_STATIC_TRIANGLE_WORDS)
         return false;
 
     float target = total_weight * 0.5f;
@@ -243,10 +252,10 @@ bool rt_triangle(float3 origin, float3 direction, float tmin, float tmax,
 
 bool rt_static_any(float3 origin, float3 direction, float tmin, float tmax)
 {
-    uint node_count = RealtimeTrace[1];
-    uint triangle_count = RealtimeTrace[2];
-    uint node_offset = RealtimeTrace[3];
-    uint triangle_offset = RealtimeTrace[4];
+    uint node_count = rt_word(1u);
+    uint triangle_count = rt_word(2u);
+    uint node_offset = rt_word(3u);
+    uint triangle_offset = rt_word(4u);
     if (node_count == 0u || triangle_count == 0u) return false;
 
     uint node = 0u;
@@ -255,10 +264,10 @@ bool rt_static_any(float3 origin, float3 direction, float tmin, float tmax)
         uint base = node_offset + node * RT_NODE_WORDS;
         float3 bmin = rt_float3(base + 0u);
         float3 bmax = rt_float3(base + 4u);
-        uint left = RealtimeTrace[base + 8u];
-        uint next = RealtimeTrace[base + 9u];
-        uint first = RealtimeTrace[base + 10u];
-        uint count = RealtimeTrace[base + 11u];
+        uint left = rt_word(base + 8u);
+        uint next = rt_word(base + 9u);
+        uint first = rt_word(base + 10u);
+        uint count = rt_word(base + 11u);
         if (!rt_box(origin, direction, tmin, tmax, bmin, bmax))
         {
             node = next;
@@ -287,10 +296,10 @@ bool rt_static_any(float3 origin, float3 direction, float tmin, float tmax)
 
 bool rt_dynamic_any(float3 origin, float3 direction, float tmin, float tmax)
 {
-    uint object_count = RealtimeTrace[5];
-    uint object_offset = RealtimeTrace[6];
-    uint triangle_count = RealtimeTrace[7];
-    uint triangle_offset = RealtimeTrace[8];
+    uint object_count = rt_word(5u);
+    uint object_offset = rt_word(6u);
+    uint triangle_count = rt_word(7u);
+    uint triangle_offset = rt_word(8u);
 
     for (uint object_index = 0u; object_index < object_count; ++object_index)
     {
@@ -299,8 +308,8 @@ bool rt_dynamic_any(float3 origin, float3 direction, float tmin, float tmax)
         float3 bmax = rt_float3(object + 3u);
         if (!rt_box(origin, direction, tmin, tmax, bmin, bmax)) continue;
 
-        uint first = RealtimeTrace[object + 6u];
-        uint count = RealtimeTrace[object + 7u];
+        uint first = rt_word(object + 6u);
+        uint count = rt_word(object + 7u);
         for (uint i = 0u; i < count && first + i < triangle_count; ++i)
         {
             uint tri = triangle_offset + (first + i) * RT_DYNAMIC_TRIANGLE_WORDS;
@@ -321,7 +330,7 @@ float realtime_emitter_visibility(float3 position, float3 normal, bool include_s
 
     float3 delta = light_position - position;
     float distance2 = dot(delta, delta);
-    float epsilon = max(asfloat(RealtimeTrace[11]), 1.0e-4f);
+    float epsilon = max(asfloat(rt_word(11u)), 1.0e-4f);
     if (distance2 <= epsilon * epsilon) return 1.0f;
 
     float distance = sqrt(distance2);
