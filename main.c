@@ -74,10 +74,13 @@ int main(int argc, char **argv) {
     SKY sky = {.zenith = {0.22f, 0.42f, 0.78f}, .horizon = {0.68f, 0.76f, 0.88f}, .intensity = 1.0f};
     VOLUMETRICS_LIGHTING volumetrics = {.density = 0.045f,
                                          .anisotropy = 0.55f,
-                                         .indirect_intensity = 0.15f,
+                                         .probe_intensity = 0.15f,
+                                         .emissive_probe_intensity = 1.0f,
                                          .max_distance = 10000.0f,
                                          .center_radius = 0.50f,
                                          .middle_radius = 0.82f,
+                                         .center_transition_width = 0.08f,
+                                         .middle_transition_width = 0.08f,
                                          .probe_spacing = 4.0f,
                                          .center_steps = 4u,
                                          .middle_steps = 3u,
@@ -186,6 +189,7 @@ int main(int argc, char **argv) {
     const float volume_bake_settings[] = {volumetrics.probe_spacing,
                                           (float)volumetrics.probe_samples,
                                           (float)volumetrics.emissive_samples,
+                                          volumetrics.emissive_probe_intensity,
                                           9.0f};
     uint64_t volume_hash = hash_bytes(scene_hash, volume_bake_settings, sizeof(volume_bake_settings));
 

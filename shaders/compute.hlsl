@@ -515,7 +515,8 @@ void probe_cs(uint3 group_id : SV_GroupID, uint3 local_id : SV_GroupThreadID)
                 float3 incoming;
                 if (trace_closest(ray, hit)) {
                     float3 position = ray.origin + ray.direction * hit.t;
-                    incoming = trace_path(position, hit.normal, seed) * (hit.albedo / PI);
+                    incoming = hit.emissive * max(emissive_data.z, 0.0f) +
+                    trace_path(position, hit.normal, seed) * (hit.albedo / PI);
                 } else {
                     incoming = sky_radiance(d);
                 }

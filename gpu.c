@@ -97,6 +97,12 @@ typedef struct VOLUME_UNIFORMS {
     Uint32 volume_quality[4], volume_strides[4];
 } VOLUME_UNIFORMS;
 
+typedef struct VOLUME_COMPOSE_UNIFORMS {
+    Uint32 width, height, debug_view, bypass_volume;
+    float volume_radii[4];
+    Uint32 volume_strides[4];
+} VOLUME_COMPOSE_UNIFORMS;
+
 struct RENDER_MATERIAL {
     GLTF_MATERIAL data;
     NriTexture *base_color;
@@ -2380,7 +2386,7 @@ static BAKE_UNIFORMS bake_data(RENDERER *r, Uint32 phase, Uint32 iteration, Uint
                            .bake_params = {r->bake_epsilon, 0.72f, sky.intensity, (float)r->lightmap_min_samples},
                            .probe_origin_spacing = {r->lightmap_probe_origin.x, r->lightmap_probe_origin.y, r->lightmap_probe_origin.z, r->lightmap_probe_spacing},
                            .probe_dims_mode = {r->lightmap_probe_count_x, r->lightmap_probe_count_y, r->lightmap_probe_count_z, 0u},
-                           .emissive_data = {r->bvh_emissive_weight, (float)r->bvh_triangle_count, 0.0f, 0.0f}};
+                           .emissive_data = {r->bvh_emissive_weight, (float)r->bvh_triangle_count, r->volumetrics.emissive_probe_intensity, 0.0f}};
 }
 
 static bool record_bake_pass(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, Uint32 phase, Uint32 iteration, Uint32 item_count,
@@ -2800,6 +2806,7 @@ typedef struct PROBE_WAVEFRONT_UNIFORMS {
     float sky_zenith[4];
     float sky_horizon[4];
     float bake_params[4];
+    float emissive_params[4];
     float beam_origin[4];
     float beam_step[4];
 } PROBE_WAVEFRONT_UNIFORMS;
@@ -3198,6 +3205,7 @@ static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(const BVH *tree, const BEAM
                                       .sky_zenith = {sky.zenith.x, sky.zenith.y, sky.zenith.z, 1.0f},
                                       .sky_horizon = {sky.horizon.x, sky.horizon.y, sky.horizon.z, 1.0f},
                                       .bake_params = {epsilon, 0.72f, sky.intensity, tree->emissive_weight},
+                                      .emissive_params = {volumetrics.emissive_probe_intensity, 0.0f, 0.0f, 0.0f},
                                       .beam_origin = {beams->origin.x, beams->origin.y, beams->origin.z, 0.0f},
                                       .beam_step = {beams->step.x, beams->step.y, beams->step.z, 0.0f}};
 }
@@ -3789,8 +3797,8 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
                                .height_debug = {fx->ao_height, fx->debug_view, beam_grid->depth, 0},
                                .beam_origin = {beam_grid->origin.x, beam_grid->origin.y, beam_grid->origin.z, 0},
                                .beam_step = {beam_grid->step.x, beam_grid->step.y, beam_grid->step.z, 0},
-                               .volume_params = {frame->volumetrics.density, frame->volumetrics.anisotropy, frame->volumetrics.indirect_intensity, frame->volumetrics.max_distance},
-                               .volume_radii = {frame->volumetrics.center_radius, frame->volumetrics.middle_radius, 0.0f, 0.0f},
+                               .volume_params = {frame->volumetrics.density, frame->volumetrics.anisotropy, frame->volumetrics.probe_intensity, frame->volumetrics.max_distance},
+                               .volume_radii = {frame->volumetrics.center_radius, frame->volumetrics.middle_radius, frame->volumetrics.center_transition_width, frame->volumetrics.middle_transition_width},
                                .volume_quality = {frame->volumetrics.center_steps, frame->volumetrics.middle_steps, frame->volumetrics.peripheral_steps, 0u},
                                .volume_strides = {frame->volumetrics.center_stride, frame->volumetrics.middle_stride, frame->volumetrics.peripheral_stride, 0u}};
 
@@ -3800,9 +3808,16 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
 
     r->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (fx->ao_width + 7u) / 8u, .workGroupNumY = (fx->ao_height + 7u) / 8u, .workGroupNumZ = 1});
 
-    const Uint32 dimensions[4] = {fx->width, fx->height, fx->debug_view, 0};
+    const VOLUME_COMPOSE_UNIFORMS compose = {
+        .width = fx->width,
+        .height = fx->height,
+        .debug_view = fx->debug_view,
+        .bypass_volume = 0u,
+        .volume_radii = {frame->volumetrics.center_radius, frame->volumetrics.middle_radius, frame->volumetrics.center_transition_width, frame->volumetrics.middle_transition_width},
+        .volume_strides = {frame->volumetrics.center_stride, frame->volumetrics.middle_stride, frame->volumetrics.peripheral_stride, 0u},
+    };
 
-    if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, dimensions, sizeof(dimensions))) return false;
+    if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, &compose, sizeof(compose))) return false;
 
     r->core.CmdSetPipeline(cmd, fx->volume_compose_pipeline);
 
@@ -3817,9 +3832,14 @@ static bool run_vision_only(FX_STATE *fx, NriCommandBuffer *cmd) {
     if (!fx || !fx->owner || !cmd) return false;
 
     RENDERER *r = fx->owner;
-    const Uint32 dimensions[4] = {fx->width, fx->height, fx->debug_view, 1u};
+    const VOLUME_COMPOSE_UNIFORMS compose = {
+        .width = fx->width,
+        .height = fx->height,
+        .debug_view = fx->debug_view,
+        .bypass_volume = 1u,
+    };
 
-    if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, dimensions, sizeof(dimensions))) return false;
+    if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, &compose, sizeof(compose))) return false;
 
     r->core.CmdSetPipeline(cmd, fx->volume_compose_pipeline);
 
