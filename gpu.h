@@ -77,6 +77,7 @@ typedef struct RENDER_FRAME {
     DIRECTIONAL_LIGHT sun;
     SKY sky;
     VOLUMETRICS_LIGHTING volumetrics;
+    PERIPHERAL_VISION vision;
     float tan_half_fov;
     float aspect;
 } RENDER_FRAME;

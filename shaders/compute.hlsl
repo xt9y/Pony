@@ -28,6 +28,7 @@ GPU_BIND_B(0, 2) cbuffer VolumeData : register(b0, space2)
     float4 beam_step;
     float4 volume_params;
     float4 volume_radii;
+    float4 volume_filter;
     uint4 volume_quality;
     uint4 volume_strides;
 };

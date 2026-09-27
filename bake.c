@@ -288,6 +288,7 @@ static bool bake_prepare_fast_components(BAKE_JOB *job, RENDERER *worker) {
     worker->sun.direction = v3_normalize(worker->sun.direction);
     worker->sky = job->sky;
     worker->volumetrics = job->volumetrics;
+
     if (v3_len_sq(worker->sun.direction) <= 0.0f) return false;
 
     bool good = bvh_build(&tree, job->scene, job->visual);
@@ -341,8 +342,20 @@ static int SDLCALL bake_thread_main(void *userdata) {
 
     bake_set_phase(BAKE_PHASE_LIGHTMAP, 0u, 0u, 0u);
 
-    bool good = !bake_cancelled() &&
-                r_rebake_current_scene(&worker, job->scene, job->visual, job->layout, job->light, &job->sky, &job->volumetrics, job->worker_path, job->scene_hash, job->layout_hash, job->volume_hash, job->beam_hash);
+    bool good = !bake_cancelled() && r_rebake_current_scene(
+                                         &worker,
+                                         job->scene,
+                                         job->visual,
+                                         job->layout,
+                                         job->light,
+                                         &job->sky,
+                                         &job->volumetrics,
+                                         job->worker_path,
+                                         job->scene_hash,
+                                         job->layout_hash,
+                                         job->volume_hash,
+                                         job->beam_hash
+                                     );
 
     if (!good) bake_set_error(job, SDL_GetError());
     bake_worker_deinit(&worker);
@@ -397,8 +410,20 @@ static void bake_free_job(BAKE_JOB *job) {
     free(job);
 }
 
-bool bake_start(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual, const LIGHTMAP *layout, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
-                uint64_t beam_hash) {
+bool bake_start(
+    RENDERER *r,
+    const MESH *scene,
+    const GLTF_SCENE *visual,
+    const LIGHTMAP *layout,
+    const struct LIGHT *light,
+    const SKY *sky,
+    const VOLUMETRICS_LIGHTING *volumetrics,
+    const char *path,
+    uint64_t scene_hash,
+    uint64_t layout_hash,
+    uint64_t volume_hash,
+    uint64_t beam_hash
+) {
     if (!r || !r->device || !scene || !visual || !layout || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics || !path) return false;
 
     if (g_bake) {
@@ -452,8 +477,10 @@ bool bake_start(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual, const 
     r->bake_stage = "offscreen GPU bake";
 
     if (r->window) SDL_SetWindowTitle(r->window, "BAKE | 0.0s");
-    SDL_Log("B: full-speed offscreen rebake started; render device remains "
-            "independent");
+    SDL_Log(
+        "B: full-speed offscreen rebake started; render device remains "
+        "independent"
+    );
     return true;
 }
 
@@ -511,13 +538,37 @@ void bake_update_title(RENDERER *r) {
             const double eta = done && done < total ? phase_seconds * (double)(total - done) / (double)done : 0.0;
 
             if (eta > 0.0)
-                snprintf(title, sizeof(title),
-                         "%.1fms | %.1ffps | PROBE %u/%u %.0f%% | A%u | %.1fs ETA "
-                         "%.1fs | F%u D%u",
-                         frame_ms, fps, done, total, percent, active, phase_seconds, eta, r->show_volume ? 1u : 0u, r->debug_view);
+                snprintf(
+                    title,
+                    sizeof(title),
+                    "%.1fms | %.1ffps | PROBE %u/%u %.0f%% | A%u | %.1fs ETA "
+                    "%.1fs | F%u D%u",
+                    frame_ms,
+                    fps,
+                    done,
+                    total,
+                    percent,
+                    active,
+                    phase_seconds,
+                    eta,
+                    r->show_volume ? 1u : 0u,
+                    r->debug_view
+                );
             else
-                snprintf(title, sizeof(title), "%.1fms | %.1ffps | PROBE %u/%u %.0f%% | A%u | %.1fs | F%u D%u", frame_ms, fps, done, total, percent, active, phase_seconds,
-                         r->show_volume ? 1u : 0u, r->debug_view);
+                snprintf(
+                    title,
+                    sizeof(title),
+                    "%.1fms | %.1ffps | PROBE %u/%u %.0f%% | A%u | %.1fs | F%u D%u",
+                    frame_ms,
+                    fps,
+                    done,
+                    total,
+                    percent,
+                    active,
+                    phase_seconds,
+                    r->show_volume ? 1u : 0u,
+                    r->debug_view
+                );
         } else {
             snprintf(title, sizeof(title), "%.1fms | %.1ffps | %s %.1fs | F%u D%u", frame_ms, fps, bake_phase_name(phase), phase_seconds, r->show_volume ? 1u : 0u, r->debug_view);
         }
@@ -526,11 +577,34 @@ void bake_update_title(RENDERER *r) {
         double avg_samples = 0.0;
 
         if (r->has_bake && bake_probe_stats(r, &min_samples, &avg_samples, &max_samples, &measured)) {
-            snprintf(title, sizeof(title), "%.1fms | %.1ffps | READY | LM %ux%u | P %u/%.0f/%u x%u | F%u D%u", frame_ms, fps, r->lightmap_width, r->lightmap_height, min_samples,
-                     avg_samples, max_samples, measured, r->show_volume ? 1u : 0u, r->debug_view);
+            snprintf(
+                title,
+                sizeof(title),
+                "%.1fms | %.1ffps | READY | LM %ux%u | P %u/%.0f/%u x%u | F%u D%u",
+                frame_ms,
+                fps,
+                r->lightmap_width,
+                r->lightmap_height,
+                min_samples,
+                avg_samples,
+                max_samples,
+                measured,
+                r->show_volume ? 1u : 0u,
+                r->debug_view
+            );
         } else {
-            snprintf(title, sizeof(title), "%.1fms | %.1ffps | %s | LM %ux%u | F%u D%u", frame_ms, fps, r->has_bake ? "READY" : "UNBAKED", r->lightmap_width, r->lightmap_height,
-                     r->show_volume ? 1u : 0u, r->debug_view);
+            snprintf(
+                title,
+                sizeof(title),
+                "%.1fms | %.1ffps | %s | LM %ux%u | F%u D%u",
+                frame_ms,
+                fps,
+                r->has_bake ? "READY" : "UNBAKED",
+                r->lightmap_width,
+                r->lightmap_height,
+                r->show_volume ? 1u : 0u,
+                r->debug_view
+            );
         }
     }
 

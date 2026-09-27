@@ -272,8 +272,10 @@ bool beam_build(BEAM_GRID *grid, const MESH *scene, const BVH *tree, VEC3 sun_di
     VEC3 max = v3(-INFINITY, -INFINITY, -INFINITY);
 
     for (uint32_t corner = 0; corner < 8u; ++corner) {
-        const VEC3 p = v3(corner & 1u ? scene->bounds.max.x : scene->bounds.min.x, corner & 2u ? scene->bounds.max.y : scene->bounds.min.y,
-                          corner & 4u ? scene->bounds.max.z : scene->bounds.min.z);
+        const VEC3 p =
+            v3(corner & 1u ? scene->bounds.max.x : scene->bounds.min.x,
+               corner & 2u ? scene->bounds.max.y : scene->bounds.min.y,
+               corner & 4u ? scene->bounds.max.z : scene->bounds.min.z);
         const VEC3 q = v3(v3_dot(p, u), v3_dot(p, v), v3_dot(p, sun));
         min = v3(fminf(min.x, q.x), fminf(min.y, q.y), fminf(min.z, q.z));
         max = v3(fmaxf(max.x, q.x), fmaxf(max.y, q.y), fmaxf(max.z, q.z));
@@ -328,7 +330,13 @@ bool beam_build(BEAM_GRID *grid, const MESH *scene, const BVH *tree, VEC3 sun_di
                         } else {
                             const VEC3 q = v3(min.x + (i + 0.5f) * grid->step.x, min.y + (j + 0.5f) * grid->step.y, min.z + (z + 0.5f) * grid->step.z);
                             const VEC3 p = v3_add(v3_add(v3_scale(u, q.x), v3_scale(v, q.y)), v3_scale(sun, q.z));
-                            const TRACE_RAY ray = {.origin = p, .tmin = 0.001f, .direction = sun, .tmax = 1.0e20f};
+
+                            const TRACE_RAY ray = {
+                                .origin = p,
+                                .tmin = 0.001f,
+                                .direction = sun,
+                                .tmax = 1.0e20f
+                            };
 
                             visible = !trace_any(tree, ray);
                             ++traced;
