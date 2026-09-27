@@ -35,7 +35,11 @@ float4 dynamic_shadow_vs(DynamicShadowInput input) : SV_Position
 struct CellUpdate { uint cell; uint generation; };
 GPU_BIND_T(0, 0) StructuredBuffer<CellUpdate> Updates : register(t0, space0);
 GPU_BIND_U(0, 1) RWStructuredBuffer<uint> CellGenerations : register(u0, space1);
-GPU_BIND_B(0, 2) cbuffer CellData : register(b0, space2) { uint update_count; uint3 _cell_pad; };
+GPU_BIND_B(0, 2) cbuffer CellData : register(b0, space2)
+{
+    uint update_count;
+    uint3 _cell_pad;
+};
 
 [numthreads(64, 1, 1)]
 void dynamic_cell_cs(uint3 id : SV_DispatchThreadID)
@@ -49,7 +53,8 @@ void dynamic_cell_cs(uint3 id : SV_DispatchThreadID)
 
 struct BvhNode { float4 bmin; float4 bmax; uint4 meta; };
 struct BvhTriangle { float4 a; float4 b; float4 c; float4 normal; float4 emissive; };
-struct DynamicInstance {
+struct DynamicInstance
+{
     float4x4 world;
     float4x4 inverse_world;
     float4x4 normal_world;
@@ -58,7 +63,8 @@ struct DynamicInstance {
     uint4 indices;
 };
 struct Probe { float4 position; float4 coefficient[9]; };
-struct GiJob {
+struct GiJob
+{
     float4 position;
     float4 normal;
     uint cell;
@@ -98,10 +104,7 @@ GPU_BIND_B(0, 2) cbuffer GiData : register(b0, space2)
 };
 
 static const uint INVALID_NODE = 0xffffffffu;
-static const uint DIRECT_EMISSIVE_SAMPLES = 8u;
-static const uint INDIRECT_PATH_SAMPLES = 4u;
-static const uint INDIRECT_PATH_BOUNCES = 2u;
-static const float PI = 3.14159265358979323846f;
+static const uint EMITTER_VISIBILITY_SAMPLES = 8u;
 
 uint hash_u32(uint x)
 {
@@ -118,47 +121,44 @@ float random01(inout uint seed)
     return (float)(seed & 0x00ffffffu) * (1.0f / 16777216.0f);
 }
 
-float3 cosine_direction(float3 n, inout uint seed)
-{
-    float r = sqrt(random01(seed));
-    float phi = 2.0f * PI * random01(seed);
-    float3 up = abs(n.z) < 0.999f ? float3(0,0,1) : float3(0,1,0);
-    float3 t = normalize(cross(up, n));
-    float3 b = cross(n, t);
-    return normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * sqrt(max(0.0f, 1.0f - r * r)));
-}
-
 bool hit_box(Ray ray, float3 bmin, float3 bmax, float max_t)
 {
-    float lo = ray.tmin, hi = min(ray.tmax, max_t);
-    [unroll] for (uint a = 0u; a < 3u; ++a) {
-        float d = ray.direction[a];
-        if (abs(d) < 1.0e-7f) {
-            if (ray.origin[a] < bmin[a] || ray.origin[a] > bmax[a]) return false;
-        } else {
-            float x = (bmin[a] - ray.origin[a]) / d;
-            float y = (bmax[a] - ray.origin[a]) / d;
-            if (x > y) { float q = x; x = y; y = q; }
-            lo = max(lo, x); hi = min(hi, y);
+    float lo = ray.tmin;
+    float hi = min(ray.tmax, max_t);
+    [unroll] for (uint axis = 0u; axis < 3u; ++axis)
+    {
+        float direction = ray.direction[axis];
+        if (abs(direction) < 1.0e-7f)
+        {
+            if (ray.origin[axis] < bmin[axis] || ray.origin[axis] > bmax[axis]) return false;
+        }
+        else
+        {
+            float a = (bmin[axis] - ray.origin[axis]) / direction;
+            float b = (bmax[axis] - ray.origin[axis]) / direction;
+            if (a > b) { float tmp = a; a = b; b = tmp; }
+            lo = max(lo, a);
+            hi = min(hi, b);
             if (lo > hi) return false;
         }
     }
     return hi >= ray.tmin;
 }
 
-bool hit_triangle(Ray ray, BvhTriangle tri, float max_t, out float t)
+bool hit_triangle(Ray ray, BvhTriangle triangle, float max_t, out float t)
 {
-    float3 e1 = tri.b.xyz - tri.a.xyz;
-    float3 e2 = tri.c.xyz - tri.a.xyz;
-    float3 p = cross(ray.direction, e2);
-    float det = dot(e1, p);
-    if (abs(det) < 1.0e-7f) { t = 0.0f; return false; }
-    float inv = 1.0f / det;
-    float3 s = ray.origin - tri.a.xyz;
-    float u = dot(s, p) * inv;
-    float3 q = cross(s, e1);
-    float v = dot(ray.direction, q) * inv;
-    t = dot(e2, q) * inv;
+    float3 edge1 = triangle.b.xyz - triangle.a.xyz;
+    float3 edge2 = triangle.c.xyz - triangle.a.xyz;
+    float3 p = cross(ray.direction, edge2);
+    float determinant = dot(edge1, p);
+    if (abs(determinant) < 1.0e-7f) { t = 0.0f; return false; }
+
+    float inverse = 1.0f / determinant;
+    float3 s = ray.origin - triangle.a.xyz;
+    float u = dot(s, p) * inverse;
+    float3 q = cross(s, edge1);
+    float v = dot(ray.direction, q) * inverse;
+    t = dot(edge2, q) * inverse;
     return u >= 0.0f && v >= 0.0f && u + v <= 1.0f &&
            t > ray.tmin && t < min(ray.tmax, max_t);
 }
@@ -168,34 +168,50 @@ bool static_closest(Ray ray, inout Hit hit)
     uint node = 0u;
     float closest = hit.t;
     bool found = false;
-    while (node != INVALID_NODE) {
-        BvhNode n = StaticNodes[node];
-        if (!hit_box(ray, n.bmin.xyz, n.bmax.xyz, closest)) { node = n.meta.y; continue; }
-        if (n.meta.w) {
-            for (uint i = 0u; i < n.meta.w; ++i) {
-                uint ti = n.meta.z + i;
+
+    while (node != INVALID_NODE)
+    {
+        BvhNode bvh = StaticNodes[node];
+        if (!hit_box(ray, bvh.bmin.xyz, bvh.bmax.xyz, closest))
+        {
+            node = bvh.meta.y;
+            continue;
+        }
+
+        if (bvh.meta.w != 0u)
+        {
+            for (uint i = 0u; i < bvh.meta.w; ++i)
+            {
+                uint triangle_index = bvh.meta.z + i;
                 float t;
-                if (!hit_triangle(ray, StaticTriangles[ti], closest, t)) continue;
-                BvhTriangle tri = StaticTriangles[ti];
-                float3 normal = normalize(tri.normal.xyz);
+                if (!hit_triangle(ray, StaticTriangles[triangle_index], closest, t)) continue;
+                BvhTriangle triangle = StaticTriangles[triangle_index];
+                float3 normal = normalize(triangle.normal.xyz);
                 if (dot(normal, ray.direction) > 0.0f) normal = -normal;
                 closest = hit.t = t;
                 hit.normal = normal;
-                hit.albedo = saturate(float3(tri.a.w, tri.b.w, tri.c.w));
-                hit.emissive = max(tri.emissive.rgb, 0.0f);
+                hit.albedo = saturate(float3(triangle.a.w, triangle.b.w, triangle.c.w));
+                hit.emissive = max(triangle.emissive.rgb, 0.0f);
                 hit.dynamic = 0u;
                 found = true;
             }
-            node = n.meta.y;
-        } else node = n.meta.x;
+            node = bvh.meta.y;
+        }
+        else
+        {
+            node = bvh.meta.x;
+        }
     }
+
     return found;
 }
 
 bool dynamic_closest(Ray world_ray, inout Hit hit)
 {
     bool found = false;
-    for (uint instance_index = 0u; instance_index < dynamic_instance_count; ++instance_index) {
+
+    for (uint instance_index = 0u; instance_index < dynamic_instance_count; ++instance_index)
+    {
         DynamicInstance instance = DynamicInstances[instance_index];
         if (!hit_box(world_ray, instance.bounds_min.xyz, instance.bounds_max.xyz, hit.t)) continue;
 
@@ -207,28 +223,41 @@ bool dynamic_closest(Ray world_ray, inout Hit hit)
 
         uint node = instance.indices.x;
         float closest = hit.t;
-        while (node != INVALID_NODE) {
-            BvhNode n = DynamicNodes[node];
-            if (!hit_box(ray, n.bmin.xyz, n.bmax.xyz, closest)) { node = n.meta.y; continue; }
-            if (n.meta.w) {
-                for (uint i = 0u; i < n.meta.w; ++i) {
-                    uint ti = n.meta.z + i;
+        while (node != INVALID_NODE)
+        {
+            BvhNode bvh = DynamicNodes[node];
+            if (!hit_box(ray, bvh.bmin.xyz, bvh.bmax.xyz, closest))
+            {
+                node = bvh.meta.y;
+                continue;
+            }
+
+            if (bvh.meta.w != 0u)
+            {
+                for (uint i = 0u; i < bvh.meta.w; ++i)
+                {
+                    uint triangle_index = bvh.meta.z + i;
                     float t;
-                    if (!hit_triangle(ray, DynamicTriangles[ti], closest, t)) continue;
-                    BvhTriangle tri = DynamicTriangles[ti];
-                    float3 normal = normalize(mul((float3x3)instance.normal_world, tri.normal.xyz));
+                    if (!hit_triangle(ray, DynamicTriangles[triangle_index], closest, t)) continue;
+                    BvhTriangle triangle = DynamicTriangles[triangle_index];
+                    float3 normal = normalize(mul((float3x3)instance.normal_world, triangle.normal.xyz));
                     if (dot(normal, world_ray.direction) > 0.0f) normal = -normal;
                     closest = hit.t = t;
                     hit.normal = normal;
-                    hit.albedo = saturate(float3(tri.a.w, tri.b.w, tri.c.w));
-                    hit.emissive = max(tri.emissive.rgb, 0.0f);
+                    hit.albedo = saturate(float3(triangle.a.w, triangle.b.w, triangle.c.w));
+                    hit.emissive = max(triangle.emissive.rgb, 0.0f);
                     hit.dynamic = 1u;
                     found = true;
                 }
-                node = n.meta.y;
-            } else node = n.meta.x;
+                node = bvh.meta.y;
+            }
+            else
+            {
+                node = bvh.meta.x;
+            }
         }
     }
+
     return found;
 }
 
@@ -242,279 +271,109 @@ bool static_scene_closest(Ray ray, out Hit hit)
     return static_closest(ray, hit);
 }
 
-bool scene_closest(Ray ray, out Hit hit)
+void emissive_visibility_sample(float3 position, float3 normal, uint seed,
+                                out float static_visible, out float dynamic_visible)
 {
-    hit.t = ray.tmax;
-    hit.normal = 0.0f;
-    hit.albedo = 0.0f;
-    hit.emissive = 0.0f;
-    hit.dynamic = 0u;
-    bool found = static_closest(ray, hit);
-    found = dynamic_closest(ray, hit) || found;
-    return found;
-}
+    static_visible = 0.0f;
+    dynamic_visible = 0.0f;
 
-float3 probe_value(Probe probe, float3 n)
-{
-    float nx = n.x, ny = n.y, nz = n.z;
-    float3 e = probe.coefficient[0].rgb * (0.2820947918f * PI);
-    e += (probe.coefficient[1].rgb * (0.4886025119f * ny) +
-          probe.coefficient[2].rgb * (0.4886025119f * nz) +
-          probe.coefficient[3].rgb * (0.4886025119f * nx)) * (2.0f * PI / 3.0f);
-    e += (probe.coefficient[4].rgb * (1.0925484306f * nx * ny) +
-          probe.coefficient[5].rgb * (1.0925484306f * ny * nz) +
-          probe.coefficient[6].rgb * (0.3153915653f * (3.0f * nz * nz - 1.0f)) +
-          probe.coefficient[7].rgb * (1.0925484306f * nx * nz) +
-          probe.coefficient[8].rgb * (0.5462742153f * (nx * nx - ny * ny))) * (PI * 0.25f);
-    return max(e, 0.0f);
-}
-
-float3 probe_irradiance(float3 p, float3 n)
-{
-    if (any(probe_dims.xyz == 0u) || probe_origin_spacing.w <= 0.0f) return 0.12f.xxx;
-    n = normalize(n);
-    float3 coord = clamp((p - probe_origin_spacing.xyz) / probe_origin_spacing.w,
-                         0.0f, float3(probe_dims.xyz) - 1.0f);
-    uint3 base = uint3(floor(coord));
-    float3 f = frac(coord);
-    float3 sum = 0.0f;
-    float weight_sum = 0.0f;
-
-    [unroll] for (uint z = 0u; z < 2u; ++z)
-    [unroll] for (uint y = 0u; y < 2u; ++y)
-    [unroll] for (uint x = 0u; x < 2u; ++x) {
-        uint3 c = min(base + uint3(x,y,z), probe_dims.xyz - 1u);
-        float3 aw = lerp(1.0f - f, f, float3(x,y,z));
-        float w = aw.x * aw.y * aw.z;
-        Probe probe = Probes[c.x + probe_dims.x * (c.y + probe_dims.y * c.z)];
-        w *= saturate(probe.position.w);
-        if (w <= 0.0f) continue;
-        sum += probe_value(probe, n) * w;
-        weight_sum += w;
-    }
-
-    if (weight_sum > 0.0f) return sum / weight_sum;
-
-    float best_distance2 = 1.0e30f;
-    uint best_index = 0u;
-    bool found = false;
-    int3 center = int3(floor(coord + 0.5f));
-    [unroll] for (int z = -1; z <= 1; ++z)
-    [unroll] for (int y = -1; y <= 1; ++y)
-    [unroll] for (int x = -1; x <= 1; ++x) {
-        int3 c = center + int3(x, y, z);
-        if (any(c < 0) || any(c >= int3(probe_dims.xyz))) continue;
-        uint index = (uint)c.x + probe_dims.x * ((uint)c.y + probe_dims.y * (uint)c.z);
-        Probe probe = Probes[index];
-        if (probe.position.w <= 0.0f) continue;
-        float3 delta = probe.position.xyz - p;
-        float distance2 = dot(delta, delta);
-        if (distance2 < best_distance2) {
-            best_distance2 = distance2;
-            best_index = index;
-            found = true;
-        }
-    }
-
-    return found ? probe_value(Probes[best_index], n) : 0.12f.xxx;
-}
-
-float3 sky(float3 d)
-{
-    float t = pow(saturate(d.y * 0.5f + 0.5f), 0.35f);
-    return lerp(sky_horizon.rgb, sky_zenith.rgb, t) * sky_zenith.w;
-}
-
-float3 sun_transport(float3 p, float3 n, bool include_dynamic)
-{
-    float3 l = normalize(sun_direction_intensity.xyz);
-    float ndotl = saturate(dot(n, l));
-    if (ndotl <= 0.0f || sun_direction_intensity.w <= 0.0f) return 0.0f;
-
-    Ray ray;
-    ray.origin = p + n * sun_color_epsilon.w;
-    ray.tmin = sun_color_epsilon.w;
-    ray.direction = l;
-    ray.tmax = 1.0e20f;
-
-    Hit blocker;
-    if (include_dynamic) {
-        if (scene_closest(ray, blocker)) return 0.0f;
-    } else if (static_scene_closest(ray, blocker)) {
-        return 0.0f;
-    }
-
-    return sun_color_epsilon.rgb * (sun_direction_intensity.w * ndotl);
-}
-
-float3 emissive_transport(float3 p, float3 n, inout uint seed, bool include_dynamic)
-{
-    uint triangle_count = 0u, triangle_stride = 0u;
+    uint triangle_count = 0u;
+    uint triangle_stride = 0u;
     StaticTriangles.GetDimensions(triangle_count, triangle_stride);
-    if (triangle_count == 0u) return 0.0f;
+    if (triangle_count == 0u) return;
 
     float total_weight = StaticTriangles[triangle_count - 1u].emissive.w;
-    if (total_weight <= 0.0f) return 0.0f;
+    if (total_weight <= 0.0f) return;
 
     float target = random01(seed) * total_weight;
-    uint lo = 0u, hi = triangle_count;
-    while (lo < hi) {
+    uint lo = 0u;
+    uint hi = triangle_count;
+    while (lo < hi)
+    {
         uint mid = lo + (hi - lo) / 2u;
         if (StaticTriangles[mid].emissive.w > target) hi = mid;
         else lo = mid + 1u;
     }
-    if (lo >= triangle_count) return 0.0f;
+    if (lo >= triangle_count) return;
 
-    BvhTriangle tri = StaticTriangles[lo];
+    BvhTriangle triangle = StaticTriangles[lo];
     float previous = lo == 0u ? 0.0f : StaticTriangles[lo - 1u].emissive.w;
-    float triangle_weight = tri.emissive.w - previous;
-    if (triangle_weight <= 0.0f) return 0.0f;
-
-    float3 edge1 = tri.b.xyz - tri.a.xyz;
-    float3 edge2 = tri.c.xyz - tri.a.xyz;
-    float area = 0.5f * length(cross(edge1, edge2));
-    if (area <= 1.0e-10f) return 0.0f;
+    if (triangle.emissive.w <= previous) return;
 
     float root = sqrt(random01(seed));
-    float bary = random01(seed);
-    float3 light_position = tri.a.xyz + edge1 * (root * (1.0f - bary)) + edge2 * (root * bary);
-    float3 delta = light_position - p;
+    float barycentric = random01(seed);
+    float3 light_position = triangle.a.xyz * (1.0f - root) +
+        triangle.b.xyz * (root * (1.0f - barycentric)) +
+        triangle.c.xyz * (root * barycentric);
+
+    float3 delta = light_position - position;
     float distance2 = dot(delta, delta);
     float epsilon = sun_color_epsilon.w;
-    if (distance2 <= epsilon * epsilon) return 0.0f;
+    if (distance2 <= epsilon * epsilon) return;
 
     float distance = sqrt(distance2);
     float3 direction = delta / distance;
-    float receiver_cosine = saturate(dot(n, direction));
-    float emitter_cosine = saturate(dot(normalize(tri.normal.xyz), -direction));
-    if (receiver_cosine <= 0.0f || emitter_cosine <= 0.0f) return 0.0f;
-
-    float pdf_area = (triangle_weight / total_weight) / area;
-    if (pdf_area <= 1.0e-12f) return 0.0f;
-
-    float3 contribution = max(tri.emissive.rgb, 0.0f) *
-                          (receiver_cosine * emitter_cosine /
-                           max(PI * distance2 * pdf_area, 1.0e-8f));
+    if (dot(normal, direction) <= 0.0f ||
+        dot(normalize(triangle.normal.xyz), -direction) <= 0.0f)
+        return;
 
     Ray shadow;
-    shadow.origin = p + n * epsilon;
+    shadow.origin = position + normal * epsilon;
     shadow.tmin = epsilon;
     shadow.direction = direction;
     shadow.tmax = max(epsilon, distance - 2.0f * epsilon);
-    if (shadow.tmax <= shadow.tmin) return 0.0f;
+    if (shadow.tmax <= shadow.tmin) return;
 
     Hit blocker;
-    if (include_dynamic) {
-        if (scene_closest(shadow, blocker)) return 0.0f;
-    } else if (static_scene_closest(shadow, blocker)) {
-        return 0.0f;
-    }
+    if (static_scene_closest(shadow, blocker)) return;
+    static_visible = 1.0f;
 
-    return contribution;
-}
-
-void emissive_pair(float3 p, float3 n, inout uint seed, out float3 static_value, out float3 dynamic_value)
-{
-    uint static_seed = seed;
-    uint dynamic_seed = seed;
-    static_value = emissive_transport(p, n, static_seed, false);
-    dynamic_value = emissive_transport(p, n, dynamic_seed, true);
-    seed = static_seed;
-}
-
-float3 indirect_transport(float3 p, float3 n, uint seed, bool include_dynamic)
-{
-    float3 radiance = 0.0f;
-    float3 throughput = 1.0f;
-
-    [unroll] for (uint bounce = 0u; bounce < INDIRECT_PATH_BOUNCES; ++bounce) {
-        float3 direction = cosine_direction(n, seed);
-        Ray ray;
-        ray.origin = p + n * sun_color_epsilon.w;
-        ray.tmin = sun_color_epsilon.w;
-        ray.direction = direction;
-        ray.tmax = 1.0e20f;
-
-        Hit hit;
-        bool found;
-        if (include_dynamic) found = scene_closest(ray, hit);
-        else found = static_scene_closest(ray, hit);
-
-        if (!found) {
-            radiance += throughput * sky(direction);
-            break;
-        }
-
-        throughput *= hit.albedo;
-        if (max(throughput.x, max(throughput.y, throughput.z)) <= 1.0e-4f) break;
-
-        float3 hit_position = ray.origin + ray.direction * hit.t;
-        radiance += throughput *
-            (emissive_transport(hit_position, hit.normal, seed, include_dynamic) +
-             sun_transport(hit_position, hit.normal, include_dynamic));
-
-        p = hit_position;
-        n = hit.normal;
-    }
-
-    return radiance;
-}
-
-float3 correlated_indirect_delta(float3 p, float3 n, uint seed)
-{
-    float3 static_value = indirect_transport(p, n, seed, false);
-    float3 dynamic_value = indirect_transport(p, n, seed, true);
-    return dynamic_value - static_value;
+    blocker.t = shadow.tmax;
+    blocker.normal = 0.0f;
+    blocker.albedo = 0.0f;
+    blocker.emissive = 0.0f;
+    blocker.dynamic = 0u;
+    if (!dynamic_closest(shadow, blocker)) dynamic_visible = 1.0f;
 }
 
 [numthreads(64, 1, 1)]
 void dynamic_gi_cs(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= job_count) return;
+
     GiJob job = Jobs[id.x];
     if (CellGenerations[job.cell] != job.generation) return;
 
     uint pixel = asuint(job.position.w);
-    uint pixels = lightmap_width * lightmap_height;
-    if (pixel >= pixels) return;
+    uint pixel_count = lightmap_width * lightmap_height;
+    if (pixel >= pixel_count) return;
     uint2 xy = uint2(pixel % lightmap_width, pixel / lightmap_width);
 
-    float3 n = normalize(job.normal.xyz);
     bool first_sweep = (job.flags & 2u) != 0u;
-
-    float3 direct_delta = 0.0f;
-    [unroll] for (uint sample_index = 0u; sample_index < DIRECT_EMISSIVE_SAMPLES; ++sample_index) {
-        uint direct_seed = hash_u32((sample_index + 1u) * 0x9e3779b9u);
-        float3 static_emissive, dynamic_emissive;
-        emissive_pair(job.position.xyz, n, direct_seed, static_emissive, dynamic_emissive);
-        direct_delta += dynamic_emissive - static_emissive;
-    }
-    direct_delta /= (float)DIRECT_EMISSIVE_SAMPLES;
-
-    float3 indirect_delta = 0.0f;
-    if (first_sweep) {
-        [unroll] for (uint sample_index = 0u; sample_index < INDIRECT_PATH_SAMPLES; ++sample_index) {
-            uint path_seed = hash_u32(pixel ^ ((sample_index + 1u) * 0x27d4eb2du));
-            indirect_delta += correlated_indirect_delta(job.position.xyz, n, path_seed);
-        }
-        indirect_delta /= (float)INDIRECT_PATH_SAMPLES;
-    } else {
-        [loop] for (uint sample_index = 0u; sample_index < rays_per_texel; ++sample_index) {
-            uint path_seed = hash_u32(pixel ^
-                                      (job.generation * 0x9e3779b9u) ^
-                                      ((frame_index + 1u) * 0x85ebca6bu) ^
-                                      ((sample_index + 1u) * 0xc2b2ae35u));
-            indirect_delta += correlated_indirect_delta(job.position.xyz, n, path_seed);
-        }
-        indirect_delta /= max((float)rays_per_texel, 1.0f);
-    }
-
-    float3 transport_delta = direct_delta + indirect_delta;
     bool valid = !first_sweep && OverlayGenerations[job.cell] == job.generation;
     float4 old = valid ? Overlay[xy] : 0.0f;
-    float count = valid ? old.a : 0.0f;
-    float next = count + 1.0f;
-    Overlay[xy] = float4((old.rgb * count + transport_delta) / next, next);
+    uint sample_base = valid ? (uint)old.a : 0u;
+
+    float dynamic_visible = 0.0f;
+    float static_visible = 0.0f;
+    float3 normal = normalize(job.normal.xyz);
+
+    [unroll] for (uint sample_index = 0u; sample_index < EMITTER_VISIBILITY_SAMPLES; ++sample_index)
+    {
+        uint global_sample = sample_base + sample_index;
+        uint seed = hash_u32(pixel ^ ((global_sample + 1u) * 0x9e3779b9u));
+        float static_sample;
+        float dynamic_sample;
+        emissive_visibility_sample(job.position.xyz, normal, seed,
+                                   static_sample, dynamic_sample);
+        static_visible += static_sample;
+        dynamic_visible += dynamic_sample;
+    }
+
+    Overlay[xy] = float4(old.r + dynamic_visible,
+                         old.g + static_visible,
+                         0.0f,
+                         old.a + (float)EMITTER_VISIBILITY_SAMPLES);
 
     if ((job.flags & 1u) != 0u && CellGenerations[job.cell] == job.generation)
         OverlayGenerations[job.cell] = job.generation;
