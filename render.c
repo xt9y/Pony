@@ -10,14 +10,15 @@ bool renderer_init(RENDERER *renderer, GPU *gpu) {
 
     renderer->gpu = gpu;
 
-    renderer->camera = (CAMERA){
-        .position = {0.0f, 1.0f, 5.0f},
-        .forward = {0.0f, 0.0f, -1.0f},
-        .up = {0.0f, 1.0f, 0.0f},
-        .fov_y = 62.0f,
-        .near_plane = 0.05f,
-        .far_plane = 1000.0f
-    };
+    renderer->camera =
+        (CAMERA){
+            .position = {0.0f, 1.0f, 5.0f},
+            .forward = {0.0f, 0.0f, -1.0f},
+            .up = {0.0f, 1.0f, 0.0f},
+            .fov_y = 62.0f,
+            .near_plane = 0.05f,
+            .far_plane = 1000.0f
+        };
 
     return true;
 }
@@ -30,10 +31,7 @@ void renderer_deinit(RENDERER *renderer) {
 }
 
 
-bool renderer_set_scene(
-    RENDERER *renderer,
-    SCENE *scene
-) {
+bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
     if (!renderer || !renderer->gpu || !scene) return false;
 
     renderer->scene = scene;
@@ -42,20 +40,14 @@ bool renderer_set_scene(
 }
 
 
-void renderer_event(
-    RENDERER *renderer,
-    const SDL_Event *event
-) {
+void renderer_event(RENDERER *renderer, const SDL_Event *event) {
     (void)renderer;
     (void)event;
 }
 
 
 bool renderer_frame(RENDERER *renderer) {
-    if (!renderer ||
-        !renderer->gpu ||
-        !renderer->gpu->device ||
-        !renderer->scene) {
+    if (!renderer || !renderer->gpu || !renderer->gpu->device || !renderer->scene) {
         return false;
     }
 

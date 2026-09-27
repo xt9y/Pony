@@ -12,12 +12,7 @@ void build(C_Build *b) {
     c_sources(app, "gpu.c");
     c_sources(app, "render.c");
 
-    C_Dependency *nri = c_git(
-        b,
-        "NRI",
-        "https://github.com/NVIDIA-RTX/NRI.git",
-        "main"
-    );
+    C_Dependency *nri = c_git(b, "NRI", "https://github.com/NVIDIA-RTX/NRI.git", "main");
 
     c_dep_cmake(nri);
     c_dep_cmake_option(nri, "-DNRI_STATIC_LIBRARY=OFF");

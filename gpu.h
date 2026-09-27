@@ -21,6 +21,8 @@
 #pragma clang diagnostic pop
 #endif
 
+typedef struct SWAPCHAIN_FRAME SWAPCHAIN_FRAME;
+typedef struct FRAME_CONTEXT FRAME_CONTEXT;
 
 typedef struct GPU {
     SDL_Window *window;
@@ -28,7 +30,7 @@ typedef struct GPU {
     NriDevice *device;
     NriCoreInterface core;
     NriHelperInterface helper;
-    NriSwapChainInterface swapchain;
+    NriSwapChainInterface swapchain_api;
 
     NriQueue *graphics_queue;
     NriQueue *compute_queue;

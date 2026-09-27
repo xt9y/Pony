@@ -55,12 +55,7 @@ VEC3 v3_normalize(VEC3 v);
 void mesh_free(MESH *m);
 
 
-typedef enum GLB_TOKEN_TYPE {
-    GLB_TOKEN_OBJECT,
-    GLB_TOKEN_ARRAY,
-    GLB_TOKEN_STRING,
-    GLB_TOKEN_PRIMITIVE
-} GLB_TOKEN_TYPE;
+typedef enum GLB_TOKEN_TYPE { GLB_TOKEN_OBJECT, GLB_TOKEN_ARRAY, GLB_TOKEN_STRING, GLB_TOKEN_PRIMITIVE } GLB_TOKEN_TYPE;
 
 typedef struct GLB_TOKEN {
     uint32_t start;
@@ -116,41 +111,18 @@ int glb_get(const GLB_DOC *doc, int object_token, const char *key);
 int glb_at(const GLB_DOC *doc, int array_token, size_t index);
 size_t glb_count(const GLB_DOC *doc, int token);
 
-bool glb_string(
-    const GLB_DOC *doc,
-    int token,
-    const char **data,
-    size_t *length
-);
+bool glb_string(const GLB_DOC *doc, int token, const char **data, size_t *length);
 
 bool glb_number(const GLB_DOC *doc, int token, double *value);
 bool glb_boolean(const GLB_DOC *doc, int token, bool *value);
 
-bool glb_buffer_view(
-    const GLB_DOC *doc,
-    size_t index,
-    GLB_SPAN *span,
-    size_t *stride
-);
+bool glb_buffer_view(const GLB_DOC *doc, size_t index, GLB_SPAN *span, size_t *stride);
 
-bool glb_accessor_open(
-    const GLB_DOC *doc,
-    size_t index,
-    GLB_ACCESSOR *out
-);
+bool glb_accessor_open(const GLB_DOC *doc, size_t index, GLB_ACCESSOR *out);
 
-bool glb_accessor_f32(
-    const GLB_ACCESSOR *accessor,
-    size_t element,
-    uint32_t component,
-    float *value
-);
+bool glb_accessor_f32(const GLB_ACCESSOR *accessor, size_t element, uint32_t component, float *value);
 
-bool glb_accessor_u32(
-    const GLB_ACCESSOR *accessor,
-    size_t element,
-    uint32_t *value
-);
+bool glb_accessor_u32(const GLB_ACCESSOR *accessor, size_t element, uint32_t *value);
 
 bool glb_extract_mesh(const GLB_DOC *doc, MESH *out);
 
@@ -216,26 +188,16 @@ typedef struct TRANSFORM {
     VEC3 scale;
 } TRANSFORM;
 
-typedef enum OBJECT_STATE {
-    STATIC,
-    DYNAMIC
-} OBJECT_STATE;
+typedef enum OBJECT_STATE { STATIC, DYNAMIC } OBJECT_STATE;
 
-typedef enum OBJECT_TYPE {
-    MODEL,
-    LIGHT
-} OBJECT_TYPE;
+typedef enum OBJECT_TYPE { MODEL, LIGHT } OBJECT_TYPE;
 
 struct MODEL {
     MESH *geometry;
     GLTF_SCENE *visual;
 };
 
-typedef enum LIGHT_TYPE {
-    LIGHT_DIRECTIONAL,
-    LIGHT_POINT,
-    LIGHT_SPOT
-} LIGHT_TYPE;
+typedef enum LIGHT_TYPE { LIGHT_DIRECTIONAL, LIGHT_POINT, LIGHT_SPOT } LIGHT_TYPE;
 
 typedef struct DIRECTIONAL_LIGHT {
     VEC3 direction;
@@ -300,19 +262,9 @@ typedef struct SCENE {
 
 TRANSFORM transform_identity(void);
 
-OBJECT *scene_add_model(
-    SCENE *scene,
-    struct MODEL *model,
-    OBJECT_STATE state,
-    TRANSFORM transform
-);
+OBJECT *scene_add_model(SCENE *scene, struct MODEL *model, OBJECT_STATE state, TRANSFORM transform);
 
-OBJECT *scene_add_light(
-    SCENE *scene,
-    struct LIGHT *light,
-    OBJECT_STATE state,
-    TRANSFORM transform
-);
+OBJECT *scene_add_light(SCENE *scene, struct LIGHT *light, OBJECT_STATE state, TRANSFORM transform);
 
 void object_set_transform(OBJECT *object, TRANSFORM transform);
 void object_mark_dirty(OBJECT *object);

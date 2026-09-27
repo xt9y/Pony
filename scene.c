@@ -4,27 +4,15 @@
 #include <string.h>
 
 
-static OBJECT *scene_add_object(
-    SCENE *scene,
-    OBJECT_TYPE type,
-    OBJECT_STATE state,
-    TRANSFORM transform,
-    void *data
-) {
+static OBJECT *scene_add_object(SCENE *scene, OBJECT_TYPE type, OBJECT_STATE state, TRANSFORM transform, void *data) {
     if (!scene || !data) return NULL;
 
     if (scene->object_count == scene->object_capacity) {
-        uint32_t capacity =
-            scene->object_capacity ?
-                scene->object_capacity * 2u :
-                16u;
+        uint32_t capacity = scene->object_capacity ? scene->object_capacity * 2u : 16u;
 
         if (capacity < scene->object_capacity) return NULL;
 
-        OBJECT *objects = realloc(
-            scene->objects,
-            (size_t)capacity * sizeof(*objects)
-        );
+        OBJECT *objects = realloc(scene->objects, (size_t)capacity * sizeof(*objects));
 
         if (!objects) return NULL;
 
@@ -55,42 +43,17 @@ TRANSFORM transform_identity(void) {
 }
 
 
-OBJECT *scene_add_model(
-    SCENE *scene,
-    struct MODEL *model,
-    OBJECT_STATE state,
-    TRANSFORM transform
-) {
-    return scene_add_object(
-        scene,
-        MODEL,
-        state,
-        transform,
-        model
-    );
+OBJECT *scene_add_model(SCENE *scene, struct MODEL *model, OBJECT_STATE state, TRANSFORM transform) {
+    return scene_add_object(scene, MODEL, state, transform, model);
 }
 
 
-OBJECT *scene_add_light(
-    SCENE *scene,
-    struct LIGHT *light,
-    OBJECT_STATE state,
-    TRANSFORM transform
-) {
-    return scene_add_object(
-        scene,
-        LIGHT,
-        state,
-        transform,
-        light
-    );
+OBJECT *scene_add_light(SCENE *scene, struct LIGHT *light, OBJECT_STATE state, TRANSFORM transform) {
+    return scene_add_object(scene, LIGHT, state, transform, light);
 }
 
 
-void object_set_transform(
-    OBJECT *object,
-    TRANSFORM transform
-) {
+void object_set_transform(OBJECT *object, TRANSFORM transform) {
     if (!object) return;
 
     object->transform = transform;

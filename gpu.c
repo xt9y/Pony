@@ -6,30 +6,15 @@
 static bool acquire_queues(GPU *gpu) {
     if (!gpu || !gpu->device) return false;
 
-    if (gpu->core.GetQueue(
-            gpu->device,
-            NriQueueType_GRAPHICS,
-            0,
-            &gpu->graphics_queue
-        ) != NriResult_SUCCESS) {
+    if (gpu->core.GetQueue(gpu->device, NriQueueType_GRAPHICS, 0, &gpu->graphics_queue) != NriResult_SUCCESS) {
         return false;
     }
 
-    if (gpu->core.GetQueue(
-            gpu->device,
-            NriQueueType_COMPUTE,
-            0,
-            &gpu->compute_queue
-        ) != NriResult_SUCCESS) {
+    if (gpu->core.GetQueue(gpu->device, NriQueueType_COMPUTE, 0, &gpu->compute_queue) != NriResult_SUCCESS) {
         gpu->compute_queue = gpu->graphics_queue;
     }
 
-    if (gpu->core.GetQueue(
-            gpu->device,
-            NriQueueType_COPY,
-            0,
-            &gpu->copy_queue
-        ) != NriResult_SUCCESS) {
+    if (gpu->core.GetQueue(gpu->device, NriQueueType_COPY, 0, &gpu->copy_queue) != NriResult_SUCCESS) {
         gpu->copy_queue = gpu->graphics_queue;
     }
 
@@ -42,9 +27,7 @@ bool gpu_init(GPU *gpu, const char *title, int width, int height) {
 
     memset(gpu, 0, sizeof(*gpu));
 
-    Uint64 window_flags =
-        SDL_WINDOW_RESIZABLE |
-        SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    Uint64 window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
 
 #if defined(__APPLE__)
     window_flags |= SDL_WINDOW_METAL;
@@ -52,12 +35,7 @@ bool gpu_init(GPU *gpu, const char *title, int width, int height) {
     window_flags |= SDL_WINDOW_VULKAN;
 #endif
 
-    gpu->window = SDL_CreateWindow(
-        title,
-        width,
-        height,
-        window_flags
-    );
+    gpu->window = SDL_CreateWindow(title, width, height, window_flags);
 
     if (!gpu->window) return false;
 
@@ -74,31 +52,16 @@ bool gpu_init(GPU *gpu, const char *title, int width, int height) {
         .uRegister = 48
     };
 
-    if (nriCreateDevice(
-            &device_desc,
-            &gpu->device
-        ) != NriResult_SUCCESS) {
+    if (nriCreateDevice(&device_desc, &gpu->device) != NriResult_SUCCESS) {
         SDL_Log("NRI device creation failed");
         gpu_deinit(gpu);
 
         return false;
     }
 
-    if (nriGetInterface(
-            gpu->device,
-            NRI_INTERFACE(NriCoreInterface),
-            &gpu->core
-        ) != NriResult_SUCCESS ||
-        nriGetInterface(
-            gpu->device,
-            NRI_INTERFACE(NriHelperInterface),
-            &gpu->helper
-        ) != NriResult_SUCCESS ||
-        nriGetInterface(
-            gpu->device,
-            NRI_INTERFACE(NriSwapChainInterface),
-            &gpu->swapchain
-        ) != NriResult_SUCCESS) {
+    if (nriGetInterface(gpu->device, NRI_INTERFACE(NriCoreInterface), &gpu->core) != NriResult_SUCCESS ||
+        nriGetInterface(gpu->device, NRI_INTERFACE(NriHelperInterface), &gpu->helper) != NriResult_SUCCESS ||
+        nriGetInterface(gpu->device, NRI_INTERFACE(NriSwapChainInterface), &gpu->swapchain) != NriResult_SUCCESS) {
         SDL_Log("NRI interface acquisition failed");
         gpu_deinit(gpu);
 

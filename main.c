@@ -6,17 +6,10 @@
 
 
 int main(int argc, char **argv) {
-    const char *model_path =
-        argc > 1 ?
-            argv[1] :
-            "concrete_temple.glb";
+    const char *model_path = argc > 1 ? argv[1] : "concrete_temple.glb";
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
-        fprintf(
-            stderr,
-            "Could not initialize SDL: %s\n",
-            SDL_GetError()
-        );
+        fprintf(stderr, "Could not initialize SDL: %s\n", SDL_GetError());
 
         return 1;
     }
@@ -26,12 +19,7 @@ int main(int argc, char **argv) {
     GLTF_SCENE visual = {0};
 
     if (!glb_load(&document, model_path)) {
-        fprintf(
-            stderr,
-            "Could not load %s: %s\n",
-            model_path,
-            glb_error(&document)
-        );
+        fprintf(stderr, "Could not load %s: %s\n", model_path, glb_error(&document));
 
         SDL_Quit();
 
@@ -39,11 +27,7 @@ int main(int argc, char **argv) {
     }
 
     if (!glb_extract_mesh(&document, &geometry)) {
-        fprintf(
-            stderr,
-            "Could not extract mesh from %s\n",
-            model_path
-        );
+        fprintf(stderr, "Could not extract mesh from %s\n", model_path);
 
         glb_free(&document);
         SDL_Quit();
@@ -52,11 +36,7 @@ int main(int argc, char **argv) {
     }
 
     if (!gltf_extract(&document, &visual)) {
-        fprintf(
-            stderr,
-            "Could not extract glTF scene from %s\n",
-            model_path
-        );
+        fprintf(stderr, "Could not extract glTF scene from %s\n", model_path);
 
         mesh_free(&geometry);
         glb_free(&document);
@@ -72,12 +52,7 @@ int main(int argc, char **argv) {
 
     SCENE scene = {0};
 
-    if (!scene_add_model(
-            &scene,
-            &model,
-            STATIC,
-            transform_identity()
-        )) {
+    if (!scene_add_model(&scene, &model, STATIC, transform_identity())) {
         fprintf(stderr, "Could not create scene\n");
 
         gltf_free(&visual);
@@ -91,17 +66,8 @@ int main(int argc, char **argv) {
     GPU gpu = {0};
     RENDERER renderer = {0};
 
-    if (!gpu_init(
-            &gpu,
-            "Pony Radiance",
-            1280,
-            720
-        )) {
-        fprintf(
-            stderr,
-            "Could not initialize GPU: %s\n",
-            SDL_GetError()
-        );
+    if (!gpu_init(&gpu, "Pony Radiance", 1280, 720)) {
+        fprintf(stderr, "Could not initialize GPU: %s\n", SDL_GetError());
 
         scene_free(&scene);
         gltf_free(&visual);
@@ -112,8 +78,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (!renderer_init(&renderer, &gpu) ||
-        !renderer_set_scene(&renderer, &scene)) {
+    if (!renderer_init(&renderer, &gpu) || !renderer_set_scene(&renderer, &scene)) {
         fprintf(stderr, "Could not initialize renderer\n");
 
         renderer_deinit(&renderer);
@@ -147,9 +112,7 @@ int main(int argc, char **argv) {
                 running = false;
             }
 
-            if (event.type == SDL_EVENT_KEY_DOWN &&
-                !event.key.repeat &&
-                event.key.key == SDLK_ESCAPE) {
+            if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.key == SDLK_ESCAPE) {
                 running = false;
             }
 
@@ -160,6 +123,7 @@ int main(int argc, char **argv) {
 
         if (!renderer_frame(&renderer)) {
             fprintf(stderr, "Renderer frame failed\n");
+
             running = false;
         }
 
