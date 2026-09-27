@@ -67,9 +67,9 @@ int main(int argc, char **argv) {
     struct MODEL scene_model = {.geometry = &scene, .visual = &visual};
     OBJECT scene_object = {.state = STATIC, .type = MODEL, .data = &scene_model};
     struct MODEL *scene_data = scene_object.data;
-    DIRECTIONAL_LIGHT directional_sun = {.direction = {-0.38f, -0.30f, -0.32f},
+    DIRECTIONAL_LIGHT directional_sun = {.direction = {0.38f, 0.30f, 0.32f},
                                          .color = {1.00f, 0.94f, 0.84f},
-                                         .intensity = 2.4f,
+                                         .intensity = 1.0f,
                                          .angular_radius = 0.00465f};
     SKY sky = {.zenith = {0.22f, 0.42f, 0.78f}, .horizon = {0.68f, 0.76f, 0.88f}, .intensity = 1.0f};
     VOLUMETRICS_LIGHTING volumetrics = {.density = 0.045f,
