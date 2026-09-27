@@ -234,9 +234,13 @@ static bool bake_make_probe_grid(const MESH *m, float spacing, PROBE_GRID *grid)
     if (!isfinite(extent.x) || !isfinite(extent.y) || !isfinite(extent.z) || extent.x < 0.0f || extent.y < 0.0f || extent.z < 0.0f) return false;
 
     float smallest_extent = INFINITY;
+
     if (extent.x > 0.0f) smallest_extent = fminf(smallest_extent, extent.x);
+
     if (extent.y > 0.0f) smallest_extent = fminf(smallest_extent, extent.y);
+
     if (extent.z > 0.0f) smallest_extent = fminf(smallest_extent, extent.z);
+
     if (isfinite(smallest_extent)) spacing = fminf(spacing, fmaxf(0.25f, smallest_extent * 0.5f));
 
     grid->count_x = (uint32_t)ceilf(extent.x / spacing) + 1u;

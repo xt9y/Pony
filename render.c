@@ -171,9 +171,13 @@ static bool make_probe_grid(const MESH *m, float spacing, PROBE_GRID *grid) {
     if (!isfinite(extent.x) || !isfinite(extent.y) || !isfinite(extent.z) || extent.x < 0.0f || extent.y < 0.0f || extent.z < 0.0f) return false;
 
     float smallest_extent = INFINITY;
+
     if (extent.x > 0.0f) smallest_extent = fminf(smallest_extent, extent.x);
+
     if (extent.y > 0.0f) smallest_extent = fminf(smallest_extent, extent.y);
+
     if (extent.z > 0.0f) smallest_extent = fminf(smallest_extent, extent.z);
+
     if (isfinite(smallest_extent)) spacing = fminf(spacing, fmaxf(0.25f, smallest_extent * 0.5f));
 
     if (extent.x / spacing > 16384.0f || extent.y / spacing > 16384.0f || extent.z / spacing > 16384.0f) return false;
@@ -546,7 +550,9 @@ bool r_build_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const L
 
     BVH runtime_tree = {0};
     const bool runtime_bvh = bvh_build(&runtime_tree, m, visual) && upload_bvh(r, &runtime_tree);
+
     bvh_free(&runtime_tree);
+
     if (!runtime_bvh) return false;
 
     r->has_bake = false;
@@ -610,6 +616,7 @@ void r_event(RENDERER *r, const SDL_Event *event) {
 
 bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const PERIPHERAL_VISION *vision) {
     if (!r || !r->window || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics || !vision) return false;
+
     if (!dynamic_sync(r)) return false;
 
     DIRECTIONAL_LIGHT sun = light->directional;

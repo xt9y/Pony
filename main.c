@@ -96,12 +96,13 @@ int main(int argc, char **argv) {
         .state = DYNAMIC,
         .type = MODEL,
         .transform = {
-            .position = {0.6f, 0.3f, 0.0f},
+            .position = {0.6f, 1.18f, 0.0f},
             .rotation = {0.0f, 0.0f, 0.0f},
             .scale = {0.8f, 0.8f, 0.8f}
         },
         .data = &cube_model
     };
+
     bool cube_registered = false;
 
     DIRECTIONAL_LIGHT directional_sun = {
@@ -232,6 +233,7 @@ int main(int argc, char **argv) {
         fputc('\n', stderr);
 
         bake_cancel(&r);
+
         if (cube_registered) r_remove_dynamic_object(&r, &cube_object);
         r_deinit(&r);
         gltf_free(cube_model.visual);
@@ -418,6 +420,7 @@ int main(int argc, char **argv) {
     }
 
     bake_cancel(&r);
+
     if (cube_registered) r_remove_dynamic_object(&r, &cube_object);
     r_deinit(&r);
     gltf_free(cube_model.visual);

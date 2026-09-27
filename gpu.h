@@ -180,6 +180,7 @@ struct RENDERER {
     NriTexture *dynamic_overlay;
     NriBuffer *dynamic_cell_generation;
     NriBuffer *dynamic_overlay_generation;
+
     uint32_t dynamic_overlay_width, dynamic_overlay_height;
 
     uint32_t swapchain_width, swapchain_height, current_swap_index;

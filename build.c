@@ -129,8 +129,15 @@ static void compile_nri_shaders(void) {
         int written;
 
         if (job->wave && dxc_available) {
-            written = snprintf(command, sizeof(command), "dxc -spirv -fspv-target-env=vulkan1.2 -T cs_6_6 -E %s -I shaders -D%s %s -Fo build/shaders/%s.spv", job->entry,
-                               job->define, job->path, job->define);
+            written = snprintf(
+                command,
+                sizeof(command),
+                "dxc -spirv -fspv-target-env=vulkan1.2 -T cs_6_6 -E %s -I shaders -D%s %s -Fo build/shaders/%s.spv",
+                job->entry,
+                job->define,
+                job->path,
+                job->define
+            );
         } else {
             const char *define = job->wave ? job->fallback_define : job->define;
             written = snprintf(command, sizeof(command), "%s %s %s %s %s build/shaders/%s.spv", shadercross, job->path, job->entry, define, job->stage, job->define);
