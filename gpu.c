@@ -3071,17 +3071,6 @@ static bool bake_lightmap_once(RENDERER *r, const LIGHTMAP *lm) {
     if (!build_lightmap_patches(r, lm)) return false;
 
     if (r->lightmap_trace_count) {
-        allocator = NULL;
-        cmd = NULL;
-
-        if (begin_commands(r, &allocator, &cmd) != NriResult_SUCCESS) return false;
-
-        if (!gpu_timestamp_begin(r, cmd, 2u)) {
-            abort_commands(r, allocator, cmd);
-
-            return false;
-        }
-
         Uint32 trace_groups_x = 0u, trace_groups_y = 0u, trace_dispatch_width = 0u;
 
         dispatch_shape_trace(r->lightmap_trace_count, &trace_groups_x, &trace_groups_y, &trace_dispatch_width);
@@ -3093,16 +3082,20 @@ static bool bake_lightmap_once(RENDERER *r, const LIGHTMAP *lm) {
 
             if (count > BAKE_BATCH_SAMPLES) count = BAKE_BATCH_SAMPLES;
 
+            allocator = NULL;
+            cmd = NULL;
+
+            if (begin_commands(r, &allocator, &cmd) != NriResult_SUCCESS) return false;
+
             if (!record_trace_batch(r, cmd, first, count, r->lightmap_trace_count, batch_index, trace_groups_x, trace_groups_y, trace_dispatch_width)) {
                 abort_commands(r, allocator, cmd);
 
                 return false;
             }
-        }
 
-        if (!gpu_timestamp_end(r, cmd, 2u) || !submit_commands(r, allocator, cmd)) return false;
-        gpu_timestamp_log(r, 2u, "surface lightmap trace");
-        bake_progress(r, "surface lightmap", r->bake_target_samples, r->bake_target_samples);
+            if (!submit_commands(r, allocator, cmd)) return false;
+            bake_progress(r, "surface lightmap", first + count, r->bake_target_samples);
+        }
     }
 
     bake_progress(r, "filtering lightmap", 0u, 0u);

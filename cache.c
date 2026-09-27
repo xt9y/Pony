@@ -99,7 +99,7 @@ static bool cache_replace_file(const char *source, const char *destination) {
     return rename(source, destination) == 0;
 }
 
-bool cache_read_partial(const char *path, uint64_t scene_hash, cached_lightmap *out) {
+bool cache_read_partial(const char *path, uint64_t scene_hash, CACHED_LIGHTMAP *out) {
 
     if (!path || !out) return false;
     memset(out, 0, sizeof(*out));
