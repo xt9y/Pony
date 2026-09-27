@@ -27,6 +27,7 @@ float4 dynamic_shadow_vs(DynamicShadowInput input) : SV_Position
                 max(shadow_extent.xy, float2(1.0e-6f, 1.0e-6f));
     float depth = (shadow_sun_max.w - dot(world, shadow_sun_max.xyz)) /
                   max(shadow_extent.z, 1.0e-6f);
+    uv.y = 1.0f - uv.y;
     return float4(uv * 2.0f - 1.0f, saturate(depth), 1.0f);
 }
 
