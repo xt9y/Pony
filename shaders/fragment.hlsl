@@ -236,9 +236,7 @@ float3 runtime_indirect(float3 world, float2 uv, float3 baked)
     uint generation = CellGenerations[index];
     if (generation == 0u || OverlayGenerations[index] != generation) return baked;
     float4 overlay = DynamicOverlay.SampleLevel(IndirectLightmapSampler, uv, 0.0f);
-    float confidence_samples = min((float)dynamic_grid_dims_target.w, 4.0f);
-    float confidence = saturate(overlay.a / max(confidence_samples, 1.0f));
-    return max(baked + overlay.rgb * confidence, 0.0f);
+    return max(baked + overlay.rgb, 0.0f);
 }
 
 float3 mapped_normal(SurfaceInput input, float scale)
