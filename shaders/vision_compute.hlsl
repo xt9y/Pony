@@ -25,9 +25,9 @@ float vision_eccentricity(float2 uv)
 
 uint vision_stride(float eccentricity)
 {
-    if (eccentricity < 0.50f) return 1u;
-    if (eccentricity < 0.82f) return 2u;
-    return 4u;
+    if (eccentricity < volume_radii.x) return max(volume_strides.x, 1u);
+    if (eccentricity < volume_radii.y) return max(volume_strides.y, 1u);
+    return max(volume_strides.z, 1u);
 }
 
 [numthreads(8, 8, 1)]
@@ -55,7 +55,7 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     float3 maximum = minimum + grid_origin_spacing.w *
         float3(grid_dims_width.xyz - 1u);
     float enter = 0.0f;
-    float leave = 10000.0f;
+    float leave = volume_params.w;
 
     [unroll] for (uint axis = 0; axis < 3u; ++axis) {
         if (abs(direction[axis]) < 1.0e-6f) {
@@ -90,31 +90,33 @@ void volume_cs(uint3 id : SV_DispatchThreadID)
     if (dot(eye_density.xyz - surface_position, surface_normal) < 0.0f)
         surface_normal = -surface_normal;
 
-    uint probe_steps = stride == 1u ? 4u : (stride == 2u ? 3u : 2u);
+    uint probe_steps = eccentricity < volume_radii.x ? volume_quality.x :
+        (eccentricity < volume_radii.y ? volume_quality.y : volume_quality.z);
+    probe_steps = max(probe_steps, 1u);
     float step_size = (leave - enter) / float(probe_steps);
     float3 sum = 0.0f;
     float sun_fraction = 0.0f;
-    float probe_transmission = exp(-eye_density.w * step_size);
+    float probe_transmission = exp(-volume_params.x * step_size);
     float probe_remaining = 1.0f;
 
     [loop] for (uint i = 0u; i < 4u; ++i) {
         if (i >= probe_steps) break;
         float t = enter + (float(i) + 0.5f) * step_size;
         float integral = probe_remaining * (1.0f - probe_transmission);
-        sum += volume_radiance(eye_density.xyz + direction * t,
+        sum += volume_radiance(eye_density.xyz + direction * t, direction,
                                surface_position, surface_normal, depth > 0.0f) *
-               integral * 0.15f;
+               integral * volume_params.z;
         probe_remaining *= probe_transmission;
     }
 
-    float g = forward_g.w;
+    float g = volume_params.y;
     float cosine = dot(direction, normalize(sun_intensity.xyz));
     float hg = (1.0f - g * g) / (12.5663706144f *
         pow(max(1.0f + g * g - 2.0f * g * cosine, 0.001f), 1.5f));
     float sun_integral = integrate_sun_grid(eye_density.xyz, direction, enter, leave,
-                                            eye_density.w, sun_fraction);
+                                            volume_params.x, sun_fraction);
     sum += sun_integral * sun_intensity.w * hg * sun_color.rgb;
-    Output[id.xy] = float4(sum, exp(-eye_density.w * (leave - enter)));
+    Output[id.xy] = float4(sum, exp(-volume_params.x * (leave - enter)));
 }
 
 #elif defined(BUILD_VISION_COMPOSE_CS)
@@ -142,9 +144,9 @@ float vision_eccentricity(float2 uv)
 
 uint vision_stride(float eccentricity)
 {
-    if (eccentricity < 0.50f) return 1u;
-    if (eccentricity < 0.82f) return 2u;
-    return 4u;
+    if (eccentricity < volume_radii.x) return max(volume_strides.x, 1u);
+    if (eccentricity < volume_radii.y) return max(volume_strides.y, 1u);
+    return max(volume_strides.z, 1u);
 }
 
 float depth_similarity(float center_depth, float sample_depth)

@@ -6,9 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define PROBE_MAX_SAMPLES 1024u
-#define PROBE_GRID_SPACING 4.0f
-
 typedef enum BAKE_PHASE { BAKE_PHASE_INIT = 0, BAKE_PHASE_SUN, BAKE_PHASE_PROBES, BAKE_PHASE_SEED, BAKE_PHASE_LIGHTMAP } BAKE_PHASE;
 
 typedef struct BAKE_JOB {
@@ -18,6 +15,7 @@ typedef struct BAKE_JOB {
     const LIGHTMAP *layout;
     const struct LIGHT *light;
     SKY sky;
+    VOLUMETRICS_LIGHTING volumetrics;
     char *path;
     char *worker_path;
     uint64_t scene_hash;
@@ -227,22 +225,22 @@ static bool bake_probe_progress(Uint32 done, Uint32 total, Uint32 active) {
     return !bake_cancelled();
 }
 
-static bool bake_make_probe_grid(const MESH *m, PROBE_GRID *grid) {
-    if (!m || !grid) return false;
+static bool bake_make_probe_grid(const MESH *m, float spacing, PROBE_GRID *grid) {
+    if (!m || !grid || spacing <= 0.0f) return false;
     memset(grid, 0, sizeof(*grid));
 
     const VEC3 extent = v3_sub(m->bounds.max, m->bounds.min);
 
     if (!isfinite(extent.x) || !isfinite(extent.y) || !isfinite(extent.z) || extent.x < 0.0f || extent.y < 0.0f || extent.z < 0.0f) return false;
-    grid->count_x = (uint32_t)ceilf(extent.x / PROBE_GRID_SPACING) + 1u;
-    grid->count_y = (uint32_t)ceilf(extent.y / PROBE_GRID_SPACING) + 1u;
-    grid->count_z = (uint32_t)ceilf(extent.z / PROBE_GRID_SPACING) + 1u;
+    grid->count_x = (uint32_t)ceilf(extent.x / spacing) + 1u;
+    grid->count_y = (uint32_t)ceilf(extent.y / spacing) + 1u;
+    grid->count_z = (uint32_t)ceilf(extent.z / spacing) + 1u;
 
     const uint64_t count = (uint64_t)grid->count_x * grid->count_y * grid->count_z;
 
     if (!count || count > 16384u) return false;
     grid->origin = m->bounds.min;
-    grid->spacing = PROBE_GRID_SPACING;
+    grid->spacing = spacing;
     grid->probes = calloc((size_t)count, sizeof(*grid->probes));
 
     if (!grid->probes) return false;
@@ -253,9 +251,9 @@ static bool bake_make_probe_grid(const MESH *m, PROBE_GRID *grid) {
                 const size_t index = x + (size_t)grid->count_x * (y + (size_t)grid->count_y * z);
 
                 PROBE *p = &grid->probes[index];
-                p->position[0] = grid->origin.x + x * PROBE_GRID_SPACING;
-                p->position[1] = grid->origin.y + y * PROBE_GRID_SPACING;
-                p->position[2] = grid->origin.z + z * PROBE_GRID_SPACING;
+                p->position[0] = grid->origin.x + x * spacing;
+                p->position[1] = grid->origin.y + y * spacing;
+                p->position[2] = grid->origin.z + z * spacing;
                 p->position[3] = 1.0f;
             }
 
@@ -289,6 +287,7 @@ static bool bake_prepare_fast_components(BAKE_JOB *job, RENDERER *worker) {
     worker->sun = job->light->directional;
     worker->sun.direction = v3_normalize(worker->sun.direction);
     worker->sky = job->sky;
+    worker->volumetrics = job->volumetrics;
     if (v3_len_sq(worker->sun.direction) <= 0.0f) return false;
 
     bool good = bvh_build(&tree, job->scene, job->visual);
@@ -305,7 +304,7 @@ static bool bake_prepare_fast_components(BAKE_JOB *job, RENDERER *worker) {
 
     started = SDL_GetPerformanceCounter();
 
-    if (good) good = bake_make_probe_grid(job->scene, &probes) && bake_probe_grid_fast(worker, &probes, &tree, &beams, bake_probe_progress);
+    if (good) good = bake_make_probe_grid(job->scene, job->volumetrics.probe_spacing, &probes) && bake_probe_grid_fast(worker, &probes, &tree, &beams, bake_probe_progress);
 
     if (good) SDL_Log("B: wavefront volume probes took %.2f ms", bake_elapsed_ms(started));
 
@@ -343,7 +342,7 @@ static int SDLCALL bake_thread_main(void *userdata) {
     bake_set_phase(BAKE_PHASE_LIGHTMAP, 0u, 0u, 0u);
 
     bool good = !bake_cancelled() &&
-                r_rebake_current_scene(&worker, job->scene, job->visual, job->layout, job->light, &job->sky, job->worker_path, job->scene_hash, job->layout_hash, job->volume_hash, job->beam_hash);
+                r_rebake_current_scene(&worker, job->scene, job->visual, job->layout, job->light, &job->sky, &job->volumetrics, job->worker_path, job->scene_hash, job->layout_hash, job->volume_hash, job->beam_hash);
 
     if (!good) bake_set_error(job, SDL_GetError());
     bake_worker_deinit(&worker);
@@ -398,9 +397,9 @@ static void bake_free_job(BAKE_JOB *job) {
     free(job);
 }
 
-bool bake_start(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual, const LIGHTMAP *layout, const struct LIGHT *light, const SKY *sky, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
+bool bake_start(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual, const LIGHTMAP *layout, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
                 uint64_t beam_hash) {
-    if (!r || !r->device || !scene || !visual || !layout || !light || light->type != LIGHT_DIRECTIONAL || !sky || !path) return false;
+    if (!r || !r->device || !scene || !visual || !layout || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics || !path) return false;
 
     if (g_bake) {
         SDL_SetError("a bake is already in progress");
@@ -417,6 +416,7 @@ bool bake_start(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual, const 
     job->layout = layout;
     job->light = light;
     job->sky = *sky;
+    job->volumetrics = *volumetrics;
     job->scene_hash = scene_hash;
     job->layout_hash = layout_hash;
     job->volume_hash = volume_hash;

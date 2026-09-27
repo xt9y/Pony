@@ -185,6 +185,24 @@ typedef struct SKY {
     float intensity;
 } SKY;
 
+typedef struct VOLUMETRICS_LIGHTING {
+    float density;
+    float anisotropy;
+    float indirect_intensity;
+    float max_distance;
+    float center_radius;
+    float middle_radius;
+    float probe_spacing;
+    uint32_t center_steps;
+    uint32_t middle_steps;
+    uint32_t peripheral_steps;
+    uint32_t center_stride;
+    uint32_t middle_stride;
+    uint32_t peripheral_stride;
+    uint32_t probe_samples;
+    uint32_t emissive_samples;
+} VOLUMETRICS_LIGHTING;
+
 typedef struct POINT_LIGHT {
     VEC3 position;
 } POINT_LIGHT;
@@ -340,14 +358,14 @@ void cache_free(CACHED_LIGHTMAP *data);
 bool r_init(RENDERER *r, const char *title, int width, int height);
 bool r_build_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm);
 bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, const LIGHTMAP *lm);
-bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm, const struct LIGHT *light, const SKY *sky, const char *path, uint64_t scene_hash, uint64_t layout_hash,
+bool r_rebake_current_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const char *path, uint64_t scene_hash, uint64_t layout_hash,
                             uint64_t volume_hash, uint64_t beam_hash);
 void r_event(RENDERER *r, const SDL_Event *event);
-bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky);
+bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics);
 void r_deinit(RENDERER *r);
 
 void bake_progress(RENDERER *r, const char *stage, Uint32 done, Uint32 total);
-bool bake_start(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual, const LIGHTMAP *layout, const struct LIGHT *light, const SKY *sky, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
+bool bake_start(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual, const LIGHTMAP *layout, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
                 uint64_t beam_hash);
 void bake_update(RENDERER *r);
 void bake_cancel(RENDERER *r);
