@@ -13,6 +13,10 @@
 #define BAKE_IDLE_RENDER_MS 200u
 #define BAKE_IDLE_SLEEP_MS 2u
 
+bool lpv_init(RENDERER *r, const MESH *scene, const GLTF_SCENE *visual);
+bool lpv_update(RENDERER *r, const struct LIGHT *light, const SKY *sky);
+void lpv_deinit(RENDERER *r);
+
 static double elapsed_ms(Uint64 begin) {
     return (double)(SDL_GetPerformanceCounter() - begin) * 1000.0 / (double)SDL_GetPerformanceFrequency();
 }
@@ -321,7 +325,23 @@ int main(int argc, char **argv) {
 
     const bool cached = r_load_cached_lightmap(&r, bake_path, scene_hash, layout_hash, volume_hash, beam_hash, &lm);
 
-    SDL_SetWindowTitle(r.window, cached ? "READY" : "UNBAKED");
+    if (!lpv_init(&r, scene_data->geometry, scene_data->visual)) {
+        fprintf(stderr, "Startup failed at realtime LPV initialization: %s\n", *SDL_GetError() ? SDL_GetError() : "unknown error");
+        if (cube_registered) r_remove_dynamic_object(&r, &cube_object);
+        r_deinit(&r);
+        gltf_free(cube_model.visual);
+        mesh_free(cube_model.geometry);
+        glb_free(&cube_doc);
+        lmap_free(&lm);
+        gltf_free(scene_data->visual);
+        mesh_free(scene_data->geometry);
+        glb_free(&model);
+        SDL_Quit();
+        free(bake_path);
+        return 1;
+    }
+
+    SDL_SetWindowTitle(r.window, "READY | REALTIME LPV");
 
     printf(
         "%s: %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n", model_path, load_ms, scene.vertices.count, scene.faces.count, (double)model.bin_size / (1024.0 * 1024.0)
@@ -338,14 +358,12 @@ int main(int argc, char **argv) {
         lm.texel_density,
         lm.sample_count
     );
-    printf("Lighting: %s. Press B to rebake this scene in the renderer.\n", cached ? "loaded saved bake" : "unbaked fallback");
+    printf("Lighting: realtime LPV. Surface lightmaps are not sampled%s.\n", cached ? "; saved bake retained only as shutdown fallback" : "");
     printf(
-        "Runtime: PBR + sun beams + volume probes -> HDR -> bloom -> ACES + "
-        "GPU LUT\n"
+        "Runtime: PBR + analytic emitters + raster shadows + same-frame LPV -> HDR -> volumetrics -> bloom -> ACES + GPU LUT\n"
     );
     printf(
-        "LMB drag: orbit | wheel: zoom | B: rebake | F5: fog on/off | Tab: "
-        "wireframe | F11: fullscreen | Esc: quit\n"
+        "LMB drag: orbit | wheel: zoom | F5: fog on/off | Tab: wireframe | F11: fullscreen | Esc: quit\n"
     );
 
     bool running = true;
@@ -365,15 +383,7 @@ int main(int argc, char **argv) {
             if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
                 if (event.key.key == SDLK_ESCAPE) running = false;
 
-                if (event.key.scancode == SDL_SCANCODE_B || event.key.key == SDLK_B) {
-                    SDL_ClearError();
-
-                    if (!bake_start(
-                            &r, scene_data->geometry, scene_data->visual, &lm, light_data, &sky, &volumetrics, bake_path, scene_hash, layout_hash, volume_hash, beam_hash
-                        )) {
-                        SDL_Log("B: could not start rebake: %s", *SDL_GetError() ? SDL_GetError() : "unknown error");
-                    }
-                }
+                if (event.key.scancode == SDL_SCANCODE_B || event.key.key == SDLK_B) SDL_Log("LPV: realtime lighting active; no bake required");
             }
 
             r_event(&r, &event);
@@ -393,9 +403,13 @@ int main(int argc, char **argv) {
         if (render_due) {
             const Uint64 frame_begin = SDL_GetPerformanceCounter();
 
-            if (!r_draw(&r, light_data, &sky, &volumetrics, &vision)) {
-                SDL_Log("draw failed: %s", SDL_GetError());
+            if (!lpv_update(&r, light_data, &sky)) {
+                SDL_Log("LPV update failed: %s", *SDL_GetError() ? SDL_GetError() : "unknown error");
+                running = false;
+            }
 
+            if (running && !r_draw(&r, light_data, &sky, &volumetrics, &vision)) {
+                SDL_Log("draw failed: %s", SDL_GetError());
                 running = false;
             }
 
@@ -420,6 +434,7 @@ int main(int argc, char **argv) {
     }
 
     bake_cancel(&r);
+    lpv_deinit(&r);
 
     if (cube_registered) r_remove_dynamic_object(&r, &cube_object);
     r_deinit(&r);

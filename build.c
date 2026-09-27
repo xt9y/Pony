@@ -94,7 +94,7 @@ static void compile_nri_shaders(void) {
         {"shaders/vertex.hlsl", "surface_vs", "BUILD_SURFACE_VS", NULL, "vertex", 0},
         {"shaders/vertex.hlsl", "wireframe_vs", "BUILD_WIREFRAME_VS", NULL, "vertex", 0},
         {"shaders/vertex.hlsl", "fullscreen_vs", "BUILD_FULLSCREEN_VS", NULL, "vertex", 0},
-        {"shaders/fragment.hlsl", "surface_fs", "BUILD_SURFACE_FS", NULL, "fragment", 0},
+        {"shaders/lpv_surface.hlsl", "surface_fs", "BUILD_SURFACE_FS", NULL, "fragment", 0},
         {"shaders/fragment.hlsl", "wireframe_fs", "BUILD_WIREFRAME_FS", NULL, "fragment", 0},
         {"shaders/fragment.hlsl", "sky_fs", "BUILD_SKY_FS", NULL, "fragment", 0},
         {"shaders/fragment.hlsl", "compose_fs", "BUILD_COMPOSE_FS", NULL, "fragment", 0},
@@ -164,6 +164,7 @@ void build(C_Build *b) {
     c_sources(app, "gpu.c");
     c_sources(app, "render.c");
     c_sources(app, "dynamic.c");
+    c_sources(app, "lpv.c");
     c_sources(app, "bake.c");
     c_sources(app, "cache.c");
     c_sources(app, "beam.c");
