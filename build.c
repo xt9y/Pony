@@ -20,9 +20,12 @@ static void format_sources(void) {
 
 /*
  * Build-time shader compiler: Slang (slangc); the runtime only loads SPIR-V.
- * Windows/macOS/Linux: download the matching prebuilt archive from
- * https://github.com/shader-slang/slang/releases, keep its bin/ contents
- * together, and add bin/ to PATH. Vulkan SDK 1.3.296+ also ships Slang.
+ * Vulkan SDK 1.3.296+ bundles Slang. The full SDK is needed for development,
+ * while a finished game only needs a Vulkan-capable driver/runtime.
+ * Windows: winget install --id KhronosGroup.VulkanSDK -e
+ * macOS: install the current LunarG SDK from https://vulkan.lunarg.com/sdk/home/
+ *        (brew install vulkan-tools molten-vk installs the Vulkan stack, not slangc).
+ * Arch/CachyOS: sudo pacman -S vulkan-devel, then install LunarG SDK or Slang for slangc.
  */
 static void compile_shaders(void) {
 #if defined(_WIN32)
