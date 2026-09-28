@@ -189,6 +189,59 @@ Texture2D<float2> VelocityTexture : register(t3, space1);
 [[vk::binding(4, 1)]]
 Texture2D<uint> ObjectIdTexture : register(t4, space1);
 
+
+[[vk::binding(5, 1)]]
+Texture2D<float> HZBTexture : register(t5, space1);
+
+[[vk::binding(0, 2)]]
+Texture2D<float> HZBSource : register(t0, space2);
+
+[[vk::binding(1, 2)]]
+RWTexture2D<float> HZBOutput : register(u0, space2);
+
+[numthreads(8, 8, 1)]
+void CS_HZB(uint3 dispatch_id : SV_DispatchThreadID) {
+
+    uint src_width;
+    uint src_height;
+
+    uint dst_width;
+    uint dst_height;
+
+    HZBSource.GetDimensions(src_width, src_height);
+    HZBOutput.GetDimensions(dst_width, dst_height);
+
+    const uint2 pixel = dispatch_id.xy;
+
+    if (pixel.x >= dst_width || pixel.y >= dst_height) {
+        return;
+    }
+
+    // HZB mip 0 is an exact copy of the raster depth buffer.
+    // if (src_width == dst_width && src_height == dst_height) {
+    //     HZBOutput[pixel] = HZBSource.Load(int3(pixel, 0));
+    //     return;
+    // }
+
+    const uint2 src_size = uint2(src_width, src_height);
+    const uint2 dst_size = uint2(dst_width, dst_height);
+
+    const uint2 src_begin = (pixel * src_size) / dst_size;
+    const uint2 src_end = ((pixel + uint2(1, 1)) * src_size) / dst_size;
+
+    float depth = 0.0;
+
+    for (uint y = src_begin.y; y < src_end.y; ++y) {
+
+        for (uint x = src_begin.x; x < src_end.x; ++x) {
+
+            depth = max(depth, HZBSource.Load(int3(int2(x, y), 0)));
+        }
+    }
+
+    HZBOutput[pixel] = depth;
+}
+
 float4 PS_Present(PresentVSOutput input) : SV_Target0 {
 
     const int2 pixel = int2(input.position.xy);
@@ -237,6 +290,53 @@ float4 PS_Present(PresentVSOutput input) : SV_Target0 {
             value,
             frac(value * 3.17),
             frac(value * 7.13),
+            1.0
+        );
+
+    #elif defined(HZB)
+        // const float depth_a = DepthTexture.Load(int3(pixel, 0));
+        // const float depth_b = HZBTexture.Load(int3(pixel, 0));
+        // const float diff = saturate(abs(depth_a - depth_b) * 50000.0);
+        // return float4(diff.xxx, 1.0);
+
+        uint hzb_width;
+        uint hzb_height;
+        uint hzb_mip_count;
+
+        HZBTexture.GetDimensions(0, hzb_width, hzb_height, hzb_mip_count);
+
+        const uint mip = 0u;
+
+        float hzb_depth;
+
+        if (mip == 0u) {
+            hzb_depth = DepthTexture.Load(int3(pixel, 0));
+        } else {
+            const uint hzb_mip = mip - 1u;
+
+            uint hzb_width;
+            uint hzb_height;
+            uint hzb_mip_count;
+
+            HZBTexture.GetDimensions(0, hzb_width, hzb_height, hzb_mip_count);
+
+            const uint mip_width = max(1u, hzb_width >> hzb_mip);
+            const uint mip_height = max(1u, hzb_height >> hzb_mip);
+
+            const uint2 hzb_pixel = min(
+                uint2(pixel) >> mip,
+                uint2(mip_width - 1u, mip_height - 1u)
+            );
+
+            hzb_depth = HZBTexture.Load(int3(int2(hzb_pixel), hzb_mip));
+        }
+
+        const float linear_depth =
+            (near_plane * far_plane) /
+            (hzb_depth * (far_plane - near_plane) + near_plane);
+
+        return float4(
+            1.0 - saturate(linear_depth / 200.0).xxx,
             1.0
         );
 

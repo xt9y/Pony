@@ -360,23 +360,198 @@ static void destroy_gbuffer(RENDERER *renderer) {
     renderer->height = 0;
 }
 
+static void destroy_hzb(RENDERER *renderer) {
+
+    for (uint32_t mip = 0; mip < HZB_MAX_MIPS; ++mip) {
+
+        if (renderer->hzb.mip_srvs[mip]) {
+            renderer->gpu->core.DestroyDescriptor(renderer->hzb.mip_srvs[mip]);
+        }
+
+        if (renderer->hzb.mip_uavs[mip]) {
+            renderer->gpu->core.DestroyDescriptor(renderer->hzb.mip_uavs[mip]);
+        }
+    }
+
+    if (renderer->hzb.srv) {
+        renderer->gpu->core.DestroyDescriptor(renderer->hzb.srv);
+    }
+
+    if (renderer->hzb.texture) {
+        gpu_destroy_texture(renderer->gpu, renderer->hzb.texture);
+    }
+
+    memset(&renderer->hzb, 0, sizeof(renderer->hzb));
+}
+
 static void update_present_descriptor(RENDERER *renderer) {
     if (!renderer->present_set || !renderer->depth.srv || !renderer->normal_roughness.srv || !renderer->albedo_metallic.srv || !renderer->velocity.srv ||
-        !renderer->object_id.srv) {
+        !renderer->object_id.srv || !renderer->hzb.srv) {
         return;
     }
 
-    const NriDescriptor *descriptors[] = {renderer->depth.srv, renderer->normal_roughness.srv, renderer->albedo_metallic.srv, renderer->velocity.srv, renderer->object_id.srv};
+    const NriDescriptor *descriptors[] = {
+        renderer->depth.srv, renderer->normal_roughness.srv, renderer->albedo_metallic.srv, renderer->velocity.srv, renderer->object_id.srv, renderer->hzb.srv
+    };
 
     const NriUpdateDescriptorRangeDesc update = {
         .descriptorSet = renderer->present_set,
         .rangeIndex = 0,
         .baseDescriptor = 0,
         .descriptors = descriptors,
-        .descriptorNum = 5,
+        .descriptorNum = 6,
     };
 
     renderer->gpu->core.UpdateDescriptorRanges(&update, 1);
+}
+
+static void update_hzb_descriptors(RENDERER *renderer) {
+
+    NriUpdateDescriptorRangeDesc updates[HZB_MAX_MIPS * 2];
+
+    const NriDescriptor *sources[HZB_MAX_MIPS];
+    const NriDescriptor *destinations[HZB_MAX_MIPS];
+
+    uint32_t update_count = 0;
+
+    for (uint32_t mip = 0; mip < renderer->hzb.mip_count; ++mip) {
+
+        sources[mip] = mip == 0 ? renderer->depth.srv : renderer->hzb.mip_srvs[mip - 1];
+
+        destinations[mip] = renderer->hzb.mip_uavs[mip];
+
+        updates[update_count++] =
+            (NriUpdateDescriptorRangeDesc){
+                .descriptorSet = renderer->hzb_sets[mip],
+                .rangeIndex = 0,
+                .baseDescriptor = 0,
+                .descriptors = &sources[mip],
+                .descriptorNum = 1
+            };
+
+        updates[update_count++] =
+            (NriUpdateDescriptorRangeDesc){
+                .descriptorSet = renderer->hzb_sets[mip],
+                .rangeIndex = 1,
+                .baseDescriptor = 0,
+                .descriptors = &destinations[mip],
+                .descriptorNum = 1
+            };
+    }
+
+    renderer->gpu->core.UpdateDescriptorRanges(updates, update_count);
+}
+
+
+static uint32_t hzb_mip_count(uint32_t width, uint32_t height) {
+
+    uint32_t size = width > height ? width : height;
+    uint32_t count = 1;
+
+    while (size > 1) {
+        size >>= 1;
+        ++count;
+    }
+
+    return count;
+}
+
+static bool create_hzb(RENDERER *renderer, uint32_t width, uint32_t height) {
+
+    if (!width || !height) return false;
+
+    destroy_hzb(renderer);
+
+    renderer->hzb.width = width > 1 ? width >> 1 : 1;
+    renderer->hzb.height = height > 1 ? height >> 1 : 1;
+    renderer->hzb.mip_count = hzb_mip_count(width, height);
+
+    if (renderer->hzb.mip_count > HZB_MAX_MIPS) {
+        SDL_Log("HZB requires %us mips, maximum is %u", renderer->hzb.mip_count, HZB_MAX_MIPS);
+        destroy_hzb(renderer);
+
+        return false;
+    }
+
+    const NriTextureDesc texture_desc = {
+        .type = NriTextureType_TEXTURE_2D,
+        .usage = NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE,
+        .format = NriFormat_R32_SFLOAT,
+        .width = width,
+        .height = height,
+        .depth = 1,
+        .mipNum = (NriDim_t)renderer->hzb.mip_count,
+        .layerNum = 1,
+        .sampleNum = 1
+    };
+
+    if (!gpu_create_texture(renderer->gpu, &texture_desc, NriMemoryLocation_DEVICE, &renderer->hzb.texture)) {
+        goto fail;
+    }
+
+    const NriTextureViewDesc srv = {
+        .texture = renderer->hzb.texture,
+        .type = NriTextureView_TEXTURE,
+        .format = NriFormat_R32_SFLOAT,
+        .mipOffset = 0,
+        .mipNum = (NriDim_t)renderer->hzb.mip_count,
+        .layerNum = 1,
+        .sliceNum = 1,
+        .planes = NriPlaneBits_COLOR,
+    };
+
+    if (renderer->gpu->core.CreateTextureView(&srv, &renderer->hzb.srv) != NriResult_SUCCESS) {
+        goto fail;
+    }
+
+    for (uint32_t mip = 0; mip < renderer->hzb.mip_count; ++mip) {
+
+        const NriTextureViewDesc mip_srv = {
+            .texture = renderer->hzb.texture,
+            .type = NriTextureView_TEXTURE,
+            .format = NriFormat_R32_SFLOAT,
+            .mipOffset = (NriDim_t)mip,
+            .mipNum = 1,
+            .layerNum = 1,
+            .sliceNum = 1,
+            .planes = NriPlaneBits_COLOR
+        };
+
+        if (renderer->gpu->core.CreateTextureView(&mip_srv, &renderer->hzb.mip_srvs[mip]) != NriResult_SUCCESS) {
+            goto fail;
+        }
+
+        const NriTextureViewDesc mip_uav = {
+            .texture = renderer->hzb.texture,
+            .type = NriTextureView_STORAGE_TEXTURE,
+            .format = NriFormat_R32_SFLOAT,
+            .mipOffset = (NriDim_t)mip,
+            .mipNum = 1,
+            .layerNum = 1,
+            .sliceNum = 1,
+            .planes = NriPlaneBits_COLOR
+        };
+
+        if (renderer->gpu->core.CreateTextureView(&mip_uav, &renderer->hzb.mip_uavs[mip]) != NriResult_SUCCESS) {
+            goto fail;
+        }
+
+        renderer->hzb.mip_states[mip] = (NriAccessLayoutStage){
+            .access = NriAccessBits_NONE,
+            .layout = NriLayout_UNDEFINED,
+            .stages = NriStageBits_NONE
+        };
+    }
+
+    update_hzb_descriptors(renderer);
+    update_present_descriptor(renderer);
+
+    return true;
+
+fail:
+    destroy_hzb(renderer);
+
+    return false;
 }
 
 static bool create_gbuffer(RENDERER *renderer, uint32_t width, uint32_t height) {
@@ -575,7 +750,7 @@ static bool create_pipeline_layouts(RENDERER *renderer) {
 
     const NriDescriptorRangeDesc present_range = {
         .baseRegisterIndex = 0,
-        .descriptorNum = 5,
+        .descriptorNum = 6,
         .descriptorType = NriDescriptorType_TEXTURE,
         .shaderStages = NriStageBits_FRAGMENT_SHADER
     };
@@ -594,15 +769,49 @@ static bool create_pipeline_layouts(RENDERER *renderer) {
         .flags = NriPipelineLayoutBits_IGNORE_GLOBAL_SPIRV_OFFSETS
     };
 
-    return renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &present_layout, &renderer->present_layout) == NriResult_SUCCESS;
+    if (renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &present_layout, &renderer->present_layout) != NriResult_SUCCESS) {
+        return false;
+    }
+
+    const NriDescriptorRangeDesc hzb_ranges[] = {
+        {
+            .baseRegisterIndex = 0,
+            .descriptorNum = 1,
+            .descriptorType = NriDescriptorType_TEXTURE,
+            .shaderStages = NriStageBits_COMPUTE_SHADER
+        },
+        {
+            .baseRegisterIndex = 1,
+            .descriptorNum = 1,
+            .descriptorType = NriDescriptorType_STORAGE_TEXTURE,
+            .shaderStages = NriStageBits_COMPUTE_SHADER
+        }
+    };
+
+    const NriDescriptorSetDesc hzb_set = {
+        .registerSpace = 2,
+        .ranges = hzb_ranges,
+        .rangeNum = 2
+    };
+
+    const NriPipelineLayoutDesc hzb_layout = {
+        .rootRegisterSpace = 0,
+        .descriptorSets = &hzb_set,
+        .descriptorSetNum = 1,
+        .shaderStages = NriStageBits_COMPUTE_SHADER,
+        .flags = NriPipelineLayoutBits_IGNORE_GLOBAL_SPIRV_OFFSETS
+    };
+
+    return renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &hzb_layout, &renderer->hzb_layout) == NriResult_SUCCESS;
 }
 
 static bool create_descriptor_pool(RENDERER *renderer) {
 
     const NriDescriptorPoolDesc pool_desc = {
-        .descriptorSetMaxNum = 2,
+        .descriptorSetMaxNum = 2 + HZB_MAX_MIPS,
         .constantBufferMaxNum = 1,
-        .textureMaxNum = 5,
+        .textureMaxNum = 6 + HZB_MAX_MIPS,
+        .storageTextureMaxNum = HZB_MAX_MIPS,
         .structuredBufferMaxNum = 2
     };
 
@@ -615,6 +824,10 @@ static bool create_descriptor_pool(RENDERER *renderer) {
     }
 
     if (renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->present_layout, 0, &renderer->present_set, 1, 0) != NriResult_SUCCESS) {
+        return false;
+    }
+
+    if (renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->hzb_layout, 0, renderer->hzb_sets, HZB_MAX_MIPS, 0) != NriResult_SUCCESS) {
         return false;
     }
 
@@ -679,6 +892,32 @@ static bool create_present_pipeline(RENDERER *renderer, const char *fragment_sha
 
     free(vertex_code);
     free(fragment_code);
+
+    return success;
+}
+
+static bool create_hzb_pipeline(RENDERER *renderer) {
+
+    void *compute_code = NULL;
+    size_t compute_size = 0;
+
+    if (!load_shader("build/shaders/hzb.cs.spv", &compute_code, &compute_size)) {
+        return false;
+    }
+
+    NriComputePipelineDesc pipeline_desc = {
+        .pipelineLayout = renderer->hzb_layout,
+        .shader = {
+            .stage = NriStageBits_COMPUTE_SHADER,
+            .bytecode = compute_code,
+            .size = (size_t)compute_size,
+            .entryPointName = "main"
+        }
+    };
+
+    const bool success = renderer->gpu->core.CreateComputePipeline(renderer->gpu->device, &pipeline_desc, &renderer->hzb_pipeline) == NriResult_SUCCESS;
+
+    free(compute_code);
 
     return success;
 }
@@ -1317,6 +1556,33 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
     return true;
 }
 
+static void transition_depth_for_hzb(RENDERER *renderer, NriCommandBuffer *command_buffer) {
+
+    const NriAccessLayoutStage shader_state = {
+        .access = NriAccessBits_SHADER_RESOURCE,
+        .layout = NriLayout_SHADER_RESOURCE,
+        .stages = NriStageBits_COMPUTE_SHADER | NriStageBits_FRAGMENT_SHADER,
+    };
+
+    const NriTextureBarrierDesc depth_barrier = {
+        .texture = renderer->depth.texture,
+        .before = renderer->depth.state,
+        .after = shader_state,
+        .mipOffset = 0,
+        .mipNum = 1,
+        .layerNum = 1,
+        .planes = NriPlaneBits_DEPTH
+    };
+
+    const NriBarrierDesc barrier = {
+        .textures = &depth_barrier,
+        .textureNum = 1
+    };
+
+    renderer->gpu->core.CmdBarrier(command_buffer, &barrier);
+    renderer->depth.state = shader_state;
+}
+
 static void transition_gbuffer_for_render(RENDERER *renderer, NriCommandBuffer *command_buffer) {
 
     const NriAccessLayoutStage color_state = {
@@ -1397,14 +1663,14 @@ static void transition_gbuffer_for_present(RENDERER *renderer, NriCommandBuffer 
     };
 
     const NriTextureBarrierDesc barriers[] = {
-        {
-            .texture = renderer->depth.texture,
-            .before = renderer->depth.state,
-            .after = shader_state,
-            .mipNum = 1,
-            .layerNum = 1,
-            .planes = NriPlaneBits_DEPTH
-        },
+        // {
+        //     .texture = renderer->depth.texture,
+        //     .before = renderer->depth.state,
+        //     .after = shader_state,
+        //     .mipNum = 1,
+        //     .layerNum = 1,
+        //     .planes = NriPlaneBits_DEPTH
+        // },
         {
             .texture = renderer->normal_roughness.texture,
             .before = renderer->normal_roughness.state,
@@ -1441,16 +1707,97 @@ static void transition_gbuffer_for_present(RENDERER *renderer, NriCommandBuffer 
 
     const NriBarrierDesc barrier = {
         .textures = barriers,
-        .textureNum = 5
+        .textureNum = 4
     };
 
     renderer->gpu->core.CmdBarrier(command_buffer, &barrier);
 
-    renderer->depth.state = shader_state;
+    // renderer->depth.state = shader_state;
     renderer->normal_roughness.state = shader_state;
     renderer->albedo_metallic.state = shader_state;
     renderer->velocity.state = shader_state;
     renderer->object_id.state = shader_state;
+}
+
+static void build_hzb(RENDERER *renderer, NriCommandBuffer *command_buffer) {
+
+    const NriAccessLayoutStage write_state = {
+        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
+        .layout = NriLayout_SHADER_RESOURCE_STORAGE,
+        .stages = NriStageBits_COMPUTE_SHADER
+    };
+
+    const NriAccessLayoutStage read_state = {
+        .access = NriAccessBits_SHADER_RESOURCE,
+        .layout = NriLayout_SHADER_RESOURCE,
+        .stages = NriStageBits_COMPUTE_SHADER | NriStageBits_FRAGMENT_SHADER
+    };
+
+    renderer->gpu->core.CmdSetPipelineLayout(command_buffer, NriBindPoint_COMPUTE, renderer->hzb_layout);
+    renderer->gpu->core.CmdSetPipeline(command_buffer, renderer->hzb_pipeline);
+
+    for (uint32_t mip = 0; mip < renderer->hzb.mip_count; ++mip) {
+
+        const NriTextureBarrierDesc to_write = {
+            .texture = renderer->hzb.texture,
+            .before = renderer->hzb.mip_states[mip],
+            .after = write_state,
+            .mipOffset = (NriDim_t)mip,
+            .mipNum = 1,
+            .layerNum = 1,
+            .planes = NriPlaneBits_COLOR
+        };
+
+        const NriBarrierDesc write_barrier = {
+            .textures = &to_write,
+            .textureNum = 1
+        };
+
+        renderer->gpu->core.CmdBarrier(command_buffer, &write_barrier);
+
+        const NriSetDescriptorSetDesc desciptor_set = {
+            .setIndex = 0,
+            .descriptorSet = renderer->hzb_sets[mip],
+            .bindPoint = NriBindPoint_COMPUTE
+        };
+
+        renderer->gpu->core.CmdSetDescriptorSet(command_buffer, &desciptor_set);
+
+        const uint32_t mip_width = renderer->hzb.width >> mip ? renderer->hzb.width >> mip : 1u;
+        const uint32_t mip_height = renderer->hzb.height >> mip ? renderer->hzb.height >> mip : 1u;
+
+        const NriDispatchDesc dispatch = {
+            .workGroupNumX = (mip_width + 7u) / 8u,
+            .workGroupNumY = (mip_height + 7u) / 8u,
+            .workGroupNumZ = 1
+        };
+
+        renderer->gpu->core.CmdDispatch(command_buffer, &dispatch);
+
+        /*
+         * Critical Stage-4 dependency:
+         *
+         * mip N was just written as a UAV.
+         * mip N becomes mip N+1's SRV.
+         */
+        const NriTextureBarrierDesc to_read = {
+            .texture = renderer->hzb.texture,
+            .before = write_state,
+            .after = read_state,
+            .mipOffset = (NriDim_t)mip,
+            .mipNum = 1,
+            .layerNum = 1,
+            .planes = NriPlaneBits_COLOR
+        };
+
+        const NriBarrierDesc read_barrier = {
+            .textures = &to_read,
+            .textureNum = 1
+        };
+
+        renderer->gpu->core.CmdBarrier(command_buffer, &read_barrier);
+        renderer->hzb.mip_states[mip] = read_state;
+    }
 }
 
 static void set_fullscreen_view(RENDERER *renderer, NriCommandBuffer *command_buffer) {
@@ -1684,7 +2031,8 @@ bool renderer_init(RENDERER *renderer, GPU *gpu) {
     renderer->previous_view_projection = mat4_identity();
 
     if (!create_pipeline_layouts(renderer) || !create_descriptor_pool(renderer) || !create_frame_buffer(renderer) || !create_pipelines(renderer) ||
-        !create_gbuffer(renderer, gpu->swapchain_width, gpu->swapchain_height)) {
+        !create_hzb_pipeline(renderer) || !create_gbuffer(renderer, gpu->swapchain_width, gpu->swapchain_height) ||
+        !create_hzb(renderer, gpu->swapchain_width, gpu->swapchain_width)) {
         renderer_deinit(renderer);
 
         return false;
@@ -1709,6 +2057,10 @@ void renderer_deinit(RENDERER *renderer) {
             renderer->gpu->core.DestroyPipeline(renderer->present_pipeline);
         }
 
+        if (renderer->hzb_pipeline) {
+            renderer->gpu->core.DestroyPipeline(renderer->hzb_pipeline);
+        }
+
         if (renderer->descriptor_pool) {
             renderer->gpu->core.DestroyDescriptorPool(renderer->descriptor_pool);
         }
@@ -1721,6 +2073,10 @@ void renderer_deinit(RENDERER *renderer) {
             renderer->gpu->core.DestroyPipelineLayout(renderer->present_layout);
         }
 
+        if (renderer->hzb_layout) {
+            renderer->gpu->core.DestroyPipelineLayout(renderer->hzb_layout);
+        }
+
         destroy_scene_resources(renderer);
 
         if (renderer->frame_srv) {
@@ -1731,6 +2087,7 @@ void renderer_deinit(RENDERER *renderer) {
             renderer->gpu->core.DestroyBuffer(renderer->frame_buffer);
         }
 
+        destroy_hzb(renderer);
         destroy_gbuffer(renderer);
     } else free(renderer->cpu_objects);
 
@@ -1869,6 +2226,11 @@ void renderer_event(RENDERER *renderer, const SDL_Event *event) {
 
                     break;
 
+                case SDLK_6:
+                    if (set_debug_view(renderer, "HZB")) SDL_Log("Debug view HZB activated");
+
+                    break;
+
                 default:
                     break;
             }
@@ -1893,7 +2255,16 @@ bool renderer_frame(RENDERER *renderer) {
     if (!command_buffer || !swapchain_texture) return true;
 
     if (renderer->width != renderer->gpu->swapchain_width || renderer->height != renderer->gpu->swapchain_height) {
+
+        if (renderer->gpu->core.QueueWaitIdle(renderer->gpu->graphics_queue) != NriResult_SUCCESS) {
+            return false;
+        }
+
         if (!create_gbuffer(renderer, renderer->gpu->swapchain_width, renderer->gpu->swapchain_height)) {
+            return false;
+        }
+
+        if (!create_hzb(renderer, renderer->gpu->swapchain_width, renderer->gpu->swapchain_height)) {
             return false;
         }
     }
@@ -1914,11 +2285,12 @@ bool renderer_frame(RENDERER *renderer) {
     }
 
     transition_gbuffer_for_render(renderer, command_buffer);
-
     record_gbuffer_pass(renderer, command_buffer);
 
-    transition_gbuffer_for_present(renderer, command_buffer);
+    transition_depth_for_hzb(renderer, command_buffer);
+    build_hzb(renderer, command_buffer);
 
+    transition_gbuffer_for_present(renderer, command_buffer);
     record_present_pass(renderer, command_buffer, swapchain_index);
 
     const bool frame_finished = gpu_end_frame(renderer->gpu, command_buffer, swapchain_index);

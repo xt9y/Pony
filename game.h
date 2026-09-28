@@ -7,6 +7,7 @@
 
 #include <SDL3/SDL.h>
 
+#include "NRIDescs.h"
 #include "gpu.h"
 
 
@@ -296,6 +297,22 @@ typedef struct CAMERA {
     float far_plane;
 } CAMERA;
 
+#define HZB_MAX_MIPS 16u
+
+typedef struct HZB {
+    NriTexture *texture;
+
+    NriDescriptor *srv;
+    NriDescriptor *mip_srvs[HZB_MAX_MIPS];
+    NriDescriptor *mip_uavs[HZB_MAX_MIPS];
+
+    NriAccessLayoutStage mip_states[HZB_MAX_MIPS];
+
+    uint32_t mip_count;
+    uint32_t width;
+    uint32_t height;
+} HZB;
+
 typedef struct RENDER_TEXTURE {
     NriTexture *texture;
 
@@ -336,16 +353,21 @@ typedef struct RENDERER {
     RENDER_TEXTURE velocity;
     RENDER_TEXTURE object_id;
 
+    HZB hzb;
+
     NriDescriptorPool *descriptor_pool;
 
     NriDescriptorSet *gbuffer_set;
     NriDescriptorSet *present_set;
+    NriDescriptorSet *hzb_sets[HZB_MAX_MIPS];
 
     NriPipelineLayout *gbuffer_layout;
     NriPipelineLayout *present_layout;
+    NriPipelineLayout *hzb_layout;
 
     NriPipeline *gbuffer_pipeline;
     NriPipeline *present_pipeline;
+    NriPipeline *hzb_pipeline;
 
     uint32_t width;
     uint32_t height;
