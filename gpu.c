@@ -1,5 +1,4 @@
 #include "gpu.h"
-#include "game.h"
 
 #include "NRI.h"
 #include "NRIDescs.h"
@@ -288,6 +287,7 @@ static void destroy_streamer(GPU *gpu) {
         gpu->streamer_api.DestroyStreamer(gpu->streamer);
     }
 }
+
 
 bool gpu_begin_frame(GPU *gpu, NriCommandBuffer **command_buffer, NriTexture **swapchain_texture, uint32_t *swapchain_index) {
     if (!gpu || !gpu->device || !gpu->swapchain || !gpu->frame_contexts || !gpu->frame_fence || !command_buffer || !swapchain_texture || !swapchain_index) {

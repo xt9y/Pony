@@ -18,8 +18,78 @@ static void format_sources(void) {
     }
 }
 
+static void compile_shaders(void) {
+#if defined(_WIN32)
+
+    if (system("if not exist build\\shaders mkdir build\\shaders") != 0) {
+        fprintf(stderr, "Could not create shader directory\n");
+        exit(1);
+    }
+
+    const char *commands[] = {
+        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
+        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
+        "-T vs_6_6 -E VS_GBuffer shader.hlsl "
+        "-Fo build\\shaders\\gbuffer.vs.spv",
+
+        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
+        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
+        "-T ps_6_6 -E PS_GBuffer shader.hlsl "
+        "-Fo build\\shaders\\gbuffer.ps.spv",
+
+        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
+        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
+        "-T vs_6_6 -E VS_Present shader.hlsl "
+        "-Fo build\\shaders\\present.vs.spv",
+
+        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
+        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
+        "-T ps_6_6 -E PS_Present shader.hlsl "
+        "-Fo build\\shaders\\present.ps.spv"
+    };
+
+#else
+
+    if (system("mkdir -p build/shaders") != 0) {
+        fprintf(stderr, "Could not create shader directory\n");
+        exit(1);
+    }
+
+    const char *commands[] = {
+        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
+        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
+        "-T vs_6_6 -E VS_GBuffer shader.hlsl "
+        "-Fo build/shaders/gbuffer.vs.spv",
+
+        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
+        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
+        "-T ps_6_6 -E PS_GBuffer shader.hlsl "
+        "-Fo build/shaders/gbuffer.ps.spv",
+
+        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
+        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
+        "-T vs_6_6 -E VS_Present shader.hlsl "
+        "-Fo build/shaders/present.vs.spv",
+
+        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
+        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
+        "-T ps_6_6 -E PS_Present shader.hlsl "
+        "-Fo build/shaders/present.ps.spv"
+    };
+
+#endif
+
+    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
+        if (system(commands[i]) != 0) {
+            fprintf(stderr, "SPIR-V shader compilation failed\n");
+            exit(1);
+        }
+    }
+}
+
 void build(C_Build *b) {
     format_sources();
+    compile_shaders();
 
     C_Target *app = c_executable(b, "game");
 

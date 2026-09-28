@@ -7,6 +7,7 @@
 
 #include <SDL3/SDL.h>
 
+#include "NRIDescs.h"
 #include "gpu.h"
 
 
@@ -287,11 +288,64 @@ typedef struct CAMERA {
     float far_plane;
 } CAMERA;
 
+typedef struct RENDER_TEXTURE {
+    NriTexture *texture;
+
+    NriDescriptor *attachment;
+    NriDescriptor *srv;
+
+    NriAccessLayoutStage state;
+    NriFormat formar;
+} RENDER_TEXTURE;
+
 typedef struct RENDERER {
     GPU *gpu;
     SCENE *scene;
 
     CAMERA camera;
+    CAMERA previous_camera;
+
+    MAT4 previous_view_projection;
+
+    NriBuffer *vertex_buffer;
+    NriBuffer *material_buffer;
+    NriBuffer *object_buffer;
+    NriBuffer *frame_buffer;
+
+    NriDescriptor *material_srv;
+    NriDescriptor *object_srv;
+    NriDescriptor *frame_srv;
+
+    GPU_OBJECT *cpu_objects;
+
+    uint32_t gpu_object_count;
+    uint32_t vertex_count;
+    uint32_t material_count;
+
+    RENDER_TEXTURE depth;
+    RENDER_TEXTURE normal_roughness;
+    RENDER_TEXTURE albedo_metallic;
+    RENDER_TEXTURE velocity;
+    RENDER_TEXTURE object_id;
+
+    NriDescriptorPool *descriptor_pool;
+
+    NriDescriptorSet *gbuffer_set;
+    NriDescriptorSet *present_set;
+
+    NriPipelineLayout *gbuffer_layout;
+    NriPipelineLayout *present_layout;
+
+    NriPipeline *gbuffer_pipeline;
+    NriPipeline *present_pipeline;
+
+    uint32_t width;
+    uint32_t height;
+
+    bool has_previuous_frame;
+
+    NriAccessStage object_state;
+    NriAccessStage frame_state;
 
     uint64_t frame_index;
 } RENDERER;
