@@ -313,6 +313,18 @@ typedef struct HZB {
     uint32_t height;
 } HZB;
 
+typedef struct SCREEN_TRACE {
+    NriTexture *texture;
+
+    NriDescriptor *srv;
+    NriDescriptor *uav;
+
+    NriAccessLayoutStage state;
+
+    uint32_t width;
+    uint32_t height;
+} SCREEN_TRACE;
+
 typedef struct RENDER_TEXTURE {
     NriTexture *texture;
 
@@ -354,20 +366,24 @@ typedef struct RENDERER {
     RENDER_TEXTURE object_id;
 
     HZB hzb;
+    SCREEN_TRACE screen_trace;
 
     NriDescriptorPool *descriptor_pool;
 
     NriDescriptorSet *gbuffer_set;
     NriDescriptorSet *present_set;
     NriDescriptorSet *hzb_sets[HZB_MAX_MIPS];
+    NriDescriptorSet *screen_trace_set;
 
     NriPipelineLayout *gbuffer_layout;
     NriPipelineLayout *present_layout;
     NriPipelineLayout *hzb_layout;
+    NriPipelineLayout *screen_trace_layout;
 
     NriPipeline *gbuffer_pipeline;
     NriPipeline *present_pipeline;
     NriPipeline *hzb_pipeline;
+    NriPipeline *screen_trace_pipeline;
 
     uint32_t width;
     uint32_t height;

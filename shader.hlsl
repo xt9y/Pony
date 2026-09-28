@@ -25,6 +25,7 @@ struct GPUMaterial {
 struct FrameConstants {
 
     row_major float4x4 view_projection;
+    row_major float4x4 inverse_view_projection;
     row_major float4x4 previous_view_projection;
 
     float4 camera_position;
@@ -199,6 +200,300 @@ Texture2D<float> HZBSource : register(t0, space2);
 [[vk::binding(1, 2)]]
 RWTexture2D<float> HZBOutput : register(u0, space2);
 
+
+[[vk::binding(6, 1)]]
+Texture2D<float4> ScreenTraceTexture : register(t6, space1);
+
+[[vk::binding(0, 3)]]
+Texture2D<float> TraceDepth : register(t0, space3);
+
+[[vk::binding(1, 3)]]
+Texture2D<float4> TraceNormalRoughness : register(t1, space3);
+
+[[vk::binding(2, 3)]]
+Texture2D<float4> TraceAlbedoMetallic : register(t2, space3);
+
+[[vk::binding(3, 3)]]
+Texture2D<float> TraceHZB : register(t3, space3);
+
+[[vk::binding(4, 3)]]
+ConstantBuffer<FrameConstants> TraceFrame : register(b0, space3);
+
+[[vk::binding(5, 3)]]
+RWTexture2D<float4> ScreenTraceOutput : register(u0, space3);
+
+
+
+float2 ScreenUVToNDC(float2 uv) {
+
+    return float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+}
+
+float2 NDCToScreenUV(float2 ndc) {
+
+    return float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+}
+
+float3 ReconstructWorldPosition(uint2 pixel, float depth) {
+
+    const float2 uv = (float2(pixel) + 0.5) * TraceFrame.resolution.zw;
+    const float2 ndc = ScreenUVToNDC(uv);
+
+    float4 world = mul(float4(ndc, depth, 1.0), TraceFrame.inverse_view_projection);
+
+    return world.xyz / world.w;
+}
+
+uint2 TraceLevelDimensions(uint level) {
+
+    if (level == 0) return uint2(TraceFrame.resolution.xy);
+
+    uint width;
+    uint height;
+    uint mip_count;
+
+    TraceHZB.GetDimensions(level - 1, width, height, mip_count);
+
+    return uint2(width, height);
+}
+
+float TraceLevelDepth(float2 uv, uint level, out uint2 cell) {
+
+    const uint2 dimensions = TraceLevelDimensions(level);
+    cell = min( uint2(uv * dimensions), dimensions - 1);
+
+    if (level == 0) return TraceDepth.Load(int3(cell, 0));
+
+    return TraceHZB.Load(int3(cell, level - 1));
+}
+
+bool ProjectTracePoint(float4 clip_origin, float4 clip_direction, float distance, out float2 uv, out float depth) {
+
+    uv = float2(0.0, 0.0);
+    depth = 0.0;
+    const float4 clip = clip_origin + clip_direction * distance;
+
+    if (clip.w <= 1.0e-5) return false;
+
+    const float3 ndc = clip.xyz / clip.w;
+
+    uv = NDCToScreenUV(ndc.xy);
+    depth = ndc.z;
+
+    return
+        all(uv >= 0.0) &&
+        all(uv < 1.0) &&
+        depth >= 0.0 &&
+        depth <= 1.0;
+}
+
+float SolveTraceDistance(float value_origin, float value_direction, float w_origin, float w_direction, float target) {
+
+    const float denominator = value_direction - target * w_direction;
+
+    if (abs(denominator) < 1.0e-7) return 1.0e30;
+
+    return(target * w_origin - value_origin) / denominator;
+}
+
+float TraceCellExit(float4 clip_origin, float4 clip_direction, float2 uv, uint2 dimensions, uint2 cell, float distance, float2 screen_direction) {
+
+    float exit_x = 1.0e30;
+    float exit_y = 1.0e30;
+
+    if (abs(screen_direction.x) > 1.0e-7) {
+
+        const float boundary = screen_direction.x > 0.0 ? (float)(cell.x + 1u) / (float)dimensions.x : (float)cell.x / (float)dimensions.x;
+        const float target_ndc = boundary * 2.0 - 1.0;
+        exit_x = SolveTraceDistance(clip_origin.x, clip_direction.x, clip_origin.w, clip_direction.w, target_ndc);
+
+        if (exit_x <= distance + 1.0e-5) exit_x = 1.0e30;
+    }
+
+    if (abs(screen_direction.y) > 1.0e-7) {
+
+        const float boundary = screen_direction.y > 0.0 ? (float)(cell.y + 1u) / (float)dimensions.y : (float)cell.y / (float)dimensions.y;
+        const float target_ndc = 1.0 - boundary * 2.0;
+
+        exit_y = SolveTraceDistance(clip_origin.y, clip_direction.y, clip_origin.w, clip_direction.w, target_ndc);
+
+        if (exit_y <= distance + 1.0e-5) exit_y = 1.0e30;
+    }
+
+    return min(exit_x, exit_y);
+}
+
+float SolveDepthCrossing(float4 clip_origin, float4 clip_direction, float target_depth) {
+
+    return SolveTraceDistance(
+        clip_origin.z,
+        clip_direction.z,
+        clip_origin.w,
+        clip_direction.w,
+        target_depth
+    );
+}
+
+bool TraceScreenRay(float3 origin, float3 direction, uint2 origin_pixel, out uint2 hit_pixel) {
+
+    hit_pixel = uint2(0, 0);
+    static const float MAX_DISTANCE = 200.0;
+    static const uint MAX_STEPS = 128;
+    static const uint MAX_START_LEVEL = 5;
+
+    const float4 clip_origin = mul(
+        float4(origin, 1.0),
+        TraceFrame.view_projection
+    );
+
+    const float4 clip_direction = mul(
+        float4(direction, 0.0),
+        TraceFrame.view_projection
+    );
+
+    if (clip_origin.w <= 1.0e-5) return false;
+
+    uint hzb_width;
+    uint hzb_height;
+    uint hzb_mip_count;
+
+    TraceHZB.GetDimensions(0, hzb_width, hzb_height, hzb_mip_count);
+
+    const uint maximum_level = min(hzb_mip_count, MAX_START_LEVEL);
+
+    uint level = maximum_level;
+
+    /*
+     * Sign of projected movement.
+     * A projected 3D line remains a line, although
+     * its parameterization is perspective nonlinear.
+     */
+    const float2 screen_direction = float2(
+        clip_direction.x * clip_origin.w - clip_origin.x * clip_direction.w,
+        -(clip_direction.y * clip_origin.w - clip_origin.y * clip_direction.w));
+
+    float distance = 0.0;
+
+    [loop]
+    for (uint step = 0; step < MAX_STEPS; ++step) {
+
+        if (distance >= MAX_DISTANCE) return false;
+
+        float2 uv;
+        float ray_depth;
+
+        if (!ProjectTracePoint(clip_origin, clip_direction, distance, uv, ray_depth)) {
+            return false;
+        }
+
+        uint2 cell;
+        const float scene_depth = TraceLevelDepth(uv, level, cell);
+        const uint2 dimensions = TraceLevelDimensions(level);
+        float exit_distance = TraceCellExit(clip_origin, clip_direction, uv, dimensions, cell, distance, screen_direction);
+        exit_distance = min(exit_distance, MAX_DISTANCE);
+
+        if (exit_distance >= 1.0e29) return false;
+
+        float2 exit_uv;
+        float exit_depth;
+
+        if (!ProjectTracePoint(clip_origin, clip_direction, exit_distance, exit_uv, exit_depth)) {
+            return false;
+        }
+
+        /*
+         * Reverse Z:
+         *
+         * larger depth = nearer.
+         *
+         * The HZB stores max(), therefore scene_depth
+         * is the nearest surface represented by the cell.
+         *
+         * If even the farther end of this ray segment is
+         * still nearer than that value, the complete cell
+         * can safely be skipped.
+         */
+        const float farther_ray_depth = min(ray_depth, exit_depth);
+        const bool clear_cell = scene_depth <= 0.0 || farther_ray_depth > scene_depth + 1.0e-5;
+
+        if (clear_cell) {
+
+            distance = exit_distance + max(1.0e-4, exit_distance * 1.0e-5);
+            level = min(level + 1u, maximum_level);
+            continue;
+        }
+
+        if (level > 0u) {
+            --level;
+            continue;
+        }
+
+        // Full-resolution candidate.
+        const float hit_distance = SolveDepthCrossing(clip_origin, clip_direction, scene_depth);
+
+        if (hit_distance >= distance - 1.0e-4 && hit_distance <= exit_distance + 1.0e-4) {
+
+            const float3 surface_position = ReconstructWorldPosition(cell, scene_depth);
+            const float3 ray_position = origin + direction * hit_distance;
+            const float camera_distance = length(surface_position - TraceFrame.camera_position.xyz);
+            const float thickness = max(0.03, camera_distance * 0.002);
+            const bool self_hit = all(cell == origin_pixel) && hit_distance < 0.05;
+
+            if (!self_hit && length(surface_position - ray_position) <= thickness) {
+                hit_pixel = cell;
+                return true;
+            }
+        }
+
+        distance = exit_distance + max(1.0e-4, exit_distance * 1.0e-5);
+
+        level = min(1u, maximum_level);
+    }
+
+    return false;
+}
+
+[numthreads(8, 8, 1)]
+void CS_ScreenTrace(uint3 dispatch_id : SV_DispatchThreadID) {
+
+    const uint2 pixel = dispatch_id.xy;
+    const uint2 resolution = uint2(TraceFrame.resolution.xy);
+
+    if (pixel.x >= resolution.x || pixel.y >= resolution.y) return;
+
+    const float depth = TraceDepth.Load(int3(pixel, 0));
+
+    // Background doesn't launch a ray.
+    if (depth <= 0.0) {
+
+        ScreenTraceOutput[pixel] = float4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
+    const float3 position = ReconstructWorldPosition(pixel, depth);
+
+    float3 normal = normalize(TraceNormalRoughness.Load(int3(pixel, 0)).xyz);
+
+    const float3 view_direction = normalize(position - TraceFrame.camera_position.xyz);
+
+    // Rasterization is two-sided right now.
+    if (dot(normal, view_direction) > 0.0) normal = -normal;
+
+    const float3 reflection = normalize(reflect(view_direction, normal));
+    const float camera_distance = length(position - TraceFrame.camera_position.xyz);
+    const float bias = max(0.02, camera_distance * 0.001);
+    const float3 origin = position + normal * bias + reflection * bias;
+    uint2 hit_pixel;
+
+    if (TraceScreenRay(origin, reflection, pixel, hit_pixel)) {
+        
+        ScreenTraceOutput[pixel] = float4(TraceAlbedoMetallic.Load(int3(hit_pixel, 0)).rgb, 1.0);
+        return;
+    }
+
+    ScreenTraceOutput[pixel] = float4(1.0, 0.0, 1.0, 1.0);
+}
+
 [numthreads(8, 8, 1)]
 void CS_HZB(uint3 dispatch_id : SV_DispatchThreadID) {
 
@@ -339,6 +634,9 @@ float4 PS_Present(PresentVSOutput input) : SV_Target0 {
             1.0 - saturate(linear_depth / 200.0).xxx,
             1.0
         );
+        
+    #elif defined(SCREEN_TRACE)
+        return float4(ScreenTraceTexture.Load(int3(pixel, 0)).rgb, 1.0);
 
     #else
 

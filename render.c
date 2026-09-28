@@ -17,9 +17,8 @@
 
 typedef struct FRAME_CONSTANTS {
     MAT4 view_projection;
+    MAT4 inverse_view_projection;
     MAT4 previous_view_projection;
-
-    MAT4 previous_inverse_view_projection;
 
     float camera_position[4];
     float resolution[4];
@@ -164,6 +163,78 @@ static MAT4 mat4_reverse_z_projection(float fov_y, float aspect, float near_p, f
     r.m[14] = (near_p * far_p) * inv_depth;
 
     return r;
+}
+
+static bool mat4_inverse(MAT4 matrix, MAT4 *inverse) {
+
+    float a[4][8];
+
+    for (uint32_t row = 0; row < 4; ++row) {
+
+        for (uint32_t column = 0; column < 4; ++column) {
+            a[row][column] = matrix.m[row * 4 + column];
+        }
+
+        for (uint32_t column = 0; column < 4; ++column) {
+            a[row][4 + column] = row == column ? 1.0f : 0.0f;
+        }
+    }
+
+    for (uint32_t column = 0; column < 4; ++column) {
+
+        uint32_t pivot = column;
+        float pivot_size = fabsf(a[pivot][column]);
+
+        for (uint32_t row = column + 1; row < 4; ++row) {
+
+            const float size = fabsf(a[row][column]);
+
+            if (size > pivot_size) {
+                pivot = row;
+                pivot_size = size;
+            }
+        }
+
+        if (pivot_size < 1.0e-8f) {
+            return false;
+        }
+
+        if (pivot != column) {
+
+            for (uint32_t i = 0; i < 8; ++i) {
+                const float temporary = a[column][i];
+
+                a[column][i] = a[pivot][i];
+                a[pivot][i] = temporary;
+            }
+        }
+
+        const float scale = 1.0f / a[column][column];
+
+        for (uint32_t i = 0; i < 8; ++i) {
+            a[column][i] *= scale;
+        }
+
+        for (uint32_t row = 0; row < 4; ++row) {
+
+            if (row == column) continue;
+
+            const float factor = a[row][column];
+
+            for (uint32_t i = 0; i < 8; ++i) {
+                a[row][i] -= factor * a[column][i];
+            }
+        }
+    }
+
+    for (uint32_t row = 0; row < 4; ++row) {
+
+        for (uint32_t column = 0; column < 4; ++column) {
+            inverse->m[row * 4 + column] = a[row][4 + column];
+        }
+    }
+
+    return true;
 }
 
 
@@ -362,6 +433,23 @@ static void destroy_gbuffer(RENDERER *renderer) {
     renderer->height = 0;
 }
 
+static void destroy_screen_trace(RENDERER *renderer) {
+
+    if (renderer->screen_trace.uav) {
+        renderer->gpu->core.DestroyDescriptor(renderer->screen_trace.uav);
+    }
+
+    if (renderer->screen_trace.srv) {
+        renderer->gpu->core.DestroyDescriptor(renderer->screen_trace.srv);
+    }
+
+    if (renderer->screen_trace.texture) {
+        gpu_destroy_texture(renderer->gpu, renderer->screen_trace.texture);
+    }
+
+    memset(&renderer->screen_trace, 0, sizeof(renderer->screen_trace));
+}
+
 static void destroy_hzb(RENDERER *renderer) {
 
     for (uint32_t mip = 0; mip < HZB_MAX_MIPS; ++mip) {
@@ -388,12 +476,18 @@ static void destroy_hzb(RENDERER *renderer) {
 
 static void update_present_descriptor(RENDERER *renderer) {
     if (!renderer->present_set || !renderer->depth.srv || !renderer->normal_roughness.srv || !renderer->albedo_metallic.srv || !renderer->velocity.srv ||
-        !renderer->object_id.srv || !renderer->hzb.srv) {
+        !renderer->object_id.srv || !renderer->hzb.srv || !renderer->screen_trace.srv) {
         return;
     }
 
     const NriDescriptor *descriptors[] = {
-        renderer->depth.srv, renderer->normal_roughness.srv, renderer->albedo_metallic.srv, renderer->velocity.srv, renderer->object_id.srv, renderer->hzb.srv
+        renderer->depth.srv,
+        renderer->normal_roughness.srv,
+        renderer->albedo_metallic.srv,
+        renderer->velocity.srv,
+        renderer->object_id.srv,
+        renderer->hzb.srv,
+        renderer->screen_trace.srv
     };
 
     const NriUpdateDescriptorRangeDesc update = {
@@ -401,10 +495,51 @@ static void update_present_descriptor(RENDERER *renderer) {
         .rangeIndex = 0,
         .baseDescriptor = 0,
         .descriptors = descriptors,
-        .descriptorNum = 6,
+        .descriptorNum = 7,
     };
 
     renderer->gpu->core.UpdateDescriptorRanges(&update, 1);
+}
+
+static void update_screen_trace_descriptors(RENDERER *renderer) {
+
+    if (!renderer->screen_trace_set || !renderer->depth.srv || !renderer->normal_roughness.srv || !renderer->albedo_metallic.srv || !renderer->hzb.srv || !renderer->frame_srv ||
+        !renderer->screen_trace.uav) {
+
+        return;
+    }
+
+    const NriDescriptor *textures[] = {renderer->depth.srv, renderer->normal_roughness.srv, renderer->albedo_metallic.srv, renderer->hzb.srv};
+
+    const NriDescriptor *frame[] = {renderer->frame_srv};
+
+    const NriDescriptor *output[] = {renderer->screen_trace.uav};
+
+    const NriUpdateDescriptorRangeDesc updates[] = {
+        {
+            .descriptorSet = renderer->screen_trace_set,
+            .rangeIndex = 0,
+            .baseDescriptor = 0,
+            .descriptors = textures,
+            .descriptorNum = 4
+        },
+        {
+            .descriptorSet = renderer->screen_trace_set,
+            .rangeIndex = 1,
+            .baseDescriptor = 0,
+            .descriptors = frame,
+            .descriptorNum = 1
+        },
+        {
+            .descriptorSet = renderer->screen_trace_set,
+            .rangeIndex = 2,
+            .baseDescriptor = 0,
+            .descriptors = output,
+            .descriptorNum = 1
+        }
+    };
+
+    renderer->gpu->core.UpdateDescriptorRanges(updates, 3);
 }
 
 static void update_hzb_descriptors(RENDERER *renderer) {
@@ -444,6 +579,78 @@ static void update_hzb_descriptors(RENDERER *renderer) {
     renderer->gpu->core.UpdateDescriptorRanges(updates, update_count);
 }
 
+static bool create_screen_trace(RENDERER *renderer, uint32_t width, uint32_t height) {
+
+    if (!width || !height) return false;
+
+    destroy_screen_trace(renderer);
+
+    renderer->screen_trace.width = width;
+    renderer->screen_trace.height = height;
+
+    const NriTextureDesc texture_desc = {
+        .type = NriTextureType_TEXTURE_2D,
+        .usage = NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE,
+        .format = NriFormat_RGBA16_SFLOAT,
+        .width = (NriDim_t)width,
+        .height = (NriDim_t)height,
+        .depth = 1,
+        .mipNum = 1,
+        .layerNum = 1,
+        .sampleNum = 1
+    };
+
+    if (!gpu_create_texture(renderer->gpu, &texture_desc, NriMemoryLocation_DEVICE, &renderer->screen_trace.texture)) {
+
+        goto fail;
+    }
+
+    const NriTextureViewDesc srv = {
+        .texture = renderer->screen_trace.texture,
+        .type = NriTextureView_TEXTURE,
+        .format = NriFormat_RGBA16_SFLOAT,
+        .mipNum = 1,
+        .layerNum = 1,
+        .sliceNum = 1,
+        .planes = NriPlaneBits_COLOR
+    };
+
+    if (renderer->gpu->core.CreateTextureView(&srv, &renderer->screen_trace.srv) != NriResult_SUCCESS) {
+
+        goto fail;
+    }
+
+    const NriTextureViewDesc uav = {
+        .texture = renderer->screen_trace.texture,
+        .type = NriTextureView_STORAGE_TEXTURE,
+        .format = NriFormat_RGBA16_SFLOAT,
+        .mipNum = 1,
+        .layerNum = 1,
+        .sliceNum = 1,
+        .planes = NriPlaneBits_COLOR
+    };
+
+    if (renderer->gpu->core.CreateTextureView(&uav, &renderer->screen_trace.uav) != NriResult_SUCCESS) {
+
+        goto fail;
+    }
+
+    renderer->screen_trace.state = (NriAccessLayoutStage){
+        .access = NriAccessBits_NONE,
+        .layout = NriLayout_UNDEFINED,
+        .stages = NriStageBits_NONE
+    };
+
+    update_screen_trace_descriptors(renderer);
+    update_present_descriptor(renderer);
+
+    return true;
+
+fail:
+    destroy_screen_trace(renderer);
+
+    return false;
+}
 
 static uint32_t hzb_mip_count(uint32_t width, uint32_t height) {
 
@@ -464,8 +671,9 @@ static bool create_hzb(RENDERER *renderer, uint32_t width, uint32_t height) {
 
     destroy_hzb(renderer);
 
-    renderer->hzb.width = fmax(width >> 1, 1);
-    renderer->hzb.height = fmax(height >> 1, 1);
+    renderer->hzb.width = width > 1 ? width >> 1 : 1;
+
+    renderer->hzb.height = height > 1 ? height >> 1 : 1;
 
     renderer->hzb.mip_count = hzb_mip_count(renderer->hzb.width, renderer->hzb.height);
 
@@ -753,7 +961,7 @@ static bool create_pipeline_layouts(RENDERER *renderer) {
 
     const NriDescriptorRangeDesc present_range = {
         .baseRegisterIndex = 0,
-        .descriptorNum = 6,
+        .descriptorNum = 7,
         .descriptorType = NriDescriptorType_TEXTURE,
         .shaderStages = NriStageBits_FRAGMENT_SHADER
     };
@@ -805,16 +1013,58 @@ static bool create_pipeline_layouts(RENDERER *renderer) {
         .flags = NriPipelineLayoutBits_IGNORE_GLOBAL_SPIRV_OFFSETS
     };
 
-    return renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &hzb_layout, &renderer->hzb_layout) == NriResult_SUCCESS;
+    if (renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &hzb_layout, &renderer->hzb_layout) != NriResult_SUCCESS) {
+        return false;
+    }
+
+    const NriDescriptorRangeDesc screen_trace_ranges[] = {
+
+        {
+            .baseRegisterIndex = 0,
+            .descriptorNum = 4,
+            .descriptorType = NriDescriptorType_TEXTURE,
+            .shaderStages = NriStageBits_COMPUTE_SHADER
+        },
+
+        {
+            .baseRegisterIndex = 4,
+            .descriptorNum = 1,
+            .descriptorType = NriDescriptorType_CONSTANT_BUFFER,
+            .shaderStages = NriStageBits_COMPUTE_SHADER
+        },
+
+        {
+            .baseRegisterIndex = 5,
+            .descriptorNum = 1,
+            .descriptorType = NriDescriptorType_STORAGE_TEXTURE,
+            .shaderStages = NriStageBits_COMPUTE_SHADER
+        }
+    };
+
+    const NriDescriptorSetDesc screen_trace_set = {
+        .registerSpace = 3,
+        .ranges = screen_trace_ranges,
+        .rangeNum = 3
+    };
+
+    const NriPipelineLayoutDesc screen_trace_layout = {
+        .rootRegisterSpace = 0,
+        .descriptorSets = &screen_trace_set,
+        .descriptorSetNum = 1,
+        .shaderStages = NriStageBits_COMPUTE_SHADER,
+        .flags = NriPipelineLayoutBits_IGNORE_GLOBAL_SPIRV_OFFSETS
+    };
+
+    return renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &screen_trace_layout, &renderer->screen_trace_layout) == NriResult_SUCCESS;
 }
 
 static bool create_descriptor_pool(RENDERER *renderer) {
 
     const NriDescriptorPoolDesc pool_desc = {
-        .descriptorSetMaxNum = 2 + HZB_MAX_MIPS,
-        .constantBufferMaxNum = 1,
-        .textureMaxNum = 6 + HZB_MAX_MIPS,
-        .storageTextureMaxNum = HZB_MAX_MIPS,
+        .descriptorSetMaxNum = 3 + HZB_MAX_MIPS,
+        .constantBufferMaxNum = 2,
+        .textureMaxNum = 11 + HZB_MAX_MIPS,
+        .storageTextureMaxNum = HZB_MAX_MIPS + 1,
         .structuredBufferMaxNum = 2
     };
 
@@ -831,6 +1081,10 @@ static bool create_descriptor_pool(RENDERER *renderer) {
     }
 
     if (renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->hzb_layout, 0, renderer->hzb_sets, HZB_MAX_MIPS, 0) != NriResult_SUCCESS) {
+        return false;
+    }
+
+    if (renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->screen_trace_layout, 0, &renderer->screen_trace_set, 1, 0) != NriResult_SUCCESS) {
         return false;
     }
 
@@ -895,6 +1149,32 @@ static bool create_present_pipeline(RENDERER *renderer, const char *fragment_sha
 
     free(vertex_code);
     free(fragment_code);
+
+    return success;
+}
+
+static bool create_screen_trace_pipeline(RENDERER *renderer) {
+
+    void *compute_code = NULL;
+    size_t compute_size = 0;
+
+    if (!load_shader("build/shaders/screen_trace.cs.spv", &compute_code, &compute_size)) {
+        return false;
+    }
+
+    NriComputePipelineDesc pipeline_desc = {
+        .pipelineLayout = renderer->screen_trace_layout,
+        .shader = {
+            .stage = NriStageBits_COMPUTE_SHADER,
+            .bytecode = compute_code,
+            .size = (size_t)compute_size,
+            .entryPointName = "main"
+        }
+    };
+
+    const bool success = renderer->gpu->core.CreateComputePipeline(renderer->gpu->device, &pipeline_desc, &renderer->screen_trace_pipeline) == NriResult_SUCCESS;
+
+    free(compute_code);
 
     return success;
 }
@@ -1426,7 +1706,7 @@ static bool update_scene_objects(RENDERER *renderer) {
     return true;
 }
 
-static FRAME_CONSTANTS make_frame_constants(RENDERER *renderer, MAT4 *view_projection) {
+static bool make_frame_constants(RENDERER *renderer, MAT4 *view_projection, FRAME_CONSTANTS *frame) {
 
     const MAT4 view = mat4_view(renderer->camera);
 
@@ -1435,14 +1715,22 @@ static FRAME_CONSTANTS make_frame_constants(RENDERER *renderer, MAT4 *view_proje
 
     *view_projection = mat4_mul(view, projection);
 
-    FRAME_CONSTANTS frame = {
+    MAT4 inverse_view_projection;
+
+    if (!mat4_inverse(*view_projection, &inverse_view_projection)) {
+
+        return false;
+    }
+
+    *frame = (FRAME_CONSTANTS){
         .view_projection = *view_projection,
+        .inverse_view_projection = inverse_view_projection,
         .previous_view_projection = renderer->has_previous_frame ? renderer->previous_view_projection : *view_projection,
         .camera_position = {renderer->camera.position.x, renderer->camera.position.y, renderer->camera.position.z, 1.0f},
-        .resolution = {(float)renderer->width, (float)renderer->height, 1.0f / (float)renderer->width, 1.0f / (float)renderer->height},
+        .resolution = {(float)renderer->width, (float)renderer->height, 1.0f / (float)renderer->width, 1.0f / (float)renderer->height}
     };
 
-    return frame;
+    return true;
 }
 
 static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_buffer, const FRAME_CONSTANTS *frame) {
@@ -1531,7 +1819,7 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
 
     const NriAccessStage frame_read = {
         .access = NriAccessBits_CONSTANT_BUFFER,
-        .stages = NriStageBits_VERTEX_SHADER
+        .stages = NriStageBits_VERTEX_SHADER | NriStageBits_COMPUTE_SHADER
     };
 
     const NriBufferBarrierDesc to_render[] = {
@@ -1657,7 +1945,7 @@ static void transition_gbuffer_for_render(RENDERER *renderer, NriCommandBuffer *
     renderer->depth.state = depth_state;
 }
 
-static void transition_gbuffer_for_present(RENDERER *renderer, NriCommandBuffer *command_buffer) {
+static void transition_gbuffer_for_read(RENDERER *renderer, NriCommandBuffer *command_buffer) {
 
     const NriAccessLayoutStage shader_state = {
         .access = NriAccessBits_SHADER_RESOURCE,
@@ -1720,6 +2008,75 @@ static void transition_gbuffer_for_present(RENDERER *renderer, NriCommandBuffer 
     renderer->albedo_metallic.state = shader_state;
     renderer->velocity.state = shader_state;
     renderer->object_id.state = shader_state;
+}
+
+static void build_screen_trace(RENDERER *renderer, NriCommandBuffer *command_buffer) {
+
+    const NriAccessLayoutStage write_state = {
+        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
+        .layout = NriLayout_SHADER_RESOURCE_STORAGE,
+        .stages = NriStageBits_COMPUTE_SHADER
+    };
+
+    const NriTextureBarrierDesc to_write = {
+        .texture = renderer->screen_trace.texture,
+        .before = renderer->screen_trace.state,
+        .after = write_state,
+        .mipNum = 1,
+        .layerNum = 1,
+        .planes = NriPlaneBits_COLOR
+    };
+
+    const NriBarrierDesc before_dispatch = {
+        .textures = &to_write,
+        .textureNum = 1
+    };
+
+    renderer->gpu->core.CmdBarrier(command_buffer, &before_dispatch);
+
+    renderer->gpu->core.CmdSetPipelineLayout(command_buffer, NriBindPoint_COMPUTE, renderer->screen_trace_layout);
+
+    renderer->gpu->core.CmdSetPipeline(command_buffer, renderer->screen_trace_pipeline);
+
+    const NriSetDescriptorSetDesc descriptor_set = {
+        .setIndex = 0,
+        .descriptorSet = renderer->screen_trace_set,
+        .bindPoint = NriBindPoint_COMPUTE
+    };
+
+    renderer->gpu->core.CmdSetDescriptorSet(command_buffer, &descriptor_set);
+
+    const NriDispatchDesc dispatch = {
+        .workGroupNumX = (renderer->width + 7u) / 8u,
+        .workGroupNumY = (renderer->height + 7u) / 8u,
+        .workGroupNumZ = 1
+    };
+
+    renderer->gpu->core.CmdDispatch(command_buffer, &dispatch);
+
+    const NriAccessLayoutStage read_state = {
+        .access = NriAccessBits_SHADER_RESOURCE,
+        .layout = NriLayout_SHADER_RESOURCE,
+        .stages = NriStageBits_FRAGMENT_SHADER
+    };
+
+    const NriTextureBarrierDesc to_read = {
+        .texture = renderer->screen_trace.texture,
+        .before = write_state,
+        .after = read_state,
+        .mipNum = 1,
+        .layerNum = 1,
+        .planes = NriPlaneBits_COLOR
+    };
+
+    const NriBarrierDesc after_dispatch = {
+        .textures = &to_read,
+        .textureNum = 1
+    };
+
+    renderer->gpu->core.CmdBarrier(command_buffer, &after_dispatch);
+
+    renderer->screen_trace.state = read_state;
 }
 
 static void build_hzb(RENDERER *renderer, NriCommandBuffer *command_buffer) {
@@ -2034,8 +2391,8 @@ bool renderer_init(RENDERER *renderer, GPU *gpu) {
     renderer->previous_view_projection = mat4_identity();
 
     if (!create_pipeline_layouts(renderer) || !create_descriptor_pool(renderer) || !create_frame_buffer(renderer) || !create_pipelines(renderer) ||
-        !create_hzb_pipeline(renderer) || !create_gbuffer(renderer, gpu->swapchain_width, gpu->swapchain_height) ||
-        !create_hzb(renderer, gpu->swapchain_width, gpu->swapchain_height)) {
+        !create_hzb_pipeline(renderer) || !create_screen_trace_pipeline(renderer) || !create_gbuffer(renderer, gpu->swapchain_width, gpu->swapchain_height) ||
+        !create_hzb(renderer, gpu->swapchain_width, gpu->swapchain_height) || !create_screen_trace(renderer, gpu->swapchain_width, gpu->swapchain_height)) {
         renderer_deinit(renderer);
 
         return false;
@@ -2064,6 +2421,11 @@ void renderer_deinit(RENDERER *renderer) {
             renderer->gpu->core.DestroyPipeline(renderer->hzb_pipeline);
         }
 
+        if (renderer->screen_trace_pipeline) {
+            renderer->gpu->core.DestroyPipeline(renderer->screen_trace_pipeline);
+        }
+
+
         if (renderer->descriptor_pool) {
             renderer->gpu->core.DestroyDescriptorPool(renderer->descriptor_pool);
         }
@@ -2080,6 +2442,10 @@ void renderer_deinit(RENDERER *renderer) {
             renderer->gpu->core.DestroyPipelineLayout(renderer->hzb_layout);
         }
 
+        if (renderer->screen_trace_layout) {
+            renderer->gpu->core.DestroyPipelineLayout(renderer->screen_trace_layout);
+        }
+
         destroy_scene_resources(renderer);
 
         if (renderer->frame_srv) {
@@ -2090,6 +2456,7 @@ void renderer_deinit(RENDERER *renderer) {
             renderer->gpu->core.DestroyBuffer(renderer->frame_buffer);
         }
 
+        destroy_screen_trace(renderer);
         destroy_hzb(renderer);
         destroy_gbuffer(renderer);
     } else free(renderer->cpu_objects);
@@ -2234,6 +2601,11 @@ void renderer_event(RENDERER *renderer, const SDL_Event *event) {
 
                     break;
 
+                case SDLK_7:
+                    if (set_debug_view(renderer, "SCREEN_TRACE")) SDL_Log("Debug view SCREEN_TRACE activated");
+
+                    break;
+
                 default:
                     break;
             }
@@ -2270,6 +2642,10 @@ bool renderer_frame(RENDERER *renderer) {
         if (!create_hzb(renderer, renderer->gpu->swapchain_width, renderer->gpu->swapchain_height)) {
             return false;
         }
+
+        if (!create_screen_trace(renderer, renderer->gpu->swapchain_width, renderer->gpu->swapchain_height)) {
+            return false;
+        }
     }
 
     if (!update_scene_objects(renderer)) {
@@ -2279,7 +2655,11 @@ bool renderer_frame(RENDERER *renderer) {
     update_orbit_camera(renderer);
 
     MAT4 view_projection;
-    const FRAME_CONSTANTS frame = make_frame_constants(renderer, &view_projection);
+    FRAME_CONSTANTS frame;
+
+    if (!make_frame_constants(renderer, &view_projection, &frame)) {
+        return false;
+    }
 
     renderer->gpu->core.CmdSetDescriptorPool(command_buffer, renderer->descriptor_pool);
 
@@ -2293,7 +2673,9 @@ bool renderer_frame(RENDERER *renderer) {
     transition_depth_for_hzb(renderer, command_buffer);
     build_hzb(renderer, command_buffer);
 
-    transition_gbuffer_for_present(renderer, command_buffer);
+    transition_gbuffer_for_read(renderer, command_buffer);
+    build_screen_trace(renderer, command_buffer);
+
     record_present_pass(renderer, command_buffer, swapchain_index);
 
     const bool frame_finished = gpu_end_frame(renderer->gpu, command_buffer, swapchain_index);

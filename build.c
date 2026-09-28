@@ -73,7 +73,12 @@ static void compile_shaders(void) {
         "slangc shader.hlsl -entry CS_HZB -stage compute "
         "-target spirv -profile sm_6_6 -capability spirv_1_5 "
         "-matrix-layout-row-major -fvk-use-dx-layout -O3 "
-        "-o build/shaders/hzb.cs.spv"
+        "-o build/shaders/hzb.cs.spv",
+
+        "slangc shader.hlsl -entry CS_ScreenTrace -stage compute "
+        "-target spirv -profile sm_6_6 -capability spirv_1_5 "
+        "-matrix-layout-row-major -fvk-use-dx-layout -O3 "
+        "-o build/shaders/screen_trace.cs.spv"
     };
 
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
