@@ -530,43 +530,6 @@ bool gpu_init(GPU *gpu, const char *title, int width, int height) {
         }
     };
 
-    NriVertexAttributeDesc attributes_desc[] = {
-        {
-            .d3d = {"POSITION", 0},
-            .vk = {0},
-            .offset = 0,
-            .format = NriFormat_RGB32_SFLOAT,
-            .streamIndex = 0
-        },
-        {
-            .d3d = {"NOR  MAL", 0},
-            .vk = {1},
-            .offset = 12,
-            .format = NriFormat_RGB32_SFLOAT,
-            .streamIndex = 0
-        },
-        {
-            .d3d = {"TEXCOORD", 0},
-            .vk = {2},
-            .offset = 24,
-            .format = NriFormat_RG32_SFLOAT,
-            .streamIndex = 0
-        },
-        {
-            .d3d = {"MATERIAL", 0},
-            .vk = {3},
-            .offset = 32,
-            .format = NriFormat_R32_UINT,
-            .streamIndex = 0
-        }
-    };
-
-    NriVertexStreamDesc stream_desc = {
-        .bindingSlot = 0,
-        .stride = sizeof(GLTF_VERTEX),
-        .stepRate = NriVertexStreamStepRate_PER_VERTEX
-    };
-
     if (nriCreateDevice(&device_desc, &gpu->device) != NriResult_SUCCESS) {
         SDL_Log("NRI device creation failed");
         gpu_deinit(gpu);
