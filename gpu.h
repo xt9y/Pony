@@ -1,18 +1,23 @@
 #ifndef GPU_H
 #define GPU_H
 
-#include "NRIDescs.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 #include <SDL3/SDL.h>
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+
 #if defined(__clang__)
-#pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wgnu-zero-variadic-macro-arguments"
 #pragma clang diagnostic ignored "-Wvariadic-macro-arguments-omitted"
 #pragma clang diagnostic ignored "-Wstrict-prototypes"
 #endif
+
+#include "NRIDescs.h"
 
 // cant use Externsions/NriRayTracing.h because my M2 doesnt support that :(
 #include <NRI.h>
@@ -21,8 +26,8 @@
 #include <Extensions/NRISwapChain.h>
 #include <Extensions/NRIStreamer.h>
 
-#if defined(__clang__)
-#pragma clang diagnostic pop
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
 #endif
 
 typedef struct SWAPCHAIN_FRAME SWAPCHAIN_FRAME;
