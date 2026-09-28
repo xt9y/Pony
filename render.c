@@ -19,6 +19,8 @@ typedef struct FRAME_CONSTANTS {
     MAT4 view_projection;
     MAT4 previous_view_projection;
 
+    MAT4 previous_inverse_view_projection;
+
     float camera_position[4];
     float resolution[4];
 } FRAME_CONSTANTS;
@@ -26,7 +28,7 @@ typedef struct FRAME_CONSTANTS {
 _Static_assert(sizeof(GLTF_VERTEX) == 36u, "GLTF_VERTEX GPU layout changed");
 _Static_assert(sizeof(GPU_OBJECT) == 224u, "GPU_OBJECT GPU layout changed");
 _Static_assert(sizeof(GPU_MATERIAL) == 48u, "GPU_MATERIAL GPU layout changed");
-_Static_assert(sizeof(FRAME_CONSTANTS) == 160u, "FRAME_CONSTANTS GPU layout changed");
+_Static_assert(sizeof(FRAME_CONSTANTS) == 224u, "FRAME_CONSTANTS GPU layout changed");
 
 static MAT4 mat4_identity(void) {
 
@@ -462,9 +464,10 @@ static bool create_hzb(RENDERER *renderer, uint32_t width, uint32_t height) {
 
     destroy_hzb(renderer);
 
-    renderer->hzb.width = width > 1 ? width >> 1 : 1;
-    renderer->hzb.height = height > 1 ? height >> 1 : 1;
-    renderer->hzb.mip_count = hzb_mip_count(width, height);
+    renderer->hzb.width = fmax(width >> 1, 1);
+    renderer->hzb.height = fmax(height >> 1, 1);
+
+    renderer->hzb.mip_count = hzb_mip_count(renderer->hzb.width, renderer->hzb.height);
 
     if (renderer->hzb.mip_count > HZB_MAX_MIPS) {
         SDL_Log("HZB requires %us mips, maximum is %u", renderer->hzb.mip_count, HZB_MAX_MIPS);
@@ -477,8 +480,8 @@ static bool create_hzb(RENDERER *renderer, uint32_t width, uint32_t height) {
         .type = NriTextureType_TEXTURE_2D,
         .usage = NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE,
         .format = NriFormat_R32_SFLOAT,
-        .width = width,
-        .height = height,
+        .width = renderer->hzb.width,
+        .height = renderer->hzb.height,
         .depth = 1,
         .mipNum = (NriDim_t)renderer->hzb.mip_count,
         .layerNum = 1,
@@ -2032,7 +2035,7 @@ bool renderer_init(RENDERER *renderer, GPU *gpu) {
 
     if (!create_pipeline_layouts(renderer) || !create_descriptor_pool(renderer) || !create_frame_buffer(renderer) || !create_pipelines(renderer) ||
         !create_hzb_pipeline(renderer) || !create_gbuffer(renderer, gpu->swapchain_width, gpu->swapchain_height) ||
-        !create_hzb(renderer, gpu->swapchain_width, gpu->swapchain_width)) {
+        !create_hzb(renderer, gpu->swapchain_width, gpu->swapchain_height)) {
         renderer_deinit(renderer);
 
         return false;
