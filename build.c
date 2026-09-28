@@ -18,66 +18,55 @@ static void format_sources(void) {
     }
 }
 
+/*
+ * Build-time shader compiler: Slang (slangc); the runtime only loads SPIR-V.
+ * Windows/macOS/Linux: download the matching prebuilt archive from
+ * https://github.com/shader-slang/slang/releases, keep its bin/ contents
+ * together, and add bin/ to PATH. Vulkan SDK 1.3.296+ also ships Slang.
+ */
 static void compile_shaders(void) {
 #if defined(_WIN32)
-
-    if (system("if not exist build\\shaders mkdir build\\shaders") != 0) {
-        fprintf(stderr, "Could not create shader directory\n");
+    if (system("where slangc >nul 2>&1") != 0) {
+        fprintf(stderr, "slangc was not found on PATH; see the install comment in build.c\n");
         exit(1);
     }
 
-    const char *commands[] = {
-        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
-        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
-        "-T vs_6_6 -E VS_GBuffer shader.hlsl "
-        "-Fo build\\shaders\\gbuffer.vs.spv",
-
-        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
-        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
-        "-T ps_6_6 -E PS_GBuffer shader.hlsl "
-        "-Fo build\\shaders\\gbuffer.ps.spv",
-
-        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
-        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
-        "-T vs_6_6 -E VS_Present shader.hlsl "
-        "-Fo build\\shaders\\present.vs.spv",
-
-        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
-        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
-        "-T ps_6_6 -E PS_Present shader.hlsl "
-        "-Fo build\\shaders\\present.ps.spv"
-    };
-
+    const char *make_directory = "if not exist build\\shaders mkdir build\\shaders";
 #else
+    if (system("command -v slangc >/dev/null 2>&1") != 0) {
+        fprintf(stderr, "slangc was not found on PATH; see the install comment in build.c\n");
+        exit(1);
+    }
 
-    if (system("mkdir -p build/shaders") != 0) {
+    const char *make_directory = "mkdir -p build/shaders";
+#endif
+
+    if (system(make_directory) != 0) {
         fprintf(stderr, "Could not create shader directory\n");
         exit(1);
     }
 
     const char *commands[] = {
-        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
-        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
-        "-T vs_6_6 -E VS_GBuffer shader.hlsl "
-        "-Fo build/shaders/gbuffer.vs.spv",
+        "slangc shader.hlsl -entry VS_GBuffer -stage vertex "
+        "-target spirv -profile sm_6_6 -capability spirv_1_5 "
+        "-matrix-layout-row-major -fvk-use-dx-layout -O3 "
+        "-o build/shaders/gbuffer.vs.spv",
 
-        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
-        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
-        "-T ps_6_6 -E PS_GBuffer shader.hlsl "
-        "-Fo build/shaders/gbuffer.ps.spv",
+        "slangc shader.hlsl -entry PS_GBuffer -stage fragment "
+        "-target spirv -profile sm_6_6 -capability spirv_1_5 "
+        "-matrix-layout-row-major -fvk-use-dx-layout -O3 "
+        "-o build/shaders/gbuffer.ps.spv",
 
-        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
-        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
-        "-T vs_6_6 -E VS_Present shader.hlsl "
-        "-Fo build/shaders/present.vs.spv",
+        "slangc shader.hlsl -entry VS_Present -stage vertex "
+        "-target spirv -profile sm_6_6 -capability spirv_1_5 "
+        "-matrix-layout-row-major -fvk-use-dx-layout -O3 "
+        "-o build/shaders/present.vs.spv",
 
-        "dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -Zpr -O3 "
-        "-fvk-s-shift 0 0 -fvk-t-shift 16 0 -fvk-b-shift 32 0 -fvk-u-shift 48 0 "
-        "-T ps_6_6 -E PS_Present shader.hlsl "
-        "-Fo build/shaders/present.ps.spv"
+        "slangc shader.hlsl -entry PS_Present -stage fragment "
+        "-target spirv -profile sm_6_6 -capability spirv_1_5 "
+        "-matrix-layout-row-major -fvk-use-dx-layout -O3 "
+        "-o build/shaders/present.ps.spv"
     };
-
-#endif
 
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
         if (system(commands[i]) != 0) {

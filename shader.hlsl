@@ -28,10 +28,13 @@ struct FrameConstants {
     float4 resolution;
 };
 
+[[vk::binding(0, 0)]]
 StructuredBuffer<GPUObject> Objects : register(t0, space0);
 
+[[vk::binding(1, 0)]]
 StructuredBuffer<GPUMaterial> Materials : register(t1, space0);
 
+[[vk::binding(2, 0)]]
 ConstantBuffer<FrameConstants> Frame : register(b0, space0);
 
 struct DrawConstants {
@@ -83,7 +86,7 @@ struct GBufferVSOutput {
 
 
 GBufferVSOutput VS_GBuffer(GBufferVSInput input) {
-    
+
     GPUObject object = Objects[Draw.object_index];
 
     float4 local_position = float4(input.position, 1.0);
@@ -96,8 +99,7 @@ GBufferVSOutput VS_GBuffer(GBufferVSInput input) {
 
     output.position = mul(world_position, Frame.view_projection);
 
-    output.current_clip =
-        output.position;
+    output.current_clip = output.position;
 
     output.previous_clip = mul(previous_world_position, Frame.previous_view_projection);
 
@@ -126,12 +128,12 @@ struct GBufferOutput {
 
 
 GBufferOutput PS_GBuffer(GBufferVSOutput input) {
-    
+
     GPUMaterial material = Materials[input.material];
 
     GBufferOutput output;
 
-    output.normal_roughness =float4( normalize(input.normal), material.roughness);
+    output.normal_roughness = float4(normalize(input.normal), material.roughness);
 
     output.albedo_metallic = float4(material.base_color.rgb, material.metallic);
 
@@ -157,8 +159,8 @@ PresentVSOutput VS_Present(uint vertex_id : SV_VertexID) {
 
     const float2 positions[3] = {
         float2(-1.0, -1.0),
-        float2(-1.0,  3.0),
-        float2( 3.0, -1.0)
+        float2(-1.0, 3.0),
+        float2(3.0, -1.0)
     };
 
     PresentVSOutput output;
@@ -169,7 +171,8 @@ PresentVSOutput VS_Present(uint vertex_id : SV_VertexID) {
 }
 
 
-Texture2D<float4> PresentTexture : register(t0, space0);
+[[vk::binding(0, 1)]]
+Texture2D<float4> PresentTexture : register(t0, space1);
 
 
 float4 PS_Present(PresentVSOutput input) : SV_Target0 {
@@ -180,4 +183,3 @@ float4 PS_Present(PresentVSOutput input) : SV_Target0 {
 
     return float4(color, 1.0);
 }
-
