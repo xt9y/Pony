@@ -12,6 +12,8 @@
 #include <string.h>
 
 #define FRAME_CONSTANTS_BUFFER_SIZE 256u
+#define FAR_PLANE 10000.0f
+#define NEAR_PLANE 0.05f
 
 typedef struct FRAME_CONSTANTS {
     MAT4 view_projection;
@@ -160,6 +162,23 @@ static MAT4 mat4_reverse_z_projection(float fov_y, float aspect, float near_p, f
     r.m[14] = (near_p * far_p) * inv_depth;
 
     return r;
+}
+
+
+static void update_orbit_camera(RENDERER *renderer) {
+
+    const float cp = cosf(renderer->camera.pitch);
+
+    renderer->camera.position =
+        v3(renderer->camera.target.x + renderer->camera.distance * cp * cosf(renderer->camera.yaw),
+
+           renderer->camera.target.y + renderer->camera.distance * sinf(renderer->camera.pitch),
+
+           renderer->camera.target.z + renderer->camera.distance * cp * sinf(renderer->camera.yaw));
+
+    renderer->camera.forward = v3_normalize(v3_sub(renderer->camera.target, renderer->camera.position));
+
+    renderer->camera.up = v3(0.0f, 1.0f, 0.0f);
 }
 
 
@@ -916,7 +935,7 @@ static bool set_debug_view(RENDERER *renderer, const char *define) {
 
     NriPipeline *pipeline = NULL;
 
-    if (create_present_pipeline(renderer, "build/shaders/present.runtime.ps.spv", &pipeline)) {
+    if (!create_present_pipeline(renderer, "build/shaders/present.runtime.ps.spv", &pipeline)) {
         return false;
     }
 
@@ -928,8 +947,6 @@ static bool set_debug_view(RENDERER *renderer, const char *define) {
 
     if (renderer->present_pipeline) {
         renderer->gpu->core.DestroyPipeline(renderer->present_pipeline);
-
-        return false;
     }
 
     renderer->present_pipeline = pipeline;
@@ -1658,8 +1675,8 @@ bool renderer_init(RENDERER *renderer, GPU *gpu) {
             .forward = {0.0f, 0.0f, -1.0f},
             .up = {0.0f, 1.0f, 0.0f},
             .fov_y = 62.0f,
-            .near_plane = 0.05f,
-            .far_plane = 1000.0f
+            .near_plane = NEAR_PLANE,
+            .far_plane = FAR_PLANE
         };
 
     renderer->previous_camera = renderer->camera;
@@ -1739,10 +1756,31 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
 
     renderer->scene = scene;
 
+    for (uint32_t i = 0; i < scene->object_count; ++i) {
+        OBJECT *object = &scene->objects[i];
+
+        if (object->type != MODEL) continue;
+
+        struct MODEL *model = object->data;
+
+        if (!model || !model->geometry) continue;
+
+        renderer->camera.target = model->geometry->bounds.center;
+        renderer->scene->radius = fmaxf(model->geometry->bounds.extents.x, fmaxf(model->geometry->bounds.extents.y, model->geometry->bounds.extents.z));
+
+        if (renderer->scene->radius < 1.0f) renderer->scene->radius = 1.0f;
+
+        renderer->camera.distance = renderer->scene->radius * 2.15f;
+
+        break;
+    }
+
+    renderer->camera.yaw = 1.57079632679f;
+    renderer->camera.pitch = 0.0f;
+    update_orbit_camera(renderer);
+
     renderer->previous_camera = renderer->camera;
-
     renderer->previous_view_projection = mat4_identity();
-
     renderer->has_previous_frame = false;
 
     return true;
@@ -1751,39 +1789,89 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
 void renderer_event(RENDERER *renderer, const SDL_Event *event) {
     if (!renderer || !event) return;
 
-    if (event->type != SDL_EVENT_KEY_DOWN || event->key.repeat) {
-        return;
-    }
+    switch (event->type) {
 
-    switch (event->key.key) {
-
-        case SDLK_0:
-            if (set_debug_view(renderer, "ALBEDO")) SDL_Log("Debug view ALBEDO activated");
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+            if (event->button.button == SDL_BUTTON_LEFT) {
+                renderer->camera.dragging = true;
+            }
 
             break;
 
-        case SDLK_1:
-            if (set_debug_view(renderer, "NORMALS")) SDL_Log("Debug view NORMALS activated");
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+            if (event->button.button == SDL_BUTTON_LEFT) {
+                renderer->camera.dragging = false;
+            }
 
             break;
 
-        case SDLK_2:
-            if (set_debug_view(renderer, "DEPTH")) SDL_Log("Debug view DEPTH activated");
+        case SDL_EVENT_MOUSE_MOTION:
+            if (renderer->camera.dragging) {
+                renderer->camera.yaw += event->motion.xrel * 0.0075f;
+
+                renderer->camera.pitch += event->motion.yrel * 0.0075f;
+
+                if (renderer->camera.pitch > 1.45f) {
+                    renderer->camera.pitch = 1.45f;
+                }
+
+                if (renderer->camera.pitch < -1.45f) {
+                    renderer->camera.pitch = -1.45f;
+                }
+            }
 
             break;
 
-        case SDLK_3:
-            if (set_debug_view(renderer, "ROUGHNESS")) SDL_Log("Debug view ROUGHNESS activated");
+        case SDL_EVENT_MOUSE_WHEEL:
+            renderer->camera.distance -= event->wheel.y * (renderer->camera.distance * 0.08f);
+
+            if (renderer->camera.distance < renderer->scene->radius * 0.05f) {
+                renderer->camera.distance = renderer->scene->radius * 0.05f;
+            }
+
+            if (renderer->camera.distance > renderer->scene->radius * 20.0f) {
+                renderer->camera.distance = renderer->scene->radius * 20.0f;
+            }
 
             break;
 
-        case SDLK_4:
-            if (set_debug_view(renderer, "VELOCITY")) SDL_Log("Debug view VELOCITY activated");
+        case SDL_EVENT_KEY_DOWN:
+            if (event->key.repeat) break;
 
-            break;
+            switch (event->key.key) {
+                case SDLK_0:
+                    if (set_debug_view(renderer, "ALBEDO")) SDL_Log("Debug view ALBEDO activated");
 
-        case SDLK_5:
-            if (set_debug_view(renderer, "OBJECT_ID")) SDL_Log("Debug view OBJECT_ID activated");
+                    break;
+
+                case SDLK_1:
+                    if (set_debug_view(renderer, "NORMALS")) SDL_Log("Debug view NORMALS activated");
+
+                    break;
+
+                case SDLK_2:
+                    if (set_debug_view(renderer, "DEPTH")) SDL_Log("Debug view DEPTH activated");
+
+                    break;
+
+                case SDLK_3:
+                    if (set_debug_view(renderer, "ROUGHNESS")) SDL_Log("Debug view ROUGHNESS activated");
+
+                    break;
+
+                case SDLK_4:
+                    if (set_debug_view(renderer, "VELOCITY")) SDL_Log("Debug view VELOCITY activated");
+
+                    break;
+
+                case SDLK_5:
+                    if (set_debug_view(renderer, "OBJECT_ID")) SDL_Log("Debug view OBJECT_ID activated");
+
+                    break;
+
+                default:
+                    break;
+            }
 
             break;
 
@@ -1814,6 +1902,8 @@ bool renderer_frame(RENDERER *renderer) {
         return false;
     }
 
+    update_orbit_camera(renderer);
+
     MAT4 view_projection;
     const FRAME_CONSTANTS frame = make_frame_constants(renderer, &view_projection);
 
@@ -1838,11 +1928,8 @@ bool renderer_frame(RENDERER *renderer) {
     if (!frame_finished) return false;
 
     renderer->previous_camera = renderer->camera;
-
     renderer->previous_view_projection = view_projection;
-
     renderer->has_previous_frame = true;
-
     renderer->frame_index = renderer->gpu->frame_index;
 
     // const NriColor32f clear_color = {

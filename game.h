@@ -259,6 +259,8 @@ typedef struct OBJECT {
 typedef struct SCENE {
     OBJECT *objects;
 
+    float radius;
+
     uint32_t object_count;
     uint32_t object_capacity;
 } SCENE;
@@ -281,6 +283,13 @@ typedef struct CAMERA {
     VEC3 position;
     VEC3 forward;
     VEC3 up;
+
+    VEC3 target;
+    float yaw;
+    float pitch;
+    float distance;
+    float radius;
+    bool dragging;
 
     float fov_y;
     float near_plane;

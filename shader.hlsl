@@ -1,3 +1,6 @@
+#define FAR_PLANE 10000.0f
+#define NEAR_PLANE 0.05f
+
 struct GPUObject {
 
     row_major float4x4 world;
@@ -190,6 +193,9 @@ float4 PS_Present(PresentVSOutput input) : SV_Target0 {
 
     const int2 pixel = int2(input.position.xy);
 
+    const float near_plane = NEAR_PLANE;
+    const float far_plane = FAR_PLANE;
+
     #ifdef ALBEDO
         return float4(
             AlbedoMetallicTexture.Load(int3(pixel, 0)).rgb, 
@@ -201,10 +207,13 @@ float4 PS_Present(PresentVSOutput input) : SV_Target0 {
             (NormalRoughnessTexture.Load(int3(pixel, 0)).rgb) * 0.5 + 0.5,
             1.0
         );
-
+        
     #elif defined(DEPTH)
+        const float linear_depth = (near_plane * far_plane) / (DepthTexture.Load(int3(pixel, 0)) * (far_plane - near_plane) + near_plane);
+        const float visible_depth = 1.0 - saturate(linear_depth / 200.0);
+
         return float4(
-            (DepthTexture.Load(int3(pixel, 0)).xxx), 
+            visible_depth.xxx,
             1.0
         );
 
