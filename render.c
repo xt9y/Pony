@@ -429,6 +429,7 @@ static void destroy_scene_resources(RENDERER *renderer) {
         renderer->object_buffer = NULL;
     }
 
+    free(renderer->cpu_objects);
     renderer->cpu_objects = NULL;
     renderer->gpu_object_count = 0;
     renderer->vertex_count = 0;
@@ -455,6 +456,9 @@ static bool create_frame_buffer(RENDERER *renderer) {
     };
 
     if (renderer->gpu->core.CreateBufferView(&view_desc, &renderer->frame_srv) != NriResult_SUCCESS) {
+        gpu_destroy_buffer(renderer->gpu, renderer->frame_buffer);
+        renderer->frame_buffer = NULL;
+
         return false;
     }
 
@@ -533,7 +537,7 @@ static bool create_pipeline_layouts(RENDERER *renderer) {
         .flags = NriPipelineLayoutBits_IGNORE_GLOBAL_SPIRV_OFFSETS
     };
 
-    return renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &present_layout, &renderer->present_layout) != NriResult_SUCCESS;
+    return renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &present_layout, &renderer->present_layout) == NriResult_SUCCESS;
 }
 
 static bool create_descriptor_pool(RENDERER *renderer) {
@@ -595,13 +599,13 @@ static bool create_pipelines(RENDERER *renderer) {
             .stage = NriStageBits_VERTEX_SHADER,
             .bytecode = gbuffer_vs,
             .size = (uint64_t)gbuffer_vs_size,
-            .entryPointName = "VS_GBuffer"
+            .entryPointName = "main"
         },
         {
             .stage = NriStageBits_FRAGMENT_SHADER,
             .bytecode = gbuffer_ps,
             .size = (uint64_t)gbuffer_ps_size,
-            .entryPointName = "PS_GBuffer"
+            .entryPointName = "main"
         }
     };
 
@@ -721,13 +725,13 @@ static bool create_pipelines(RENDERER *renderer) {
             .stage = NriStageBits_VERTEX_SHADER,
             .bytecode = present_vs,
             .size = (uint64_t)present_vs_size,
-            .entryPointName = "VS_Present"
+            .entryPointName = "main"
         },
         {
             .stage = NriStageBits_FRAGMENT_SHADER,
             .bytecode = present_ps,
             .size = (uint64_t)present_ps_size,
-            .entryPointName = "PS_Present"
+            .entryPointName = "main"
         }
     };
 
@@ -754,7 +758,7 @@ static bool create_pipelines(RENDERER *renderer) {
         .shaderNum = 2
     };
 
-    if (renderer->gpu->core.CreateGraphicsPipeline(renderer->gpu->device, &present_pipeline, renderer->present_pipeline) != NriResult_SUCCESS) {
+    if (renderer->gpu->core.CreateGraphicsPipeline(renderer->gpu->device, &present_pipeline, &renderer->present_pipeline) != NriResult_SUCCESS) {
         goto cleanup;
     }
 
@@ -1097,7 +1101,7 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
         .dstOffset = 0
     };
 
-    const NriBufferOffset streamed_frame = renderer->gpu->streamer_api.StreamBufferData(renderer->gpu->streamer. &frame_upload));
+    const NriBufferOffset streamed_frame = renderer->gpu->streamer_api.StreamBufferData(renderer->gpu->streamer, &frame_upload);
 
     if (!streamed_frame.buffer) {
         renderer->gpu->streamer_api.EndStreamerFrame(renderer->gpu->streamer);
@@ -1124,7 +1128,7 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
 
     const NriBarrierDesc before_copy = {
         .buffers = to_copy,
-        .bufferNum = 1
+        .bufferNum = 2
     };
 
     renderer->gpu->core.CmdBarrier(command_buffer, &before_copy);
@@ -1176,7 +1180,7 @@ static void transition_gbuffer_for_render(RENDERER *renderer, NriCommandBuffer *
 
     const NriAccessLayoutStage depth_state = {
         .access = NriAccessBits_DEPTH_STENCIL_ATTACHMENT_WRITE,
-        .layout = NriLayout_DEPTH_READONLY_STENCIL_ATTACHMENT,
+        .layout = NriLayout_DEPTH_STENCIL_ATTACHMENT,
         .stages = NriStageBits_DEPTH_STENCIL_ATTACHMENT
     };
 
@@ -1225,7 +1229,7 @@ static void transition_gbuffer_for_render(RENDERER *renderer, NriCommandBuffer *
 
     const NriBarrierDesc barrier = {
         .textures = barriers,
-        .textureNum = 3
+        .textureNum = 5
     };
 
     renderer->gpu->core.CmdBarrier(command_buffer, &barrier);
