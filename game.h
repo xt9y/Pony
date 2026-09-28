@@ -7,7 +7,6 @@
 
 #include <SDL3/SDL.h>
 
-#include "NRIDescs.h"
 #include "gpu.h"
 
 
@@ -295,7 +294,7 @@ typedef struct RENDER_TEXTURE {
     NriDescriptor *srv;
 
     NriAccessLayoutStage state;
-    NriFormat formar;
+    NriFormat format;
 } RENDER_TEXTURE;
 
 typedef struct RENDERER {
@@ -342,7 +341,7 @@ typedef struct RENDERER {
     uint32_t width;
     uint32_t height;
 
-    bool has_previuous_frame;
+    bool has_previous_frame;
 
     NriAccessStage object_state;
     NriAccessStage frame_state;
