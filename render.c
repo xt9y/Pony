@@ -1,4 +1,3 @@
-#include "NRIDescs.h"
 #include "game.h"
 #include "gpu.h"
 
@@ -8,6 +7,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
 
 typedef struct FRAME_CONSTATS {
     MAT4 view_projection;
@@ -381,6 +385,10 @@ static bool create_gbuffer(RENDERER *renderer, uint32_t width, uint32_t height) 
 
     return true;
 }
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 
 bool renderer_init(RENDERER *renderer, GPU *gpu) {
