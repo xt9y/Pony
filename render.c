@@ -1,4 +1,5 @@
 #include "NRIDescs.h"
+#include "SDL3/SDL_log.h"
 #include "game.h"
 #include "gpu.h"
 
@@ -209,6 +210,40 @@ static bool load_shader(const char *path, void **data, size_t *size) {
     return true;
 }
 
+static bool compile_present_shader(const char *define) {
+
+    char command[1024];
+
+    const int length = snprintf(
+        command,
+        sizeof(command),
+        "slangc shader.hlsl "
+        "-entry PS_Present "
+        "-stage fragment "
+        "-target spirv "
+        "-profile sm_6_6 "
+        "-capability spirv_1_5 "
+        "-matrix-layout-row-major "
+        "-fvk-use-dx-layout "
+        "-O3 "
+        "-D%s "
+        "-o build/shaders/present.runtime.ps.spv",
+        define
+    );
+
+    if (length <= 0 || (size_t)length >= sizeof(command)) {
+        return false;
+    }
+
+    if (system(command) != 0) {
+        SDL_Log("Could not compile present shader with #%s", define);
+
+        return false;
+    }
+
+    return true;
+}
+
 
 static bool create_render_texture(RENDERER *renderer, RENDER_TEXTURE *target, NriFormat format, NriTextureUsageBits usage, NriTextureView attachment_type, NriPlaneBits planes) {
 
@@ -307,16 +342,19 @@ static void destroy_gbuffer(RENDERER *renderer) {
 }
 
 static void update_present_descriptor(RENDERER *renderer) {
-    if (!renderer->present_set || !renderer->albedo_metallic.srv) return;
+    if (!renderer->present_set || !renderer->depth.srv || !renderer->normal_roughness.srv || !renderer->albedo_metallic.srv || !renderer->velocity.srv ||
+        !renderer->object_id.srv) {
+        return;
+    }
 
-    const NriDescriptor *descriptors[] = {renderer->albedo_metallic.srv};
+    const NriDescriptor *descriptors[] = {renderer->depth.srv, renderer->normal_roughness.srv, renderer->albedo_metallic.srv, renderer->velocity.srv, renderer->object_id.srv};
 
     const NriUpdateDescriptorRangeDesc update = {
         .descriptorSet = renderer->present_set,
         .rangeIndex = 0,
         .baseDescriptor = 0,
         .descriptors = descriptors,
-        .descriptorNum = 1,
+        .descriptorNum = 5,
     };
 
     renderer->gpu->core.UpdateDescriptorRanges(&update, 1);
@@ -518,7 +556,7 @@ static bool create_pipeline_layouts(RENDERER *renderer) {
 
     const NriDescriptorRangeDesc present_range = {
         .baseRegisterIndex = 0,
-        .descriptorNum = 1,
+        .descriptorNum = 5,
         .descriptorType = NriDescriptorType_TEXTURE,
         .shaderStages = NriStageBits_FRAGMENT_SHADER
     };
@@ -545,7 +583,7 @@ static bool create_descriptor_pool(RENDERER *renderer) {
     const NriDescriptorPoolDesc pool_desc = {
         .descriptorSetMaxNum = 2,
         .constantBufferMaxNum = 1,
-        .textureMaxNum = 1,
+        .textureMaxNum = 5,
         .structuredBufferMaxNum = 2
     };
 
@@ -562,6 +600,68 @@ static bool create_descriptor_pool(RENDERER *renderer) {
     }
 
     return true;
+}
+
+static bool create_present_pipeline(RENDERER *renderer, const char *fragment_shader_path, NriPipeline **pipeline) {
+
+    void *vertex_code = NULL;
+    void *fragment_code = NULL;
+
+    size_t vertex_size = 0;
+    size_t fragment_size = 0;
+
+    if (!load_shader("build/shaders/present.vs.spv", &vertex_code, &vertex_size)) {
+        return false;
+    }
+
+    if (!load_shader(fragment_shader_path, &fragment_code, &fragment_size)) {
+        return false;
+    }
+
+    const NriShaderDesc shaders[] = {
+        {
+            .stage = NriStageBits_VERTEX_SHADER,
+            .bytecode = vertex_code,
+            .size = vertex_size,
+            .entryPointName = "main"
+        },
+        {
+            .stage = NriStageBits_FRAGMENT_SHADER,
+            .bytecode = fragment_code,
+            .size = fragment_size,
+            .entryPointName = "main"
+        }
+    };
+
+    const NriColorAttachmentDesc color = {
+        .format = renderer->gpu->swapchain_format,
+        .colorWriteMask = NriColorWriteBits_RGBA
+    };
+
+    const NriGraphicsPipelineDesc pipeline_desc = {
+        .pipelineLayout = renderer->present_layout,
+        .inputAssembly = {
+            .topology = NriTopology_TRIANGLE_LIST,
+            .primitiveRestart = NriPrimitiveRestart_DISABLED
+        },
+        .rasterization = {
+            .fillMode = NriFillMode_SOLID,
+            .cullMode = NriCullMode_NONE
+        },
+        .outputMerger = {
+            .colors = &color,
+            .colorNum = 1
+        },
+        .shaders = shaders,
+        .shaderNum = 2
+    };
+
+    const bool success = renderer->gpu->core.CreateGraphicsPipeline(renderer->gpu->device, &pipeline_desc, pipeline) == NriResult_SUCCESS;
+
+    free(vertex_code);
+    free(fragment_code);
+
+    return success;
 }
 
 static bool create_pipelines(RENDERER *renderer) {
@@ -806,6 +906,35 @@ static void update_gbuffer_descriptors(RENDERER *renderer) {
     };
 
     renderer->gpu->core.UpdateDescriptorRanges(updates, 3);
+}
+
+static bool set_debug_view(RENDERER *renderer, const char *define) {
+
+    if (!compile_present_shader(define)) {
+        return false;
+    }
+
+    NriPipeline *pipeline = NULL;
+
+    if (create_present_pipeline(renderer, "build/shaders/present.runtime.ps.spv", &pipeline)) {
+        return false;
+    }
+
+    if (renderer->gpu->core.QueueWaitIdle(renderer->gpu->graphics_queue) != NriResult_SUCCESS) {
+        renderer->gpu->core.DestroyPipeline(pipeline);
+
+        return false;
+    }
+
+    if (renderer->present_pipeline) {
+        renderer->gpu->core.DestroyPipeline(renderer->present_pipeline);
+
+        return false;
+    }
+
+    renderer->present_pipeline = pipeline;
+
+    return true;
 }
 
 static bool create_scene_resources(RENDERER *renderer, SCENE *scene) {
@@ -1105,6 +1234,7 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
 
     if (!streamed_frame.buffer) {
         renderer->gpu->streamer_api.EndStreamerFrame(renderer->gpu->streamer);
+
         return false;
     }
 
@@ -1241,7 +1371,7 @@ static void transition_gbuffer_for_render(RENDERER *renderer, NriCommandBuffer *
     renderer->depth.state = depth_state;
 }
 
-static void transition_albedo_for_present(RENDERER *renderer, NriCommandBuffer *command_buffer) {
+static void transition_gbuffer_for_present(RENDERER *renderer, NriCommandBuffer *command_buffer) {
 
     const NriAccessLayoutStage shader_state = {
         .access = NriAccessBits_SHADER_RESOURCE,
@@ -1249,23 +1379,61 @@ static void transition_albedo_for_present(RENDERER *renderer, NriCommandBuffer *
         .stages = NriStageBits_FRAGMENT_SHADER
     };
 
-    const NriTextureBarrierDesc texture_barrier = {
-        .texture = renderer->albedo_metallic.texture,
-        .before = renderer->albedo_metallic.state,
-        .after = shader_state,
-        .mipNum = 1,
-        .layerNum = 1,
-        .planes = NriPlaneBits_COLOR
+    const NriTextureBarrierDesc barriers[] = {
+        {
+            .texture = renderer->depth.texture,
+            .before = renderer->depth.state,
+            .after = shader_state,
+            .mipNum = 1,
+            .layerNum = 1,
+            .planes = NriPlaneBits_DEPTH
+        },
+        {
+            .texture = renderer->normal_roughness.texture,
+            .before = renderer->normal_roughness.state,
+            .after = shader_state,
+            .mipNum = 1,
+            .layerNum = 1,
+            .planes = NriPlaneBits_COLOR
+        },
+        {
+            .texture = renderer->albedo_metallic.texture,
+            .before = renderer->albedo_metallic.state,
+            .after = shader_state,
+            .mipNum = 1,
+            .layerNum = 1,
+            .planes = NriPlaneBits_COLOR
+        },
+        {
+            .texture = renderer->velocity.texture,
+            .before = renderer->velocity.state,
+            .after = shader_state,
+            .mipNum = 1,
+            .layerNum = 1,
+            .planes = NriPlaneBits_COLOR
+        },
+        {
+            .texture = renderer->object_id.texture,
+            .before = renderer->object_id.state,
+            .after = shader_state,
+            .mipNum = 1,
+            .layerNum = 1,
+            .planes = NriPlaneBits_COLOR
+        }
     };
 
     const NriBarrierDesc barrier = {
-        .textures = &texture_barrier,
-        .textureNum = 1
+        .textures = barriers,
+        .textureNum = 5
     };
 
     renderer->gpu->core.CmdBarrier(command_buffer, &barrier);
 
+    renderer->depth.state = shader_state;
+    renderer->normal_roughness.state = shader_state;
     renderer->albedo_metallic.state = shader_state;
+    renderer->velocity.state = shader_state;
+    renderer->object_id.state = shader_state;
 }
 
 static void set_fullscreen_view(RENDERER *renderer, NriCommandBuffer *command_buffer) {
@@ -1501,6 +1669,7 @@ bool renderer_init(RENDERER *renderer, GPU *gpu) {
     if (!create_pipeline_layouts(renderer) || !create_descriptor_pool(renderer) || !create_frame_buffer(renderer) || !create_pipelines(renderer) ||
         !create_gbuffer(renderer, gpu->swapchain_width, gpu->swapchain_height)) {
         renderer_deinit(renderer);
+
         return false;
     }
 
@@ -1580,8 +1749,47 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
 }
 
 void renderer_event(RENDERER *renderer, const SDL_Event *event) {
-    (void)renderer;
-    (void)event;
+    if (!renderer || !event) return;
+
+    if (event->type != SDL_EVENT_KEY_DOWN || event->key.repeat) {
+        return;
+    }
+
+    switch (event->key.key) {
+
+        case SDLK_0:
+            if (set_debug_view(renderer, "ALBEDO")) SDL_Log("Debug view ALBEDO activated");
+
+            break;
+
+        case SDLK_1:
+            if (set_debug_view(renderer, "NORMALS")) SDL_Log("Debug view NORMALS activated");
+
+            break;
+
+        case SDLK_2:
+            if (set_debug_view(renderer, "DEPTH")) SDL_Log("Debug view DEPTH activated");
+
+            break;
+
+        case SDLK_3:
+            if (set_debug_view(renderer, "ROUGHNESS")) SDL_Log("Debug view ROUGHNESS activated");
+
+            break;
+
+        case SDLK_4:
+            if (set_debug_view(renderer, "VELOCITY")) SDL_Log("Debug view VELOCITY activated");
+
+            break;
+
+        case SDLK_5:
+            if (set_debug_view(renderer, "OBJECT_ID")) SDL_Log("Debug view OBJECT_ID activated");
+
+            break;
+
+        default:
+            break;
+    }
 }
 
 bool renderer_frame(RENDERER *renderer) {
@@ -1619,7 +1827,7 @@ bool renderer_frame(RENDERER *renderer) {
 
     record_gbuffer_pass(renderer, command_buffer);
 
-    transition_albedo_for_present(renderer, command_buffer);
+    transition_gbuffer_for_present(renderer, command_buffer);
 
     record_present_pass(renderer, command_buffer, swapchain_index);
 

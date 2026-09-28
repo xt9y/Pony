@@ -172,14 +172,76 @@ PresentVSOutput VS_Present(uint vertex_id : SV_VertexID) {
 
 
 [[vk::binding(0, 1)]]
-Texture2D<float4> PresentTexture : register(t0, space1);
+Texture2D<float> DepthTexture : register(t0, space1);
 
+[[vk::binding(1, 1)]]
+Texture2D<float4> NormalRoughnessTexture : register(t1, space1);
+
+[[vk::binding(2, 1)]]
+Texture2D<float4> AlbedoMetallicTexture : register(t2, space1);
+
+[[vk::binding(3, 1)]]
+Texture2D<float2> VelocityTexture : register(t3, space1);
+
+[[vk::binding(4, 1)]]
+Texture2D<uint> ObjectIdTexture : register(t4, space1);
 
 float4 PS_Present(PresentVSOutput input) : SV_Target0 {
 
     const int2 pixel = int2(input.position.xy);
 
-    const float3 color = PresentTexture.Load(int3(pixel, 0)).rgb;
+    #ifdef ALBEDO
+        return float4(
+            AlbedoMetallicTexture.Load(int3(pixel, 0)).rgb, 
+            1.0
+        );
 
-    return float4(color, 1.0);
+    #elif defined(NORMALS)
+        return float4(
+            (NormalRoughnessTexture.Load(int3(pixel, 0)).rgb) * 0.5 + 0.5,
+            1.0
+        );
+
+    #elif defined(DEPTH)
+        return float4(
+            (DepthTexture.Load(int3(pixel, 0)).xxx), 
+            1.0
+        );
+
+    #elif defined(ROUGHNESS)
+        return float4(
+            (NormalRoughnessTexture.Load(int3(pixel, 0)).w).xxx, 
+            1.0
+        );
+
+    #elif defined(VELOCITY)
+        return float4(
+            saturate(0.5 + VelocityTexture.Load(int3(pixel, 0)) * 20).x,
+            saturate(0.5 + VelocityTexture.Load(int3(pixel, 0)) * 20).y,
+            0.5,
+            1.0
+        );
+
+    #elif defined(OBJECT_ID)
+        const float value = frac((float)ObjectIdTexture.Load(int3(pixel, 0)) * 0.61803398875);
+        return float4(
+            value,
+            frac(value * 3.17),
+            frac(value * 7.13),
+            1.0
+        );
+
+    #else
+
+
+    return float4(
+        1.0,
+        0.0,
+        1.0,
+        1.0
+    );
+
+    #endif
 }
+
+
