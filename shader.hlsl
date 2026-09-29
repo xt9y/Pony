@@ -301,21 +301,23 @@ float TraceCellExit(float4 clip_origin, float4 clip_direction, float2 uv, uint2 
     float exit_x = 1.0e30;
     float exit_y = 1.0e30;
 
+    const float4 current_clip = clip_origin + clip_direction * distance;
+
     if (abs(screen_direction.x) > 1.0e-7) {
 
         const float boundary = screen_direction.x > 0.0 ? (float)(cell.x + 1u) / (float)dimensions.x : (float)cell.x / (float)dimensions.x;
         const float target_ndc = boundary * 2.0 - 1.0;
-        exit_x = SolveTraceDistance(clip_origin.x, clip_direction.x, clip_origin.w, clip_direction.w, target_ndc);
+        exit_x = distance + SolveTraceDistance(current_clip.x, clip_direction.x, current_clip.w, clip_direction.w, target_ndc);
 
         if (exit_x <= distance + 1.0e-5) exit_x = 1.0e30;
     }
 
     if (abs(screen_direction.y) > 1.0e-7) {
 
-        const float boundary = screen_direction.y > 0.0 ? (float)(cell.y + 1u) / (float)dimensions.y : (float)cell.y / (float)dimensions.y;
+        const float boundary = screen_direction.y > 0.0 ? (float)(cell.y +1u) / (float)dimensions.y : (float)(cell.y) / (float)dimensions.y;
         const float target_ndc = 1.0 - boundary * 2.0;
 
-        exit_y = SolveTraceDistance(clip_origin.y, clip_direction.y, clip_origin.w, clip_direction.w, target_ndc);
+        exit_y = distance + SolveTraceDistance(current_clip.y, clip_direction.y, current_clip.w, clip_direction.w, target_ndc);
 
         if (exit_y <= distance + 1.0e-5) exit_y = 1.0e30;
     }
@@ -332,6 +334,15 @@ float SolveDepthCrossing(float4 clip_origin, float4 clip_direction, float target
         clip_direction.w,
         target_depth
     );
+}
+
+float LinearizeDepth(float depth) {
+    return
+        (NEAR_PLANE * FAR_PLANE) /
+        (depth *
+            (FAR_PLANE - NEAR_PLANE) +
+            NEAR_PLANE
+        );
 }
 
 bool TraceScreenRay(float3 origin, float3 direction, uint2 origin_pixel, out uint2 hit_pixel) {
@@ -360,7 +371,6 @@ bool TraceScreenRay(float3 origin, float3 direction, uint2 origin_pixel, out uin
     TraceHZB.GetDimensions(0, hzb_width, hzb_height, hzb_mip_count);
 
     const uint maximum_level = min(hzb_mip_count, MAX_START_LEVEL);
-
     uint level = maximum_level;
 
     /*
@@ -370,7 +380,8 @@ bool TraceScreenRay(float3 origin, float3 direction, uint2 origin_pixel, out uin
      */
     const float2 screen_direction = float2(
         clip_direction.x * clip_origin.w - clip_origin.x * clip_direction.w,
-        -(clip_direction.y * clip_origin.w - clip_origin.y * clip_direction.w));
+        -(clip_direction.y * clip_origin.w - clip_origin.y * clip_direction.w)
+    );
 
     float distance = 0.0;
 
@@ -390,9 +401,9 @@ bool TraceScreenRay(float3 origin, float3 direction, uint2 origin_pixel, out uin
         const float scene_depth = TraceLevelDepth(uv, level, cell);
         const uint2 dimensions = TraceLevelDimensions(level);
         float exit_distance = TraceCellExit(clip_origin, clip_direction, uv, dimensions, cell, distance, screen_direction);
-        exit_distance = min(exit_distance, MAX_DISTANCE);
-
+        // float exit_distance = distance + 0.1;
         if (exit_distance >= 1.0e29) return false;
+        exit_distance = min(exit_distance, MAX_DISTANCE);
 
         float2 exit_uv;
         float exit_depth;
@@ -413,13 +424,35 @@ bool TraceScreenRay(float3 origin, float3 direction, uint2 origin_pixel, out uin
          * still nearer than that value, the complete cell
          * can safely be skipped.
          */
-        const float farther_ray_depth = min(ray_depth, exit_depth);
-        const bool clear_cell = scene_depth <= 0.0 || farther_ray_depth > scene_depth + 1.0e-5;
+        // const float farther_ray_depth = min(ray_depth, exit_depth);
+        // const bool clear_cell = scene_depth <= 0.0 || farther_ray_depth > scene_depth + 1.0e-5;
+
+        const float farther_ray_depth =
+            min(ray_depth, exit_depth);
+
+        const float scene_linear =
+            LinearizeDepth(scene_depth);
+
+        const float farther_ray_linear =
+            LinearizeDepth(farther_ray_depth);
+
+        const float skip_thickness =
+            0.05;
+
+        const bool clear_cell =
+            scene_depth <= 0.0 ||
+            farther_ray_linear <
+            scene_linear - skip_thickness;
+
+        // if (clear_cell) {
+        //     distance = exit_distance + max(1.0e-4, exit_distance * 1.0e-5);
+        //     // distance = exit_distance + 0.01;
+        //     // level = min(level + 1u, maximum_level);
+        //     continue;
+        // }
 
         if (clear_cell) {
-
             distance = exit_distance + max(1.0e-4, exit_distance * 1.0e-5);
-            level = min(level + 1u, maximum_level);
             continue;
         }
 
@@ -429,23 +462,114 @@ bool TraceScreenRay(float3 origin, float3 direction, uint2 origin_pixel, out uin
         }
 
         // Full-resolution candidate.
-        const float hit_distance = SolveDepthCrossing(clip_origin, clip_direction, scene_depth);
+        // const float hit_distance = SolveDepthCrossing(clip_origin, clip_direction, scene_depth);
+        //
+        // if (hit_distance >= distance - 1.0e-4 && hit_distance <= exit_distance + 1.0e-4) {
+        //
+        //     const float3 surface_position = ReconstructWorldPosition(cell, scene_depth);
+        //     const float3 ray_position = origin + direction * hit_distance;
+        //     const float camera_distance = length(surface_position - TraceFrame.camera_position.xyz);
+        //     const float thickness = max(0.03, camera_distance * 0.002);
+        //     const bool self_hit = all(cell == origin_pixel) && hit_distance < 0.05;
+        //
+        //     if (!self_hit && length(surface_position - ray_position) <= thickness) {
+        //         hit_pixel = cell;
+        //         return true;
+        //     }
+        // }
 
-        if (hit_distance >= distance - 1.0e-4 && hit_distance <= exit_distance + 1.0e-4) {
+        // const float hit_distance =
+        //     SolveDepthCrossing(
+        //         clip_origin,
+        //         clip_direction,
+        //         scene_depth
+        //     );
+        //
+        // if (hit_distance >= distance - 1.0e-4 &&
+        //     hit_distance <= exit_distance + 1.0e-4) {
+        //
+        //     const bool self_hit =
+        //         all(cell == origin_pixel) &&
+        //         hit_distance < 0.05;
+        //
+        //     if (!self_hit) {
+        //         hit_pixel = cell;
+        //         return true;
+        //     }
+        // }
 
-            const float3 surface_position = ReconstructWorldPosition(cell, scene_depth);
-            const float3 ray_position = origin + direction * hit_distance;
-            const float camera_distance = length(surface_position - TraceFrame.camera_position.xyz);
-            const float thickness = max(0.03, camera_distance * 0.002);
-            const bool self_hit = all(cell == origin_pixel) && hit_distance < 0.05;
+        // if (!all(cell == origin_pixel)) {
+        //     hit_pixel = cell;
+        //     return true;
+        // }
 
-            if (!self_hit && length(surface_position - ray_position) <= thickness) {
-                hit_pixel = cell;
-                return true;
-            }
+        // const float segment_near =
+        //     max(ray_depth, exit_depth);
+        //
+        // const float segment_far =
+        //     min(ray_depth, exit_depth);
+        //
+        // const float thickness = 1.0e-4;
+        //
+        // const bool depth_overlap =
+        //     scene_depth <= segment_near + thickness &&
+        //     scene_depth >= segment_far - thickness;
+        //
+        // if (depth_overlap &&
+        //     !all(cell == origin_pixel)) {
+        //
+        //     hit_pixel = cell;
+        //     return true;
+        // }
+
+
+        const float ray_linear_a =
+            LinearizeDepth(ray_depth);
+
+        const float ray_linear_b =
+            LinearizeDepth(exit_depth);
+
+        const float segment_near =
+            min(ray_linear_a, ray_linear_b);
+
+        const float segment_far =
+            max(ray_linear_a, ray_linear_b);
+
+        // const float thickness =
+        //     max(
+        //         0.03,
+        //         scene_linear * 0.002
+        //     );
+
+        const float thickness = 0.05;
+
+        // const float thickness =
+        //     clamp(
+        //         scene_linear * 0.01,
+        //         0.01,
+        //         0.01
+        //     );
+
+        const bool depth_overlap =
+            scene_linear >= segment_near - thickness &&
+            scene_linear <= segment_far + thickness;
+
+        // if (depth_overlap &&
+        //     !all(cell == origin_pixel)) {
+        //
+        //     hit_pixel = cell;
+        //     return true;
+        // }
+
+        if (depth_overlap &&
+            !all(cell == origin_pixel)) {
+
+            hit_pixel = cell;
+            return true;
         }
 
         distance = exit_distance + max(1.0e-4, exit_distance * 1.0e-5);
+        // distance = exit_distance + 0.01;
 
         level = min(1u, maximum_level);
     }
@@ -465,30 +589,47 @@ void CS_ScreenTrace(uint3 dispatch_id : SV_DispatchThreadID) {
 
     // Background doesn't launch a ray.
     if (depth <= 0.0) {
-
         ScreenTraceOutput[pixel] = float4(0.0, 0.0, 0.0, 1.0);
         return;
     }
 
     const float3 position = ReconstructWorldPosition(pixel, depth);
-
     float3 normal = normalize(TraceNormalRoughness.Load(int3(pixel, 0)).xyz);
-
     const float3 view_direction = normalize(position - TraceFrame.camera_position.xyz);
 
     // Rasterization is two-sided right now.
     if (dot(normal, view_direction) > 0.0) normal = -normal;
 
     const float3 reflection = normalize(reflect(view_direction, normal));
+
+    // ScreenTraceOutput[pixel] = float4(reflection * 0.5 + 0.5, 1.0);
+    // return;
+
     const float camera_distance = length(position - TraceFrame.camera_position.xyz);
-    const float bias = max(0.02, camera_distance * 0.001);
-    const float3 origin = position + normal * bias + reflection * bias;
+    // const float bias = max(0.02, camera_distance * 0.001);
+    const float bias = 0.10;
+    // const float3 origin = position + normal * bias + reflection * bias;
+    const float3 origin = position + normal * bias;
     uint2 hit_pixel;
 
     if (TraceScreenRay(origin, reflection, pixel, hit_pixel)) {
         
         ScreenTraceOutput[pixel] = float4(TraceAlbedoMetallic.Load(int3(hit_pixel, 0)).rgb, 1.0);
         return;
+
+        // const float2 hit_uv =
+        //     (float2(hit_pixel) + 0.5) *
+        //     TraceFrame.resolution.zw;
+        //
+        // ScreenTraceOutput[pixel] =
+        //     float4(
+        //         hit_uv.x,
+        //         hit_uv.y,
+        //         0.0,
+        //         1.0
+        //     );
+        //
+        // return;
     }
 
     ScreenTraceOutput[pixel] = float4(1.0, 0.0, 1.0, 1.0);
@@ -600,7 +741,7 @@ float4 PS_Present(PresentVSOutput input) : SV_Target0 {
 
         HZBTexture.GetDimensions(0, hzb_width, hzb_height, hzb_mip_count);
 
-        const uint mip = 0u;
+        const uint mip = min(4u, hzb_mip_count);
 
         float hzb_depth;
 

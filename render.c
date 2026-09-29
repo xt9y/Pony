@@ -1950,7 +1950,7 @@ static void transition_gbuffer_for_read(RENDERER *renderer, NriCommandBuffer *co
     const NriAccessLayoutStage shader_state = {
         .access = NriAccessBits_SHADER_RESOURCE,
         .layout = NriLayout_SHADER_RESOURCE,
-        .stages = NriStageBits_FRAGMENT_SHADER
+        .stages = NriStageBits_COMPUTE_SHADER | NriStageBits_FRAGMENT_SHADER
     };
 
     const NriTextureBarrierDesc barriers[] = {
