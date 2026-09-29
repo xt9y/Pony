@@ -52,12 +52,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install header dependencies
+      - name: Fetch header dependencies
         shell: bash
         run: |
           set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y libsdl3-dev
+          git clone --depth 1 https://github.com/libsdl-org/SDL.git /tmp/SDL
           git clone --depth 1 https://github.com/NVIDIA-RTX/NRI.git /tmp/NRI
       - name: Compile C ABI and current translation units
         shell: bash
@@ -67,9 +66,10 @@ jobs:
           #include "game.h"
           int main(void) { return 0; }
           EOF
-          cc -std=c11 -I. -I/tmp/NRI/Include -fsyntax-only /tmp/abi_check.c
+          COMMON='-std=c11 -I. -I/tmp/SDL/include -I/tmp/NRI/Include'
+          cc $COMMON -fsyntax-only /tmp/abi_check.c
           for file in main.c init.c glb.c gltf.c scene.c sdf.c render.c; do
-            cc -std=c11 -I. -I/tmp/NRI/Include -fsyntax-only "$file"
+            cc $COMMON -fsyntax-only "$file"
           done
       - name: Build list covers frozen entry points
         shell: bash
