@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
     struct LIGHT sun = {
         .type = LIGHT_DIRECTIONAL,
         .directional = {
-            .direction = {0.38f, 0.72f, 0.32f},
+            .direction = {0.38f, -0.72f, 0.32f},
             .color = {1.0f, 0.95f, 0.86f},
             .intensity = 2.5f,
             .angular_radius = 0.01f
