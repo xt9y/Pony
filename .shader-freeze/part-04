@@ -1,0 +1,246 @@
+   }
+        t += max(d, epsilon * 0.25f);
+    }
+    return false;
+}
+
+// -----------------------------------------------------------------------------
+// Unified ray query.
+// -----------------------------------------------------------------------------
+SurfaceHit TraceUnifiedRay(TraceRay ray, bool allow_screen) {
+    SurfaceHit best = MakeSurfaceHit(TRACE_MISS, ray.direction_tmax.w);
+    if (allow_screen) {
+        SurfaceHit screen = TraceScreenSurface(ray);
+        if (screen.identity.w == TRACE_SCREEN) best = screen;
+    }
+    TraceDynamicGrid(ray, best);
+    TraceAllLocalSDFs(ray, best);
+    TraceGlobalSDF(ray, best);
+    return best;
+}
+
+bool TraceUnifiedOcclusion(TraceRay ray) {
+    SurfaceHit hit = TraceUnifiedRay(ray, true);
+    return hit.identity.w != TRACE_MISS && hit.position_distance.w < ray.direction_tmax.w;
+}
+
+// -----------------------------------------------------------------------------
+// Triangle/material evaluation and explicit emissive area lights.
+// -----------------------------------------------------------------------------
+void EvaluateTriangleWorld(uint triangle_id, out float3 a, out float3 b, out float3 c, out GPUSceneTriangle tri) {
+    tri = SceneTriangles[triangle_id];
+    uint object_index = tri.meta.x;
+    row_major float4x4 world = SceneObjects[object_index].world;
+    a = TransformPoint(tri.p0.xyz, world);
+    b = TransformPoint(tri.p1.xyz, world);
+    c = TransformPoint(tri.p2.xyz, world);
+}
+
+uint SelectEmissiveTriangle(float u) {
+    uint count = Radiance.scene_counts.w;
+    if (count == 0u) return INVALID_INDEX;
+    uint lo = 0u;
+    uint hi = count - 1u;
+    [loop]
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1u;
+        if (u <= EmissiveTriangles[mid].sampling.x) hi = mid;
+        else lo = mid + 1u;
+    }
+    return lo;
+}
+
+float3 SampleTriangleBarycentric(float2 u, out float3 bary) {
+    float su = sqrt(saturate(u.x));
+    bary = float3(1.0f - su, su * (1.0f - u.y), su * u.y);
+    return bary;
+}
+
+float3 SampleEmissivePoint(uint emitter_index, float2 u, out float3 normal, out float3 emitted, out float pdf_area, out uint triangle_id) {
+    GPUEmissiveTriangle emitter = EmissiveTriangles[emitter_index];
+    triangle_id = emitter.meta.x;
+    float3 a, b, c;
+    GPUSceneTriangle tri;
+    EvaluateTriangleWorld(triangle_id, a, b, c, tri);
+    float3 bary;
+    SampleTriangleBarycentric(u, bary);
+    float3 p = a * bary.x + b * bary.y + c * bary.z;
+    normal = normalize(cross(b - a, c - a));
+    emitted = emitter.radiance_area.rgb;
+    float area = max(emitter.radiance_area.w, 1.0e-8f);
+    float selection_pdf = max(emitter.sampling.y, 1.0e-8f);
+    pdf_area = selection_pdf / area;
+    return p;
+}
+
+float3 EvaluateEmissiveSample(float3 surface_position, float3 surface_normal, uint source_object_id, uint2 source_pixel, uint seed) {
+    if (!FeatureEnabled(RADIANCE_FEATURE_EMISSIVE) || Radiance.scene_counts.w == 0u) return 0.0f;
+    float selector = HashFloat(seed);
+    uint emitter_index = SelectEmissiveTriangle(selector);
+    if (emitter_index == INVALID_INDEX) return 0.0f;
+    float2 sample_u = Hammersley(seed & 31u, 32u, Hash32(seed));
+    float3 light_normal;
+    float3 emitted;
+    float pdf_area;
+    uint triangle_id;
+    float3 light_position = SampleEmissivePoint(emitter_index, sample_u, light_normal, emitted, pdf_area, triangle_id);
+    float3 to_light = light_position - surface_position;
+    float distance_sq = dot(to_light, to_light);
+    if (distance_sq <= 1.0e-8f) return 0.0f;
+    float distance = sqrt(distance_sq);
+    float3 L = to_light / distance;
+    float cos_surface = saturate(dot(surface_normal, L));
+    float cos_light = saturate(dot(light_normal, -L));
+    if (cos_surface <= 0.0f || cos_light <= 0.0f) return 0.0f;
+    float bias = max(Radiance.trace_params.y, 1.0e-3f);
+    TraceRay shadow = MakeTraceRay(surface_position + surface_normal * bias, L, bias, max(distance - bias * 2.0f, bias), TRACE_RAY_SHADOW, 0u, source_pixel, source_object_id);
+    if (TraceUnifiedOcclusion(shadow)) return 0.0f;
+    float geometry = cos_surface * cos_light / max(distance_sq, 1.0e-6f);
+    return emitted * geometry / max(pdf_area, 1.0e-8f);
+}
+
+float3 SkyRadiance(float3 direction) {
+    float3 result = 0.0f;
+    for (uint i = 0u; i < TraceFrame.trace_limits.z; ++i) {
+        GPULight light = Lights[i];
+        if ((uint)(light.direction_type.w + 0.5f) != 3u) continue;
+        float t = saturate(direction.y * 0.5f + 0.5f);
+        result += lerp(light.spot_angles.xyz, light.color_intensity.rgb, t) * light.color_intensity.w;
+    }
+    return result;
+}
+
+float3 FutureSkyRadiance(float3 direction) {
+    float3 result = 0.0f;
+    for (uint i = 0u; i < Radiance.sdf_counts.w; ++i) {
+        GPULight light = SceneLights[i];
+        if ((uint)(light.direction_type.w + 0.5f) != 3u) continue;
+        float t = saturate(direction.y * 0.5f + 0.5f);
+        result += lerp(light.spot_angles.xyz, light.color_intensity.rgb, t) * light.color_intensity.w;
+    }
+    return result;
+}
+
+// -----------------------------------------------------------------------------
+// Compatibility direct lighting.
+// -----------------------------------------------------------------------------
+float DirectVisibility(uint2 source_pixel, uint source_object_id, float3 position, float3 normal, float3 direction, float max_distance) {
+    float bias = max(TraceFrame.trace_params.z, 1.0e-3f);
+    float tmax = max(max_distance - bias * 2.0f, 0.0f);
+    if (tmax <= 0.0f) return 1.0f;
+    float3 origin = position + normal * bias * 2.0f;
+    TraceHit screen_hit = TraceScreenRay(origin, direction, source_pixel, source_object_id, normal, tmax, TraceFrame.trace_params.y, TraceFrame.trace_params.w, TraceFrame.trace_limits.x, TraceFrame.trace_limits.y);
+    if (screen_hit.type == TRACE_SCREEN) return 0.0f;
+    TraceRay shadow_ray = MakeTraceRay(origin, direction, 0.0f, tmax, TRACE_RAY_SHADOW, 0u, source_pixel, source_object_id);
+    float sdf_hit_distance;
+    if (TraceLegacySDFAny(shadow_ray, sdf_hit_distance)) return 0.0f;
+    return 1.0f;
+}
+
+[numthreads(8, 8, 1)]
+void CS_DirectRadiance(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint2 pixel = dispatch_id.xy;
+    uint2 resolution = uint2(TraceFrame.resolution.xy);
+    if (any(pixel >= resolution)) return;
+    float depth = TraceDepth.Load(int3(pixel, 0));
+    if (depth <= 0.0f) {
+        float2 uv = (float2(pixel) + 0.5f) * TraceFrame.resolution.zw;
+        float4 far_world4 = mul(float4(ScreenUVToNDC(uv), 0.0f, 1.0f), TraceFrame.inverse_view_projection);
+        float3 direction = normalize(far_world4.xyz / far_world4.w - TraceFrame.camera_position.xyz);
+        DirectRadianceOutput[pixel] = float4(SkyRadiance(direction), 1.0f);
+        return;
+    }
+
+    float3 position = ReconstructWorldPosition(pixel, depth);
+    float3 normal = normalize(TraceNormalRoughness.Load(int3(pixel, 0)).xyz);
+    float3 view_direction = normalize(position - TraceFrame.camera_position.xyz);
+    if (dot(normal, view_direction) > 0.0f) normal = -normal;
+    float3 albedo = TraceAlbedoMetallic.Load(int3(pixel, 0)).rgb;
+    float3 radiance = TraceEmissive.Load(int3(pixel, 0)).rgb;
+
+    for (uint i = 0u; i < TraceFrame.trace_limits.z; ++i) {
+        GPULight light = Lights[i];
+        uint type = (uint)(light.direction_type.w + 0.5f);
+        if (type == 3u) continue;
+        float3 L;
+        float attenuation = 1.0f;
+        float light_distance = TraceFrame.trace_params.x;
+        if (type == 0u) {
+            L = normalize(-light.direction_type.xyz);
+        } else {
+            float3 to_light = light.position_range.xyz - position;
+            float d = length(to_light);
+            if (d <= 1.0e-5f || d >= light.position_range.w) continue;
+            L = to_light / d;
+            light_distance = d;
+            float range_term = saturate(1.0f - d / max(light.position_range.w, 1.0e-3f));
+            attenuation = range_term * range_term / max(1.0f, d * d);
+            if (type == 2u) {
+                float cone = dot(normalize(light.direction_type.xyz), -L);
+                float cone_term = saturate((cone - light.spot_angles.y) / max(light.spot_angles.x - light.spot_angles.y, 1.0e-4f));
+                attenuation *= cone_term * cone_term;
+            }
+        }
+        float ndotl = saturate(dot(normal, L));
+        if (ndotl <= 0.0f) continue;
+        uint object_id = TraceObjectId.Load(int3(pixel, 0));
+        float visibility = DirectVisibility(pixel, object_id, position, normal, L, light_distance);
+        radiance += albedo * light.color_intensity.rgb * light.color_intensity.w * attenuation * ndotl * visibility;
+    }
+    DirectRadianceOutput[pixel] = float4(radiance, 1.0f);
+}
+
+// -----------------------------------------------------------------------------
+// Compatibility screen probes / queue.
+// -----------------------------------------------------------------------------
+uint LegacyProbeHash(uint2 probe) { return HashCombine(probe.x * 0x8da6b343u, probe.y * 0xd8163841u); }
+
+float3 LegacyCosineHemisphereDirection(uint ray_index, uint2 probe) {
+    float2 u = Hammersley(ray_index, SCREEN_PROBE_RAY_COUNT, LegacyProbeHash(probe));
+    return CosineHemisphere(u);
+}
+
+TraceRay BuildDiffuseProbeRay(uint2 ray_pixel) {
+    uint ray_width, ray_height;
+    ProbeRadianceOutput.GetDimensions(ray_width, ray_height);
+    uint2 probe = ray_pixel / SCREEN_PROBE_DIRECTION_SIZE;
+    uint2 direction_cell = ray_pixel % SCREEN_PROBE_DIRECTION_SIZE;
+    uint ray_index = direction_cell.x + direction_cell.y * SCREEN_PROBE_DIRECTION_SIZE;
+    uint2 resolution = uint2(TraceFrame.resolution.xy);
+    uint2 source_pixel = min(probe * SCREEN_PROBE_TILE_SIZE + uint2(SCREEN_PROBE_TILE_SIZE / 2u, SCREEN_PROBE_TILE_SIZE / 2u), resolution - uint2(1u, 1u));
+    uint destination = ray_pixel.x + ray_pixel.y * ray_width;
+    float depth = TraceDepth.Load(int3(source_pixel, 0));
+    if (depth <= 0.0f) return MakeTraceRay(0.0f, float3(0.0f, 1.0f, 0.0f), 0.0f, 0.0f, TRACE_RAY_INACTIVE, destination, source_pixel, 0u);
+    float3 position = ReconstructWorldPosition(source_pixel, depth);
+    float3 normal = normalize(TraceNormalRoughness.Load(int3(source_pixel, 0)).xyz);
+    float3 view_direction = normalize(position - TraceFrame.camera_position.xyz);
+    if (dot(normal, view_direction) > 0.0f) normal = -normal;
+    float3 tangent, bitangent;
+    BuildNormalBasis(normal, tangent, bitangent);
+    float3 local_direction = LegacyCosineHemisphereDirection(ray_index, probe);
+    float3 direction = normalize(tangent * local_direction.x + bitangent * local_direction.y + normal * local_direction.z);
+    uint object_id = TraceObjectId.Load(int3(source_pixel, 0));
+    float bias = TraceFrame.trace_params.z;
+    return MakeTraceRay(position + normal * bias, direction, bias * 2.0f, TraceFrame.trace_params.x, TRACE_RAY_DIFFUSE, destination, source_pixel, object_id);
+}
+
+[numthreads(8, 8, 1)]
+void CS_ScreenTrace(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint ray_width, ray_height;
+    ProbeRadianceOutput.GetDimensions(ray_width, ray_height);
+    uint2 ray_pixel = dispatch_id.xy;
+    if (ray_pixel.x >= ray_width || ray_pixel.y >= ray_height) return;
+    TraceRay ray = BuildDiffuseProbeRay(ray_pixel);
+    uint index = ray.destination;
+    if (ray.type == TRACE_RAY_INACTIVE) {
+        ScreenTraceHits[index] = MakeTraceHit(TRACE_INACTIVE, 0.0f);
+        ScreenTraceOutput[ray_pixel] = 0.0f;
+        ProbeRadianceOutput[ray_pixel] = 0.0f;
+        return;
+    }
+    uint2 origin_pixel = UnpackPixel(ray.origin_pixel);
+    float3 source_normal = normalize(TraceNormalRoughness.Load(int3(origin_pixel, 0)).xyz);
+    float3 source_position = ReconstructWorldPosition(origin_pixel, TraceDepth.Load(int3(origin_pixel, 0)));
+    float3 source_view_direction = normalize(source_position - TraceFrame.camera_position.xyz);
+    if (dot(source_normal, source_view_direction) > 0.0f) source_normal = -source_normal;
+    TraceHit hit = TraceScreenRay(ray.origin_tmin.xyz, ray.direction_tmax.xyz, origin_pixel, ray.sourc
