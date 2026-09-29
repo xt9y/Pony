@@ -47,3 +47,34 @@ jobs:
           for entry in CS_HZB CS_DirectRadiance CS_SurfaceCacheUpdate CS_ScreenTrace CS_ResetTraceQueue CS_CompactTraceMisses CS_BuildTraceDispatchArgs CS_SDFTrace CS_ScreenProbes CS_RadianceDirect CS_ResetWavefront CS_ClassifyRayBudgets CS_GenerateProbeRays CS_WavefrontScreenTrace CS_WavefrontDynamicTrace CS_WavefrontLocalTrace CS_WavefrontGlobalTrace CS_ShadeRayHits CS_EmissiveGather CS_ResolveDirectionalProbes CS_ReprojectScreenProbes CS_SpatialReuseScreenProbes CS_UpdateWorldRadianceCache CS_InvalidateRadiance CS_ReflectionTrace; do
             compile "$entry" compute
           done
+
+  c_abi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install header dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libsdl3-dev
+          git clone --depth 1 https://github.com/NVIDIA-RTX/NRI.git /tmp/NRI
+      - name: Compile C ABI and current translation units
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat > /tmp/abi_check.c <<'EOF'
+          #include "game.h"
+          int main(void) { return 0; }
+          EOF
+          cc -std=c11 -I. -I/tmp/NRI/Include -fsyntax-only /tmp/abi_check.c
+          for file in main.c init.c glb.c gltf.c scene.c sdf.c render.c; do
+            cc -std=c11 -I. -I/tmp/NRI/Include -fsyntax-only "$file"
+          done
+      - name: Build list covers frozen entry points
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for entry in PS_GBufferFull PS_PresentRuntime CS_RadianceDirect CS_ResetWavefront CS_ClassifyRayBudgets CS_GenerateProbeRays CS_WavefrontScreenTrace CS_WavefrontDynamicTrace CS_WavefrontLocalTrace CS_WavefrontGlobalTrace CS_ShadeRayHits CS_EmissiveGather CS_ResolveDirectionalProbes CS_ReprojectScreenProbes CS_SpatialReuseScreenProbes CS_UpdateWorldRadianceCache CS_InvalidateRadiance CS_ReflectionTrace; do
+            grep -q "{\"$entry\"" build.c
+          done
