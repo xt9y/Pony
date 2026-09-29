@@ -9,6 +9,7 @@ int main(int argc, char **argv) {
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "Could not initialize SDL: %s\n", SDL_GetError());
+
         return 1;
     }
 
@@ -19,6 +20,7 @@ int main(int argc, char **argv) {
     if (!glb_load(&document, model_path)) {
         fprintf(stderr, "Could not load %s: %s\n", model_path, glb_error(&document));
         SDL_Quit();
+
         return 1;
     }
 
@@ -26,6 +28,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Could not extract mesh from %s\n", model_path);
         glb_free(&document);
         SDL_Quit();
+
         return 1;
     }
 
@@ -34,6 +37,7 @@ int main(int argc, char **argv) {
         mesh_free(&geometry);
         glb_free(&document);
         SDL_Quit();
+
         return 1;
     }
 
@@ -60,13 +64,13 @@ int main(int argc, char **argv) {
         }
     };
 
-    if (!scene_add_model(&scene, &model, STATIC, transform_identity()) ||
-        !scene_add_light(&scene, &sun, STATIC, transform_identity())) {
+    if (!scene_add_model(&scene, &model, STATIC, transform_identity()) || !scene_add_light(&scene, &sun, STATIC, transform_identity())) {
         fprintf(stderr, "Could not create scene\n");
         gltf_free(&visual);
         mesh_free(&geometry);
         glb_free(&document);
         SDL_Quit();
+
         return 1;
     }
 
@@ -80,6 +84,7 @@ int main(int argc, char **argv) {
         mesh_free(&geometry);
         glb_free(&document);
         SDL_Quit();
+
         return 1;
     }
 
@@ -92,31 +97,32 @@ int main(int argc, char **argv) {
         mesh_free(&geometry);
         glb_free(&document);
         SDL_Quit();
+
         return 1;
     }
 
-    printf(
-        "%s | %zu vertices | %zu triangles | %u materials | %u images\n",
-        model_path,
-        visual.vertex_count,
-        visual.vertex_count / 3u,
-        visual.material_count,
-        visual.image_count
-    );
+    printf("%s | %zu vertices | %zu triangles | %u materials | %u images\n", model_path, visual.vertex_count, visual.vertex_count / 3u, visual.material_count, visual.image_count);
 
     bool running = true;
+
     while (running) {
         SDL_Event event;
+
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT) running = false;
+
             if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.key == SDLK_ESCAPE) running = false;
             renderer_event(&renderer, &event);
         }
+
         if (!running) break;
+
         if (!renderer_frame(&renderer)) {
             fprintf(stderr, "Renderer frame failed\n");
+
             running = false;
         }
+
         SDL_Delay(1);
     }
 
@@ -127,5 +133,6 @@ int main(int argc, char **argv) {
     mesh_free(&geometry);
     glb_free(&document);
     SDL_Quit();
+
     return 0;
 }

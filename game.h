@@ -113,7 +113,9 @@ bool glb_extract_mesh(const GLB_DOC *doc, MESH *out);
 typedef struct GLTF_VERTEX {
     VEC3 position;
     VEC3 normal;
+
     float u, v;
+
     uint32_t material;
 } GLTF_VERTEX;
 
@@ -197,6 +199,7 @@ typedef struct SPOT_LIGHT {
 
 struct LIGHT {
     LIGHT_TYPE type;
+
     union {
         DIRECTIONAL_LIGHT directional;
         POINT_LIGHT point;
@@ -244,12 +247,7 @@ bool sdf_build_volume(const MESH *mesh, uint32_t resolution, SDF_VOLUME *volume)
 void sdf_free_volume(SDF_VOLUME *volume);
 
 
-typedef enum TRACE_HIT_TYPE {
-    TRACE_INACTIVE = 0,
-    TRACE_MISS = 1,
-    TRACE_SCREEN = 2,
-    TRACE_SDF = 3
-} TRACE_HIT_TYPE;
+typedef enum TRACE_HIT_TYPE { TRACE_INACTIVE = 0, TRACE_MISS = 1, TRACE_SCREEN = 2, TRACE_SDF = 3 } TRACE_HIT_TYPE;
 
 typedef struct TRACE_HIT {
     uint32_t type;
@@ -261,21 +259,30 @@ typedef struct TRACE_HIT {
     uint32_t padding[2];
 } TRACE_HIT;
 
+typedef enum TRACE_RAY_TYPE { TRACE_RAY_INACTIVE = 0, TRACE_RAY_DIFFUSE = 1, TRACE_RAY_REFLECTION = 2, TRACE_RAY_SHADOW = 3 } TRACE_RAY_TYPE;
+
 typedef struct TRACE_RAY {
     float origin_tmin[4];
     float direction_tmax[4];
-    uint32_t source_pixel[2];
-    uint32_t padding[2];
+
+    uint32_t type;
+    uint32_t destination;
+    uint32_t origin_pixel;
+    uint32_t source_object_id;
 } TRACE_RAY;
 
 typedef struct GPU_SDF_MODEL {
     MAT4 world_to_local;
     float bounds_min[4];
     float bounds_max[4];
+
     uint32_t voxel_offset;
     uint32_t resolution;
     uint32_t object_id;
     uint32_t state;
+
+    uint32_t revision;
+    uint32_t padding[3];
 } GPU_SDF_MODEL;
 
 typedef struct GPU_LIGHT {
@@ -287,9 +294,18 @@ typedef struct GPU_LIGHT {
 
 typedef struct SURFACE_CACHE_ENTRY {
     float position[4];
-    float radiance[4];
+    float normal[4];
+
+    float albedo_roughness[4];
+    float emissive_metallic[4];
+
+    float direct_radiance[4];
+    float indirect_radiance[4];
+
     uint32_t object_id;
-    uint32_t padding[3];
+    uint32_t revision;
+    uint32_t last_frame;
+    uint32_t confidence;
 } SURFACE_CACHE_ENTRY;
 
 typedef struct CAMERA {
@@ -309,8 +325,10 @@ typedef struct CAMERA {
 
 #define HZB_MAX_MIPS 16u
 #define SDF_DEFAULT_RESOLUTION 32u
-#define SURFACE_CACHE_CAPACITY 65536u
+#define SURFACE_CACHE_CAPACITY 262144u
 #define SCREEN_PROBE_TILE_SIZE 8u
+#define SCREEN_PROBE_DIRECTION_SIZE 4u
+#define SCREEN_PROBE_DIRECTION_COUNT (SCREEN_PROBE_DIRECTION_SIZE * SCREENPROBE_DIRECTION_SIZE)
 
 typedef struct HZB {
     NriTexture *texture;
@@ -431,6 +449,7 @@ typedef struct RENDERER {
     HZB hzb;
     SCREEN_TRACE screen_trace;
     COMPUTE_TEXTURE direct_radiance;
+    COMPUTE_TEXTURE screen_probe_radiance;
     COMPUTE_TEXTURE screen_probes;
     TRACE_BUFFER trace_hits;
     TRACE_QUEUE miss_queue;

@@ -13,6 +13,24 @@ pass.
 
 The formatter is intentionally self-contained: it does not depend on a repo
 .clang-format file, and clang-format is never allowed to sort includes.
+
+build.c:
+
+static void format_sources(void) {
+#if defined(_WIN32)
+    const char *command = "powershell -NoProfile -ExecutionPolicy Bypass -Command "
+                          "\"py .\\felix-format -i "
+                          "(Get-ChildItem -File *.c,*.h | ForEach-Object FullName)\"";
+#else
+    const char *command = "./felix-format -i *.c *.h";
+#endif
+
+    if (system(command) != 0) {
+        fprintf(stderr, "felix-format failed\n");
+        exit(1);
+    }
+}
+
 """
 import argparse
 import difflib

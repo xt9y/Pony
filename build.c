@@ -18,18 +18,29 @@ static void format_sources(void) {
     }
 }
 
+/*
+ * Build-time shader compiler: Slang (slangc); the runtime only loads SPIR-V.
+ * Vulkan SDK 1.3.296+ bundles Slang. The full SDK is needed for development,
+ * while a finished game only needs a Vulkan-capable driver/runtime.
+ * Windows: winget install --id KhronosGroup.VulkanSDK -e
+ * macOS: install the current LunarG SDK from https://vulkan.lunarg.com/sdk/home/
+ *        (brew install vulkan-tools molten-vk installs the Vulkan stack, not slangc).
+ * Arch/CachyOS: sudo pacman -S vulkan-devel, then install LunarG SDK or Slang for slangc.
+ */
 static void compile_shaders(void) {
 #if defined(_WIN32)
     if (system("where slangc >nul 2>&1") != 0) {
         fprintf(stderr, "slangc was not found on PATH\n");
         exit(1);
     }
+
     const char *make_directory = "if not exist build\\shaders mkdir build\\shaders";
 #else
     if (system("command -v slangc >/dev/null 2>&1") != 0) {
         fprintf(stderr, "slangc was not found on PATH\n");
         exit(1);
     }
+
     const char *make_directory = "mkdir -p build/shaders";
 #endif
 
@@ -39,19 +50,32 @@ static void compile_shaders(void) {
     }
 
     const char *commands[] = {
-        "slangc shader.hlsl -entry VS_GBuffer -stage vertex -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/gbuffer.vs.spv",
-        "slangc shader.hlsl -entry PS_GBuffer -stage fragment -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/gbuffer.ps.spv",
-        "slangc shader.hlsl -entry VS_Present -stage vertex -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/present.vs.spv",
-        "slangc shader.hlsl -entry PS_Present -stage fragment -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -DDIRECT_RADIANCE -o build/shaders/present.ps.spv",
-        "slangc shader.hlsl -entry CS_HZB -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/hzb.cs.spv",
-        "slangc shader.hlsl -entry CS_DirectRadiance -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/direct_radiance.cs.spv",
-        "slangc shader.hlsl -entry CS_SurfaceCacheUpdate -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/surface_cache.cs.spv",
-        "slangc shader.hlsl -entry CS_ScreenTrace -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/screen_trace.cs.spv",
-        "slangc shader.hlsl -entry CS_ResetTraceQueue -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/trace_reset.cs.spv",
-        "slangc shader.hlsl -entry CS_CompactTraceMisses -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/trace_compact.cs.spv",
-        "slangc shader.hlsl -entry CS_BuildTraceDispatchArgs -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/trace_args.cs.spv",
-        "slangc shader.hlsl -entry CS_SDFTrace -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/sdf_trace.cs.spv",
-        "slangc shader.hlsl -entry CS_ScreenProbes -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/screen_probes.cs.spv"
+        "slangc shader.hlsl -entry VS_GBuffer -stage vertex -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
+        "build/shaders/gbuffer.vs.spv",
+        "slangc shader.hlsl -entry PS_GBuffer -stage fragment -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
+        "build/shaders/gbuffer.ps.spv",
+        "slangc shader.hlsl -entry VS_Present -stage vertex -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
+        "build/shaders/present.vs.spv",
+        "slangc shader.hlsl -entry PS_Present -stage fragment -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 "
+        "-DFINAL_GI -o build/shaders/present.ps.spv",
+        "slangc shader.hlsl -entry CS_HZB -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
+        "build/shaders/hzb.cs.spv",
+        "slangc shader.hlsl -entry CS_DirectRadiance -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
+        "build/shaders/direct_radiance.cs.spv",
+        "slangc shader.hlsl -entry CS_SurfaceCacheUpdate -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
+        "build/shaders/surface_cache.cs.spv",
+        "slangc shader.hlsl -entry CS_ScreenTrace -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
+        "build/shaders/screen_trace.cs.spv",
+        "slangc shader.hlsl -entry CS_ResetTraceQueue -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
+        "build/shaders/trace_reset.cs.spv",
+        "slangc shader.hlsl -entry CS_CompactTraceMisses -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
+        "build/shaders/trace_compact.cs.spv",
+        "slangc shader.hlsl -entry CS_BuildTraceDispatchArgs -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
+        "build/shaders/trace_args.cs.spv",
+        "slangc shader.hlsl -entry CS_SDFTrace -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
+        "build/shaders/sdf_trace.cs.spv",
+        "slangc shader.hlsl -entry CS_ScreenProbes -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
+        "build/shaders/screen_probes.cs.spv"
     };
 
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {

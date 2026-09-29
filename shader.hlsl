@@ -4,7 +4,16 @@
 #define TRACE_MISS 1u
 #define TRACE_SCREEN 2u
 #define TRACE_SDF 3u
-#define SURFACE_CACHE_CAPACITY 65536u
+#define SURFACE_CACHE_CAPACITY 262144u
+
+#define TRACE_RAY_INACTIVE 0u
+#define TRACE_RAY_DIFFUSE 1u
+#define TRACE_RAY_REFLECTION 2u
+#define TRACE_RAY_SHADOW 3u
+
+#define SCREEN_PROBE_TILE_SIZE 8u
+#define SCREEN_PROBE_DIRECTION_SIZE 4u
+#define SCREEN_PROBE_RAY_COUNT 16u
 
 struct GPUObject {
     row_major float4x4 world;
@@ -44,15 +53,26 @@ struct TraceHit {
 struct TraceRay {
     float4 origin_tmin;
     float4 direction_tmax;
-    uint2 source_pixel;
-    uint2 padding;
+
+    uint type;
+    uint destination;
+    uint origin_pixel;
+    uint source_object_id;
 };
 
 struct GPUSDFModel {
     row_major float4x4 world_to_local;
     float4 bounds_min;
     float4 bounds_max;
+
+    // x = voxel offset
+    // y = resolution
+    // z = object id
+    // w = STATIC / DYNAMIC state
     uint4 meta;
+
+    // x = object revision
+    uint4 version;
 };
 
 struct GPULight {
@@ -64,8 +84,18 @@ struct GPULight {
 
 struct SurfaceCacheEntry {
     float4 position;
-    float4 radiance;
-    uint4 meta;
+    float4 normal;
+
+    float4 albedo_roughness;
+    float4 emissive_metallic;
+
+    float4 direct_radiance;
+    float4 indirect_radiance;
+
+    uint object_id;
+    uint revision;
+    uint last_frame;
+    uint confidence;
 };
 
 [[vk::binding(0, 0)]] StructuredBuffer<GPUObject> Objects : register(t0, space0);
@@ -169,7 +199,8 @@ PresentVSOutput VS_Present(uint vertex_id : SV_VertexID) {
 [[vk::binding(16, 3)]] RWTexture2D<float4> DirectRadianceOutput : register(u5, space3);
 [[vk::binding(17, 3)]] RWStructuredBuffer<uint> SurfaceCacheKeys : register(u6, space3);
 [[vk::binding(18, 3)]] RWStructuredBuffer<SurfaceCacheEntry> SurfaceCacheEntries : register(u7, space3);
-[[vk::binding(19, 3)]] RWTexture2D<float4> ScreenProbesOutput : register(u8, space3);
+[[vk::binding(19, 3)]] RWTexture2D<float4> ProbeRadianceOutput : register(u8, space3);
+[[vk::binding(20, 3)]] RWTexture2D<float4> ScreenProbesOutput : register(u9, space3);
 
 float2 ScreenUVToNDC(float2 uv) { return float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0); }
 float2 NDCToScreenUV(float2 ndc) { return float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5); }
@@ -335,20 +366,224 @@ TraceHit TraceScreenRay(float3 origin, float3 direction, uint2 origin_pixel, flo
     return result;
 }
 
-TraceRay BuildReflectionRay(uint2 pixel) {
-    TraceRay ray = (TraceRay)0;
-    float depth = TraceDepth.Load(int3(pixel, 0));
-    if (depth <= 0.0) return ray;
-    float3 position = ReconstructWorldPosition(pixel, depth);
-    float3 normal = normalize(TraceNormalRoughness.Load(int3(pixel, 0)).xyz);
-    float3 view_direction = normalize(position - TraceFrame.camera_position.xyz);
-    if (dot(normal, view_direction) > 0.0) normal = -normal;
-    float3 direction = normalize(reflect(view_direction, normal));
-    ray.origin_tmin = float4(position + normal * TraceFrame.trace_params.z, 0.0);
-    ray.direction_tmax = float4(direction, TraceFrame.trace_params.x);
-    ray.source_pixel = pixel;
-    ray.padding = uint2(0u, 0u);
+uint PackPixel(uint2 pixel) {
+    return (pixel.x & 0xffffu) |
+           ((pixel.y & 0xffffu) << 16u);
+}
+
+uint2 UnpackPixel(uint packed) {
+    return uint2(
+        packed & 0xffffu,
+        (packed >> 16u) & 0xffffu
+    );
+}
+
+TraceRay MakeTraceRay(
+    float3 origin,
+    float3 direction,
+    float tmin,
+    float tmax,
+    uint type,
+    uint destination,
+    uint2 origin_pixel,
+    uint source_object_id
+) {
+    TraceRay ray;
+
+    ray.origin_tmin = float4(origin, tmin);
+    ray.direction_tmax = float4(normalize(direction), tmax);
+
+    ray.type = type;
+    ray.destination = destination;
+    ray.origin_pixel = PackPixel(origin_pixel);
+    ray.source_object_id = source_object_id;
+
     return ray;
+}
+
+float RadicalInverseVdC(uint bits) {
+    bits = (bits << 16u) | (bits >> 16u);
+    bits =
+        ((bits & 0x55555555u) << 1u) |
+        ((bits & 0xaaaaaaaau) >> 1u);
+    bits =
+        ((bits & 0x33333333u) << 2u) |
+        ((bits & 0xccccccccu) >> 2u);
+    bits =
+        ((bits & 0x0f0f0f0fu) << 4u) |
+        ((bits & 0xf0f0f0f0u) >> 4u);
+    bits =
+        ((bits & 0x00ff00ffu) << 8u) |
+        ((bits & 0xff00ff00u) >> 8u);
+
+    return (float)bits * 2.3283064365386963e-10;
+}
+
+uint ProbeHash(uint2 probe) {
+    uint h =
+        probe.x * 0x8da6b343u ^
+        probe.y * 0xd8163841u;
+
+    h ^= h >> 16u;
+    h *= 0x7feb352du;
+    h ^= h >> 15u;
+
+    return h;
+}
+
+float3 CosineHemisphereDirection(
+    uint ray_index,
+    uint2 probe
+) {
+    float u1 =
+        ((float)ray_index + 0.5) /
+        (float)SCREEN_PROBE_RAY_COUNT;
+
+    float u2 = RadicalInverseVdC(ray_index);
+
+    float rotation =
+        ((float)(ProbeHash(probe) & 0x00ffffffu) /
+         16777216.0) *
+        6.28318530718;
+
+    float radius = sqrt(u1);
+    float phi = u2 * 6.28318530718 + rotation;
+
+    return float3(
+        radius * cos(phi),
+        radius * sin(phi),
+        sqrt(max(0.0, 1.0 - u1))
+    );
+}
+
+void BuildNormalBasis(
+    float3 normal,
+    out float3 tangent,
+    out float3 bitangent
+) {
+    float3 axis =
+        abs(normal.z) < 0.999
+            ? float3(0.0, 0.0, 1.0)
+            : float3(0.0, 1.0, 0.0);
+
+    tangent = normalize(cross(axis, normal));
+    bitangent = cross(normal, tangent);
+}
+
+TraceRay BuildDiffuseProbeRay(uint2 ray_pixel) {
+    uint ray_width;
+    uint ray_height;
+
+    ProbeRadianceOutput.GetDimensions(
+        ray_width,
+        ray_height
+    );
+
+    uint2 probe =
+        ray_pixel / SCREEN_PROBE_DIRECTION_SIZE;
+
+    uint2 direction_cell =
+        ray_pixel % SCREEN_PROBE_DIRECTION_SIZE;
+
+    uint ray_index =
+        direction_cell.x +
+        direction_cell.y *
+        SCREEN_PROBE_DIRECTION_SIZE;
+
+    uint2 resolution =
+        uint2(TraceFrame.resolution.xy);
+
+    /*
+     * Representative surface = center of the 8x8 tile.
+     *
+     * Do not add complicated placement/reprojection in this stage.
+     */
+    uint2 source_pixel = min(
+        probe * SCREEN_PROBE_TILE_SIZE +
+            uint2(
+                SCREEN_PROBE_TILE_SIZE / 2u,
+                SCREEN_PROBE_TILE_SIZE / 2u
+            ),
+        resolution - uint2(1u, 1u)
+    );
+
+    uint destination =
+        ray_pixel.x +
+        ray_pixel.y * ray_width;
+
+    float depth =
+        TraceDepth.Load(int3(source_pixel, 0));
+
+    if (depth <= 0.0) {
+        return MakeTraceRay(
+            0.0,
+            float3(0.0, 1.0, 0.0),
+            0.0,
+            0.0,
+            TRACE_RAY_INACTIVE,
+            destination,
+            source_pixel,
+            0u
+        );
+    }
+
+    float3 position =
+        ReconstructWorldPosition(
+            source_pixel,
+            depth
+        );
+
+    float3 normal = normalize(
+        TraceNormalRoughness.Load(
+            int3(source_pixel, 0)
+        ).xyz
+    );
+
+    float3 view_direction = normalize(
+        position - TraceFrame.camera_position.xyz
+    );
+
+    if (dot(normal, view_direction) > 0.0)
+        normal = -normal;
+
+    float3 tangent;
+    float3 bitangent;
+
+    BuildNormalBasis(
+        normal,
+        tangent,
+        bitangent
+    );
+
+    float3 local_direction =
+        CosineHemisphereDirection(
+            ray_index,
+            probe
+        );
+
+    float3 direction = normalize(
+        tangent * local_direction.x +
+        bitangent * local_direction.y +
+        normal * local_direction.z
+    );
+
+    uint object_id =
+        TraceObjectId.Load(
+            int3(source_pixel, 0)
+        );
+
+    float bias = TraceFrame.trace_params.z;
+
+    return MakeTraceRay(
+        position + normal * bias,
+        direction,
+        0.0,
+        TraceFrame.trace_params.x,
+        TRACE_RAY_DIFFUSE,
+        destination,
+        source_pixel,
+        object_id
+    );
 }
 
 float3 SkyRadiance(float3 direction) {
@@ -360,6 +595,69 @@ float3 SkyRadiance(float3 direction) {
         result += lerp(light.spot_angles.xyz, light.color_intensity.rgb, t) * light.color_intensity.w;
     }
     return result;
+}
+
+bool TraceSDFAny(
+    TraceRay ray,
+    out float hit_distance
+);
+
+float DirectVisibility(
+    uint2 source_pixel,
+    uint source_object_id,
+    float3 position,
+    float3 normal,
+    float3 direction,
+    float max_distance
+) {
+    float bias =
+        max(TraceFrame.trace_params.z, 1.0e-3);
+
+    float tmax =
+        max(max_distance - bias * 2.0, 0.0);
+
+    if (tmax <= 0.0)
+        return 1.0;
+
+    float3 origin =
+        position + normal * bias * 2.0;
+
+    TraceHit screen_hit =
+        TraceScreenRay(
+            origin,
+            direction,
+            source_pixel,
+            tmax,
+            TraceFrame.trace_params.y,
+            TraceFrame.trace_params.w,
+            TraceFrame.trace_limits.x,
+            TraceFrame.trace_limits.y
+        );
+
+    if (screen_hit.type == TRACE_SCREEN)
+        return 0.0;
+
+    TraceRay shadow_ray = MakeTraceRay(
+        origin,
+        direction,
+        0.0,
+        tmax,
+        TRACE_RAY_SHADOW,
+        0u,
+        source_pixel,
+        source_object_id
+    );
+
+    float sdf_hit_distance;
+
+    if (TraceSDFAny(
+            shadow_ray,
+            sdf_hit_distance
+        )) {
+        return 0.0;
+    }
+
+    return 1.0;
 }
 
 [numthreads(8, 8, 1)]
@@ -384,62 +682,205 @@ void CS_DirectRadiance(uint3 dispatch_id : SV_DispatchThreadID) {
     float3 albedo = TraceAlbedoMetallic.Load(int3(pixel, 0)).rgb;
     float3 radiance = TraceEmissive.Load(int3(pixel, 0)).rgb;
 
-    for (uint i = 0u; i < TraceFrame.trace_limits.z; ++i) {
+    for (
+        uint i = 0u;
+        i < TraceFrame.trace_limits.z;
+        ++i
+    ) {
         GPULight light = Lights[i];
-        uint type = (uint)(light.direction_type.w + 0.5);
-        if (type == 3u) {
-            float3 sky = lerp(light.spot_angles.xyz, light.color_intensity.rgb, saturate(normal.y * 0.5 + 0.5));
-            radiance += albedo * sky * light.color_intensity.w * 0.35;
+
+        uint type =
+            (uint)(light.direction_type.w + 0.5);
+
+        /*
+         * Sky lighting is now supplied naturally by
+         * diffuse probe rays which miss the scene.
+         *
+         * Do not inject fake unshadowed sky ambient here.
+         */
+        if (type == 3u)
             continue;
-        }
 
         float3 L;
         float attenuation = 1.0;
+        float light_distance =
+            TraceFrame.trace_params.x;
+
         if (type == 0u) {
-            L = normalize(-light.direction_type.xyz);
+            L = normalize(
+                -light.direction_type.xyz
+            );
         } else {
-            float3 to_light = light.position_range.xyz - position;
+            float3 to_light =
+                light.position_range.xyz -
+                position;
+
             float d = length(to_light);
-            if (d <= 1.0e-5 || d >= light.position_range.w) continue;
+
+            if (d <= 1.0e-5 ||
+                d >= light.position_range.w) {
+                continue;
+            }
+
             L = to_light / d;
-            float range_term = saturate(1.0 - d / max(light.position_range.w, 1.0e-3));
-            attenuation = range_term * range_term / max(1.0, d * d);
+            light_distance = d;
+
+            float range_term = saturate(
+                1.0 -
+                d /
+                max(light.position_range.w, 1.0e-3)
+            );
+
+            attenuation =
+                range_term *
+                range_term /
+                max(1.0, d * d);
+
             if (type == 2u) {
-                float cone = dot(normalize(light.direction_type.xyz), -L);
-                float cone_term = saturate((cone - light.spot_angles.y) / max(light.spot_angles.x - light.spot_angles.y, 1.0e-4));
-                attenuation *= cone_term * cone_term;
+                float cone = dot(
+                    normalize(
+                        light.direction_type.xyz
+                    ),
+                    -L
+                );
+
+                float cone_term = saturate(
+                    (cone - light.spot_angles.y) /
+                    max(
+                        light.spot_angles.x -
+                            light.spot_angles.y,
+                        1.0e-4
+                    )
+                );
+
+                attenuation *=
+                    cone_term * cone_term;
             }
         }
-        radiance += albedo * light.color_intensity.rgb * light.color_intensity.w * attenuation * saturate(dot(normal, L));
-    }
 
+        float ndotl =
+            saturate(dot(normal, L));
+
+        if (ndotl <= 0.0)
+            continue;
+
+        uint object_id =
+            TraceObjectId.Load(
+                int3(pixel, 0)
+            );
+
+        float visibility =
+            DirectVisibility(
+                pixel,
+                object_id,
+                position,
+                normal,
+                L,
+                light_distance
+            );
+
+        radiance +=
+            albedo *
+            light.color_intensity.rgb *
+            light.color_intensity.w *
+            attenuation *
+            ndotl *
+            visibility;
+    }
     DirectRadianceOutput[pixel] = float4(radiance, 1.0);
 }
 
 [numthreads(8, 8, 1)]
-void CS_ScreenTrace(uint3 dispatch_id : SV_DispatchThreadID) {
-    uint2 pixel = dispatch_id.xy;
-    uint2 resolution = uint2(TraceFrame.resolution.xy);
-    if (any(pixel >= resolution)) return;
-    uint index = pixel.x + resolution.x * pixel.y;
-    if (TraceDepth.Load(int3(pixel, 0)) <= 0.0) {
-        ScreenTraceHits[index] = MakeTraceHit(TRACE_INACTIVE, 0.0);
-        ScreenTraceOutput[pixel] = float4(0.0, 0.0, 0.0, 1.0);
+void CS_ScreenTrace(
+    uint3 dispatch_id : SV_DispatchThreadID
+) {
+    uint ray_width;
+    uint ray_height;
+
+    ProbeRadianceOutput.GetDimensions(
+        ray_width,
+        ray_height
+    );
+
+    uint2 ray_pixel = dispatch_id.xy;
+
+    if (ray_pixel.x >= ray_width ||
+        ray_pixel.y >= ray_height) {
         return;
     }
-    TraceRay ray = BuildReflectionRay(pixel);
-    TraceHit hit = TraceScreenRay(
-        ray.origin_tmin.xyz,
-        ray.direction_tmax.xyz,
-        pixel,
-        TraceFrame.trace_params.x,
-        TraceFrame.trace_params.y,
-        TraceFrame.trace_params.w,
-        TraceFrame.trace_limits.x,
-        TraceFrame.trace_limits.y
-    );
+
+    TraceRay ray =
+        BuildDiffuseProbeRay(ray_pixel);
+
+    uint index = ray.destination;
+
+    if (ray.type == TRACE_RAY_INACTIVE) {
+        ScreenTraceHits[index] =
+            MakeTraceHit(
+                TRACE_INACTIVE,
+                0.0
+            );
+
+        ScreenTraceOutput[ray_pixel] =
+            0.0;
+
+        ProbeRadianceOutput[ray_pixel] =
+            0.0;
+
+        return;
+    }
+
+    uint2 origin_pixel =
+        UnpackPixel(ray.origin_pixel);
+
+    TraceHit hit =
+        TraceScreenRay(
+            ray.origin_tmin.xyz,
+            ray.direction_tmax.xyz,
+            origin_pixel,
+            ray.direction_tmax.w,
+            TraceFrame.trace_params.y,
+            TraceFrame.trace_params.w,
+            TraceFrame.trace_limits.x,
+            TraceFrame.trace_limits.y
+        );
+
     ScreenTraceHits[index] = hit;
-    ScreenTraceOutput[pixel] = hit.type == TRACE_SCREEN ? float4(TraceDirectRadiance.Load(int3(hit.hit_pixel, 0)).rgb, 1.0) : float4(1.0, 0.0, 1.0, 1.0);
+
+    if (hit.type == TRACE_SCREEN) {
+        float3 radiance =
+            TraceDirectRadiance.Load(
+                int3(hit.hit_pixel, 0)
+            ).rgb;
+
+        ProbeRadianceOutput[ray_pixel] =
+            float4(radiance, 1.0);
+
+        ScreenTraceOutput[ray_pixel] =
+            float4(radiance, 1.0);
+
+        return;
+    }
+
+    /*
+     * A true scene miss sees environment radiance.
+     *
+     * SDF tracing may overwrite this if offscreen
+     * geometry is found.
+     */
+    float3 sky =
+        SkyRadiance(
+            ray.direction_tmax.xyz
+        );
+
+    ProbeRadianceOutput[ray_pixel] =
+        float4(sky, 1.0);
+
+    /*
+     * Keep magenta as the screen-trace debug view.
+     */
+    ScreenTraceOutput[ray_pixel] =
+        float4(1.0, 0.0, 1.0, 1.0);
 }
 
 [numthreads(1, 1, 1)]
@@ -451,15 +892,48 @@ void CS_ResetTraceQueue(uint3 dispatch_id : SV_DispatchThreadID) {
 }
 
 [numthreads(8, 8, 1)]
-void CS_CompactTraceMisses(uint3 dispatch_id : SV_DispatchThreadID) {
-    uint2 pixel = dispatch_id.xy;
-    uint2 resolution = uint2(TraceFrame.resolution.xy);
-    if (any(pixel >= resolution)) return;
-    uint index = pixel.x + resolution.x * pixel.y;
-    if (ScreenTraceHits[index].type != TRACE_MISS) return;
+void CS_CompactTraceMisses(
+    uint3 dispatch_id : SV_DispatchThreadID
+) {
+    uint ray_width;
+    uint ray_height;
+
+    ProbeRadianceOutput.GetDimensions(
+        ray_width,
+        ray_height
+    );
+
+    uint2 ray_pixel = dispatch_id.xy;
+
+    if (ray_pixel.x >= ray_width ||
+        ray_pixel.y >= ray_height) {
+        return;
+    }
+
+    uint index =
+        ray_pixel.x +
+        ray_pixel.y * ray_width;
+
+    if (ScreenTraceHits[index].type !=
+        TRACE_MISS) {
+        return;
+    }
+
+    TraceRay ray =
+        BuildDiffuseProbeRay(ray_pixel);
+
+    if (ray.type == TRACE_RAY_INACTIVE)
+        return;
+
     uint queue_index;
-    InterlockedAdd(MissCount[0], 1u, queue_index);
-    MissQueue[queue_index] = BuildReflectionRay(pixel);
+
+    InterlockedAdd(
+        MissCount[0],
+        1u,
+        queue_index
+    );
+
+    MissQueue[queue_index] = ray;
 }
 
 [numthreads(1, 1, 1)]
@@ -548,98 +1022,458 @@ bool TraceSDFModel(TraceRay ray, GPUSDFModel model, float current_best, out floa
     return false;
 }
 
-uint SurfaceHash(uint object_id, float3 position) {
-    int3 cell = int3(floor(position * 4.0));
-    uint h = object_id * 747796405u + 2891336453u;
-    h ^= asuint(cell.x) * 277803737u;
-    h ^= asuint(cell.y) * 1597334677u;
-    h ^= asuint(cell.z) * 3812015801u;
+bool TraceSDFAny(
+    TraceRay ray,
+    out float hit_distance
+) {
+    float best =
+        ray.direction_tmax.w;
+
+    bool found = false;
+
+    for (
+        uint i = 0u;
+        i < TraceFrame.trace_limits.w;
+        ++i
+    ) {
+        float candidate;
+
+        if (TraceSDFModel(
+                ray,
+                SDFModels[i],
+                best,
+                candidate
+            )) {
+            best = candidate;
+            found = true;
+        }
+    }
+
+    hit_distance = best;
+    return found;
+}
+
+uint SurfaceHash(
+    uint object_id,
+    uint revision,
+    float3 position
+) {
+    /*
+     * 0.5-world-unit cells.
+     */
+    int3 cell =
+        int3(floor(position * 2.0));
+
+    uint h =
+        object_id * 747796405u +
+        revision * 2891336453u;
+
+    h ^=
+        asuint(cell.x) * 277803737u;
+
+    h ^=
+        asuint(cell.y) * 1597334677u;
+
+    h ^=
+        asuint(cell.z) * 3812015801u;
+
     h ^= h >> 16u;
+
+    /*
+     * Zero means empty slot.
+     */
     return h | 1u;
 }
 
-bool LookupSurfaceCache(uint object_id, float3 position, out float3 radiance) {
-    uint key = SurfaceHash(object_id, position);
-    uint slot = key & (SURFACE_CACHE_CAPACITY - 1u);
-    if (SurfaceCacheKeys[slot] != key) {
-        radiance = float3(0.0, 0.0, 0.0);
-        return false;
+uint SurfaceRevision(uint object_id) {
+    for (
+        uint i = 0u;
+        i < TraceFrame.trace_limits.w;
+        ++i
+    ) {
+        if (SDFModels[i].meta.z == object_id)
+            return SDFModels[i].version.x;
     }
-    SurfaceCacheEntry entry = SurfaceCacheEntries[slot];
-    if (entry.meta.x != object_id || distance(entry.position.xyz, position) > 0.75) {
-        radiance = float3(0.0, 0.0, 0.0);
-        return false;
+
+    return 0u;
+}
+
+uint SurfaceCacheWriteSlot(uint key) {
+    const uint mask =
+        SURFACE_CACHE_CAPACITY - 1u;
+
+    [unroll]
+    for (uint probe = 0u; probe < 4u; ++probe) {
+        uint slot =
+            (key + probe) & mask;
+
+        uint previous;
+
+        InterlockedCompareExchange(
+            SurfaceCacheKeys[slot],
+            0u,
+            key,
+            previous
+        );
+
+        if (previous == 0u ||
+            previous == key) {
+            return slot;
+        }
     }
-    radiance = entry.radiance.rgb;
-    return true;
+
+    /*
+     * All four occupied:
+     * replace the primary slot.
+     */
+    uint slot = key & mask;
+    uint previous;
+
+    InterlockedExchange(
+        SurfaceCacheKeys[slot],
+        key,
+        previous
+    );
+
+    return slot;
+}
+
+bool LookupSurfaceCache(
+    uint object_id,
+    uint revision,
+    float3 position,
+    out float3 radiance
+) {
+    uint key =
+        SurfaceHash(
+            object_id,
+            revision,
+            position
+        );
+
+    const uint mask =
+        SURFACE_CACHE_CAPACITY - 1u;
+
+    [unroll]
+    for (uint probe = 0u; probe < 4u; ++probe) {
+        uint slot =
+            (key + probe) & mask;
+
+        uint stored_key =
+            SurfaceCacheKeys[slot];
+
+        if (stored_key == 0u)
+            break;
+
+        if (stored_key != key)
+            continue;
+
+        SurfaceCacheEntry entry =
+            SurfaceCacheEntries[slot];
+
+        if (entry.object_id != object_id)
+            continue;
+
+        if (entry.revision != revision)
+            continue;
+
+        if (distance(
+                entry.position.xyz,
+                position
+            ) > 0.75) {
+            continue;
+        }
+
+        radiance =
+            entry.direct_radiance.rgb +
+            entry.indirect_radiance.rgb;
+
+        return entry.confidence != 0u;
+    }
+
+    radiance = 0.0;
+    return false;
 }
 
 [numthreads(64, 1, 1)]
-void CS_SDFTrace(uint3 dispatch_id : SV_DispatchThreadID) {
+void CS_SDFTrace(
+    uint3 dispatch_id : SV_DispatchThreadID
+) {
     uint queue_index = dispatch_id.x;
-    if (queue_index >= MissCount[0]) return;
-    TraceRay ray = MissQueue[queue_index];
-    float best = ray.direction_tmax.w;
-    uint best_object = 0u;
-    for (uint i = 0u; i < TraceFrame.trace_limits.w; ++i) {
+
+    if (queue_index >= MissCount[0])
+        return;
+
+    TraceRay ray =
+        MissQueue[queue_index];
+
+    float best =
+        ray.direction_tmax.w;
+
+    uint best_model =
+        0xffffffffu;
+
+    for (
+        uint i = 0u;
+        i < TraceFrame.trace_limits.w;
+        ++i
+    ) {
         float hit_distance;
-        if (TraceSDFModel(ray, SDFModels[i], best, hit_distance)) {
+
+        if (TraceSDFModel(
+                ray,
+                SDFModels[i],
+                best,
+                hit_distance
+            )) {
             best = hit_distance;
-            best_object = SDFModels[i].meta.z;
+            best_model = i;
         }
     }
-    if (best_object == 0u) return;
-    uint2 resolution = uint2(TraceFrame.resolution.xy);
-    uint hit_index = ray.source_pixel.x + resolution.x * ray.source_pixel.y;
-    TraceHit hit = MakeTraceHit(TRACE_SDF, best);
-    hit.object_id = best_object;
+
+    /*
+     * No SDF hit:
+     * keep the sky radiance written by CS_ScreenTrace.
+     */
+    if (best_model == 0xffffffffu)
+        return;
+
+    GPUSDFModel model =
+        SDFModels[best_model];
+
+    TraceHit hit =
+        MakeTraceHit(
+            TRACE_SDF,
+            best
+        );
+
+    hit.object_id = model.meta.z;
     hit.confidence = 1.0;
-    ScreenTraceHits[hit_index] = hit;
-    float3 world_position = ray.origin_tmin.xyz + ray.direction_tmax.xyz * best;
+
+    ScreenTraceHits[ray.destination] = hit;
+
+    uint ray_width;
+    uint ray_height;
+
+    ProbeRadianceOutput.GetDimensions(
+        ray_width,
+        ray_height
+    );
+
+    uint2 destination =
+        uint2(
+            ray.destination % ray_width,
+            ray.destination / ray_width
+        );
+
+    float3 world_position =
+        ray.origin_tmin.xyz +
+        ray.direction_tmax.xyz * best;
+
     float3 cached_radiance;
-    ScreenTraceOutput[ray.source_pixel] = LookupSurfaceCache(best_object, world_position, cached_radiance) ? float4(cached_radiance, 1.0) : float4(0.0, 1.0, 1.0, 1.0);
+
+    bool cache_hit =
+        LookupSurfaceCache(
+            model.meta.z,
+            model.version.x,
+            world_position,
+            cached_radiance
+        );
+
+    /*
+     * An actual geometry hit without known radiance
+     * must be dark, NOT sky.
+     *
+     * Otherwise we'd leak environment through walls.
+     */
+    ProbeRadianceOutput[destination] =
+        cache_hit
+            ? float4(
+                  cached_radiance,
+                  1.0
+              )
+            : float4(
+                  0.0,
+                  0.0,
+                  0.0,
+                  1.0
+              );
+
+    /*
+     * Cyan remains useful as the debug indication
+     * for an SDF hit whose radiance cache missed.
+     */
+    ScreenTraceOutput[destination] =
+        cache_hit
+            ? float4(
+                  cached_radiance,
+                  1.0
+              )
+            : float4(
+                  0.0,
+                  1.0,
+                  1.0,
+                  1.0
+              );
 }
 
 [numthreads(8, 8, 1)]
-void CS_SurfaceCacheUpdate(uint3 dispatch_id : SV_DispatchThreadID) {
+void CS_SurfaceCacheUpdate(
+    uint3 dispatch_id : SV_DispatchThreadID
+) {
     uint2 pixel = dispatch_id.xy;
-    uint2 resolution = uint2(TraceFrame.resolution.xy);
-    if (any(pixel >= resolution)) return;
-    float depth = TraceDepth.Load(int3(pixel, 0));
-    if (depth <= 0.0) return;
-    uint object_id = TraceObjectId.Load(int3(pixel, 0));
-    if (object_id == 0u) return;
-    float3 position = ReconstructWorldPosition(pixel, depth);
-    uint key = SurfaceHash(object_id, position);
-    uint slot = key & (SURFACE_CACHE_CAPACITY - 1u);
-    uint old_key;
-    InterlockedExchange(SurfaceCacheKeys[slot], key, old_key);
+
+    uint2 resolution =
+        uint2(TraceFrame.resolution.xy);
+
+    if (any(pixel >= resolution))
+        return;
+
+    float depth =
+        TraceDepth.Load(int3(pixel, 0));
+
+    if (depth <= 0.0)
+        return;
+
+    uint object_id =
+        TraceObjectId.Load(int3(pixel, 0));
+
+    if (object_id == 0u)
+        return;
+
+    uint revision =
+        SurfaceRevision(object_id);
+
+    float3 position =
+        ReconstructWorldPosition(
+            pixel,
+            depth
+        );
+
+    float4 normal_roughness =
+        TraceNormalRoughness.Load(
+            int3(pixel, 0)
+        );
+
+    float4 albedo_metallic =
+        TraceAlbedoMetallic.Load(
+            int3(pixel, 0)
+        );
+
+    float4 emissive =
+        TraceEmissive.Load(
+            int3(pixel, 0)
+        );
+
+    float4 direct =
+        TraceDirectRadiance.Load(
+            int3(pixel, 0)
+        );
+
+    uint key =
+        SurfaceHash(
+            object_id,
+            revision,
+            position
+        );
+
+    uint slot =
+        SurfaceCacheWriteSlot(key);
+
     SurfaceCacheEntry entry;
-    entry.position = float4(position, 1.0);
-    entry.radiance = TraceDirectRadiance.Load(int3(pixel, 0));
-    entry.meta = uint4(object_id, 0u, 0u, 0u);
+
+    entry.position =
+        float4(position, 1.0);
+
+    entry.normal =
+        float4(
+            normalize(normal_roughness.xyz),
+            0.0
+        );
+
+    entry.albedo_roughness =
+        float4(
+            albedo_metallic.rgb,
+            normal_roughness.w
+        );
+
+    entry.emissive_metallic =
+        float4(
+            emissive.rgb,
+            albedo_metallic.w
+        );
+
+    entry.direct_radiance = direct;
+
+    /*
+     * Multi-bounce not part of this milestone.
+     */
+    entry.indirect_radiance = 0.0;
+
+    entry.object_id = object_id;
+    entry.revision = revision;
+
+    entry.last_frame =
+        (uint)TraceFrame.camera_position.w;
+
+    entry.confidence = 1u;
+
     SurfaceCacheEntries[slot] = entry;
 }
 
 [numthreads(8, 8, 1)]
-void CS_ScreenProbes(uint3 dispatch_id : SV_DispatchThreadID) {
-    uint probe_width, probe_height;
-    ScreenProbesOutput.GetDimensions(probe_width, probe_height);
+void CS_ScreenProbes(
+    uint3 dispatch_id : SV_DispatchThreadID
+) {
+    uint probe_width;
+    uint probe_height;
+
+    ScreenProbesOutput.GetDimensions(
+        probe_width,
+        probe_height
+    );
+
     uint2 probe = dispatch_id.xy;
-    if (probe.x >= probe_width || probe.y >= probe_height) return;
-    uint2 resolution = uint2(TraceFrame.resolution.xy);
-    uint2 begin = probe * 8u;
-    uint2 end = min(begin + uint2(8u, 8u), resolution);
-    uint2 last = max(end, uint2(1u, 1u)) - uint2(1u, 1u);
-    uint2 s0 = min(begin + uint2(2u, 2u), last);
-    uint2 s1 = min(begin + uint2(5u, 2u), last);
-    uint2 s2 = min(begin + uint2(2u, 5u), last);
-    uint2 s3 = min(begin + uint2(5u, 5u), last);
-    float3 radiance = TraceDirectRadiance.Load(int3(s0, 0)).rgb;
-    radiance += TraceDirectRadiance.Load(int3(s1, 0)).rgb;
-    radiance += TraceDirectRadiance.Load(int3(s2, 0)).rgb;
-    radiance += TraceDirectRadiance.Load(int3(s3, 0)).rgb;
-    ScreenProbesOutput[probe] = float4(radiance * 0.25, 1.0);
+
+    if (probe.x >= probe_width ||
+        probe.y >= probe_height) {
+        return;
+    }
+
+    uint2 base =
+        probe * SCREEN_PROBE_DIRECTION_SIZE;
+
+    float3 radiance = 0.0;
+
+    [unroll]
+    for (
+        uint y = 0u;
+        y < SCREEN_PROBE_DIRECTION_SIZE;
+        ++y
+    ) {
+        [unroll]
+        for (
+            uint x = 0u;
+            x < SCREEN_PROBE_DIRECTION_SIZE;
+            ++x
+        ) {
+            radiance +=
+                ProbeRadianceOutput[
+                    base + uint2(x, y)
+                ].rgb;
+        }
+    }
+
+    /*
+     * Rays are cosine-weighted, so this average is
+     * exactly the quantity needed by a Lambertian
+     * albedo multiplier in the present pass.
+     */
+    radiance /=
+        (float)SCREEN_PROBE_RAY_COUNT;
+
+    ScreenProbesOutput[probe] =
+        float4(radiance, 1.0);
 }
 
 [numthreads(8, 8, 1)]
@@ -658,6 +1492,68 @@ void CS_HZB(uint3 dispatch_id : SV_DispatchThreadID) {
         for (uint x = src_begin.x; x < src_end.x; ++x)
             depth = max(depth, HZBSource.Load(int3(int2(x, y), 0)));
     HZBOutput[pixel] = depth;
+}
+
+float3 LoadScreenProbe(int2 probe) {
+    uint width;
+    uint height;
+
+    ScreenProbesTexture.GetDimensions(
+        width,
+        height
+    );
+
+    probe = clamp(
+        probe,
+        int2(0, 0),
+        int2(
+            (int)width - 1,
+            (int)height - 1
+        )
+    );
+
+    return ScreenProbesTexture.Load(
+        int3(probe, 0)
+    ).rgb;
+}
+
+float3 InterpolateScreenProbeGI(
+    int2 pixel
+) {
+    float2 probe_position =
+        (float2(pixel) + 0.5) /
+        (float)SCREEN_PROBE_TILE_SIZE -
+        0.5;
+
+    int2 base =
+        int2(floor(probe_position));
+
+    float2 blend =
+        frac(probe_position);
+
+    float3 p00 =
+        LoadScreenProbe(base);
+
+    float3 p10 =
+        LoadScreenProbe(
+            base + int2(1, 0)
+        );
+
+    float3 p01 =
+        LoadScreenProbe(
+            base + int2(0, 1)
+        );
+
+    float3 p11 =
+        LoadScreenProbe(
+            base + int2(1, 1)
+        );
+
+    return lerp(
+        lerp(p00, p10, blend.x),
+        lerp(p01, p11, blend.x),
+        blend.y
+    );
 }
 
 float4 PS_Present(PresentVSOutput input) : SV_Target0 {
@@ -695,7 +1591,40 @@ float4 PS_Present(PresentVSOutput input) : SV_Target0 {
     float value = 1.0 - saturate(LinearizeDepth(hzb_depth) / 200.0);
     return float4(value, value, value, 1.0);
 #elif defined(SCREEN_TRACE)
-    return float4(ScreenTraceTexture.Load(int3(pixel, 0)).rgb, 1.0);
+    uint full_width;
+    uint full_height;
+    uint trace_width;
+    uint trace_height;
+
+    DepthTexture.GetDimensions(
+        full_width,
+        full_height
+    );
+
+    ScreenTraceTexture.GetDimensions(
+        trace_width,
+        trace_height
+    );
+
+    uint2 trace_pixel = min(
+        uint2(
+            (uint)pixel.x * trace_width /
+                full_width,
+            (uint)pixel.y * trace_height /
+                full_height
+        ),
+        uint2(
+            trace_width - 1u,
+            trace_height - 1u
+        )
+    );
+
+    return float4(
+        ScreenTraceTexture.Load(
+            int3(trace_pixel, 0)
+        ).rgb,
+        1.0
+    );
 #elif defined(DIRECT_RADIANCE)
     return float4(DirectRadianceTexture.Load(int3(pixel, 0)).rgb, 1.0);
 #elif defined(SCREEN_PROBES)
@@ -704,6 +1633,43 @@ float4 PS_Present(PresentVSOutput input) : SV_Target0 {
     ScreenProbesTexture.GetDimensions(probe_width, probe_height);
     uint2 probe = min(uint2((uint)pixel.x * probe_width / full_width, (uint)pixel.y * probe_height / full_height), uint2(probe_width - 1u, probe_height - 1u));
     return float4(ScreenProbesTexture.Load(int3(probe, 0)).rgb, 1.0);
+#elif defined(FINAL_GI)
+    float depth =
+        DepthTexture.Load(
+            int3(pixel, 0)
+        );
+
+    float3 direct =
+        DirectRadianceTexture.Load(
+            int3(pixel, 0)
+        ).rgb;
+
+    /*
+     * Background direct radiance already contains sky.
+     */
+    if (depth <= 0.0)
+        return float4(direct, 1.0);
+
+    float4 material =
+        AlbedoMetallicTexture.Load(
+            int3(pixel, 0)
+        );
+
+    float3 incoming =
+        InterpolateScreenProbeGI(pixel);
+
+    float diffuse_weight =
+        1.0 - material.w;
+
+    float3 indirect =
+        material.rgb *
+        diffuse_weight *
+        incoming;
+
+    return float4(
+        direct + indirect,
+        1.0
+    );
 #else
     return float4(1.0, 0.0, 1.0, 1.0);
 #endif
