@@ -1,0 +1,282 @@
+.identity.y < Radiance.scene_counts.y ? SceneMaterials[hit.identity.y] : (GPUMaterial)0;
+    entry.albedo_roughness = float4(material.base_color.rgb, material.roughness);
+    entry.emissive_metallic = float4(material.emissive, material.metallic);
+    entry.direct_radiance = float4(direct, 1.0f);
+    entry.indirect_radiance = float4(indirect, 1.0f);
+    entry.identity = uint4(hit.identity.x, hit.identity.y, hit.identity.z, hit.meta.y);
+    entry.state = uint4(Radiance.feature_flags.y, Pass.dispatch.x, 0u, 1u);
+    SurfaceCacheEntries[slot] = entry;
+}
+
+void SurfaceCacheInvalidateSlot(uint slot, float confidence_scale) {
+    if (slot >= Radiance.cache_counts.x) return;
+    SurfaceCacheEntry entry = SurfaceCacheEntries[slot];
+    entry.normal_confidence.w *= confidence_scale;
+    if (entry.normal_confidence.w <= 0.001f) entry.state.w = 0u;
+    SurfaceCacheEntries[slot] = entry;
+}
+
+// -----------------------------------------------------------------------------
+// Directional screen probes.
+// -----------------------------------------------------------------------------
+uint ProbeDirectionSize() { return clamp(Radiance.probe_config.y, 1u, MAX_SCREEN_PROBE_DIRECTION_SIZE); }
+uint ProbeRayCount() { return clamp(Radiance.probe_config.z, 1u, MAX_SCREEN_PROBE_RAYS); }
+uint ProbeTileSize() { return max(Radiance.probe_config.x, 1u); }
+
+uint2 ProbeAtlasCoord(uint2 probe, uint2 direction_texel) {
+    return probe * ProbeDirectionSize() + direction_texel;
+}
+
+float3 ProbeDirection(uint2 texel) {
+    uint size = ProbeDirectionSize();
+    float2 uv = (float2(texel) + 0.5f) / (float)size;
+    return OctDecode(uv);
+}
+
+uint2 ProbeDirectionTexel(float3 direction) {
+    uint size = ProbeDirectionSize();
+    float2 uv = OctEncode(direction);
+    return min((uint2)floor(uv * (float)size), uint2(size - 1u, size - 1u));
+}
+
+uint2 ProbeRepresentativePixel(uint2 probe) {
+    uint tile = ProbeTileSize();
+    uint2 resolution = uint2(TraceFrame.resolution.xy);
+    return min(probe * tile + uint2(tile / 2u, tile / 2u), resolution - uint2(1u, 1u));
+}
+
+bool PlaceScreenProbe(uint2 probe, out ScreenProbeState state) {
+    state = (ScreenProbeState)0;
+    uint2 pixel = ProbeRepresentativePixel(probe);
+    float depth = TraceDepth.Load(int3(pixel, 0));
+    if (depth <= 0.0f) return false;
+    float3 position = ReconstructWorldPosition(pixel, depth);
+    float3 normal = normalize(TraceNormalRoughness.Load(int3(pixel, 0)).xyz);
+    float3 view_direction = normalize(position - TraceFrame.camera_position.xyz);
+    if (dot(normal, view_direction) > 0.0f) normal = -normal;
+    state.position_depth = float4(position, depth);
+    state.normal_confidence = float4(normal, 1.0f);
+    state.history = uint4(0u, Radiance.feature_flags.y, PackPixel(pixel), TraceObjectId.Load(int3(pixel, 0)));
+    state.statistics = 0.0f;
+    return true;
+}
+
+TraceRay BuildFutureProbeRay(uint2 probe, uint ray_index, uint destination) {
+    ScreenProbeState state;
+    if (!PlaceScreenProbe(probe, state)) return MakeTraceRay(0.0f, float3(0.0f, 1.0f, 0.0f), 0.0f, 0.0f, TRACE_RAY_INACTIVE, destination, uint2(0u, 0u), 0u);
+    uint scramble = HashCombine(probe.x, HashCombine(probe.y, Pass.dispatch.x));
+    float2 u = Hammersley(ray_index, ProbeRayCount(), scramble);
+    float3 local = CosineHemisphere(u);
+    float3 tangent, bitangent;
+    BuildNormalBasis(state.normal_confidence.xyz, tangent, bitangent);
+    float3 direction = normalize(tangent * local.x + bitangent * local.y + state.normal_confidence.xyz * local.z);
+    float bias = max(Radiance.trace_params.y, 1.0e-3f);
+    uint2 pixel = UnpackPixel(state.history.z);
+    return MakeTraceRay(state.position_depth.xyz + state.normal_confidence.xyz * bias, direction, bias, Radiance.trace_params.x, TRACE_RAY_DIFFUSE, destination, pixel, state.history.w);
+}
+
+float3 IntegrateProbeIrradiance(uint2 probe, float3 normal) {
+    uint size = ProbeDirectionSize();
+    float3 sum = 0.0f;
+    float weight_sum = 0.0f;
+    for (uint y = 0u; y < size; ++y) {
+        for (uint x = 0u; x < size; ++x) {
+            uint2 texel = uint2(x, y);
+            float3 direction = ProbeDirection(texel);
+            float weight = saturate(dot(normal, direction));
+            sum += ProbeCurrentRadiance[ProbeAtlasCoord(probe, texel)].rgb * weight;
+            weight_sum += weight;
+        }
+    }
+    return weight_sum > 0.0f ? sum / weight_sum : 0.0f;
+}
+
+// -----------------------------------------------------------------------------
+// World radiance cache.
+// -----------------------------------------------------------------------------
+uint WorldProbeDirectionCount() {
+    uint s = max(Radiance.world_probe_config.x, 1u);
+    return s * s;
+}
+
+uint WorldProbeRadianceIndex(uint probe_index, uint2 texel) {
+    uint s = max(Radiance.world_probe_config.x, 1u);
+    return probe_index * s * s + texel.x + s * texel.y;
+}
+
+uint WorldProbeKey(float3 position) {
+    float cell_size = max(Radiance.world_probe_params.x, 0.25f);
+    int3 cell = int3(floor(position / cell_size));
+    uint h = HashCombine(asuint(cell.x), asuint(cell.y));
+    h = HashCombine(h, asuint(cell.z));
+    return h | 1u;
+}
+
+uint FindWorldProbe(float3 position) {
+    uint count = Radiance.cache_counts.y;
+    if (!FeatureEnabled(RADIANCE_FEATURE_WORLD_CACHE) || count == 0u) return INVALID_INDEX;
+    uint table_capacity = max(Radiance.cache_counts.z, 1u);
+    uint key = WorldProbeKey(position);
+    uint mask = table_capacity - 1u;
+    [unroll]
+    for (uint i = 0u; i < MAX_CACHE_PROBES; ++i) {
+        uint slot = (key + i) & mask;
+        uint encoded = WorldProbeKeys[slot];
+        if (encoded == 0u) return INVALID_INDEX;
+        uint index = encoded - 1u;
+        if (index < count) {
+            WorldProbeState state = WorldProbes[index];
+            if (state.identity.x == key && distance(state.position_radius.xyz, position) <= state.position_radius.w) return index;
+        }
+    }
+    return INVALID_INDEX;
+}
+
+float3 SampleWorldProbeDirectional(uint probe_index, float3 direction) {
+    if (probe_index == INVALID_INDEX || probe_index >= Radiance.cache_counts.y) return 0.0f;
+    uint s = max(Radiance.world_probe_config.x, 1u);
+    float2 uv = OctEncode(direction);
+    uint2 texel = min((uint2)floor(uv * (float)s), uint2(s - 1u, s - 1u));
+    return WorldProbeRadiance[WorldProbeRadianceIndex(probe_index, texel)].rgb;
+}
+
+float3 WorldRadianceFallback(float3 position, float3 direction) {
+    uint probe = FindWorldProbe(position);
+    return probe == INVALID_INDEX ? 0.0f : SampleWorldProbeDirectional(probe, direction);
+}
+
+// -----------------------------------------------------------------------------
+// Wavefront passes.
+// RayCounters layout: [0]=A count, [1]=B count, [2]=hit count, [3]=updates.
+// -----------------------------------------------------------------------------
+[numthreads(1, 1, 1)]
+void CS_ResetWavefront(uint3 dispatch_id : SV_DispatchThreadID) {
+    RayCounters[0] = 0u;
+    RayCounters[1] = 0u;
+    RayCounters[2] = 0u;
+    RayCounters[3] = 0u;
+    RayDispatchArgs[0] = 0u;
+    RayDispatchArgs[1] = 1u;
+    RayDispatchArgs[2] = 1u;
+}
+
+[numthreads(8, 8, 1)]
+void CS_ClassifyRayBudgets(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint2 probe = dispatch_id.xy;
+    uint probe_width = Pass.dimensions.x;
+    uint probe_height = Pass.dimensions.y;
+    if (probe.x >= probe_width || probe.y >= probe_height) return;
+    uint index = probe.x + probe.y * probe_width;
+    float4 meta = ProbeCurrentMeta[probe];
+    float confidence = saturate(meta.x);
+    float variance = max(meta.y, 0.0f);
+    float age = max(meta.z, 0.0f);
+    uint min_rays = (uint)max(Radiance.adaptive_params.x, 0.0f);
+    uint max_rays = (uint)max(Radiance.adaptive_params.y, (float)min_rays);
+    uint fixed_rays = ProbeRayCount();
+    uint rays = fixed_rays;
+    if (FeatureEnabled(RADIANCE_FEATURE_ADAPTIVE_RAYS)) {
+        float urgency = saturate(variance * Radiance.adaptive_params.z + (1.0f - confidence) + age * Radiance.adaptive_params.w);
+        rays = (uint)round(lerp((float)min_rays, (float)max_rays, urgency));
+    }
+    RayBudget budget;
+    budget.counts = uint4(rays, 0u, 0u, 0u);
+    budget.priority = float4(variance, confidence, age, 0.0f);
+    RayBudgets[index] = budget;
+}
+
+[numthreads(8, 8, 1)]
+void CS_GenerateProbeRays(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint2 probe = dispatch_id.xy;
+    uint probe_width = Pass.dimensions.x;
+    uint probe_height = Pass.dimensions.y;
+    if (probe.x >= probe_width || probe.y >= probe_height) return;
+    uint probe_index = probe.x + probe.y * probe_width;
+    uint count = min(RayBudgets[probe_index].counts.x, MAX_SCREEN_PROBE_RAYS);
+    for (uint i = 0u; i < count; ++i) {
+        uint queue_index;
+        InterlockedAdd(RayCounters[0], 1u, queue_index);
+        if (queue_index >= Radiance.feature_flags.z) continue;
+        TraceRay ray = BuildFutureProbeRay(probe, i, queue_index);
+        RayQueueA[queue_index] = ray;
+        RayFlags[queue_index] = (probe_index & 0x000fffffu) | ((i & 0x3fu) << 20u);
+    }
+}
+
+[numthreads(64, 1, 1)]
+void CS_WavefrontScreenTrace(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint index = dispatch_id.x;
+    if (index >= RayCounters[0]) return;
+    TraceRay ray = RayQueueA[index];
+    if (ray.type == TRACE_RAY_INACTIVE) return;
+    SurfaceHit hit = TraceScreenSurface(ray);
+    RaySurfaceHits[index] = hit;
+    if (hit.identity.w == TRACE_SCREEN) {
+        RaySurfaceHits[index] = hit;
+        RayRadiance[index] = float4(TraceDirectRadiance.Load(int3(UnpackPixel(hit.meta.x), 0)).rgb, 1.0f);
+        return;
+    }
+    uint out_index;
+    InterlockedAdd(RayCounters[1], 1u, out_index);
+    if (out_index < Radiance.feature_flags.z) {
+        ray.destination = index;
+        RayQueueB[out_index] = ray;
+    }
+}
+
+[numthreads(64, 1, 1)]
+void CS_WavefrontDynamicTrace(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint index = dispatch_id.x;
+    if (index >= RayCounters[1]) return;
+    TraceRay ray = RayQueueB[index];
+    SurfaceHit hit = MakeSurfaceHit(TRACE_MISS, ray.direction_tmax.w);
+    if (TraceDynamicGrid(ray, hit)) {
+        uint original = ray.destination;
+        RaySurfaceHits[original] = hit;
+        RayFlags[original] |= 0x80000000u;
+    }
+}
+
+[numthreads(64, 1, 1)]
+void CS_WavefrontLocalTrace(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint index = dispatch_id.x;
+    if (index >= RayCounters[1]) return;
+    TraceRay ray = RayQueueB[index];
+    uint original = ray.destination;
+    SurfaceHit hit = (RayFlags[original] & 0x80000000u) != 0u ? RaySurfaceHits[original] : MakeSurfaceHit(TRACE_MISS, ray.direction_tmax.w);
+    TraceAllLocalSDFs(ray, hit);
+    RaySurfaceHits[original] = hit;
+}
+
+[numthreads(64, 1, 1)]
+void CS_WavefrontGlobalTrace(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint index = dispatch_id.x;
+    if (index >= RayCounters[1]) return;
+    TraceRay ray = RayQueueB[index];
+    uint original = ray.destination;
+    SurfaceHit hit = RaySurfaceHits[original];
+    if (hit.position_distance.w <= 0.0f) hit = MakeSurfaceHit(TRACE_MISS, ray.direction_tmax.w);
+    TraceGlobalSDF(ray, hit);
+    RaySurfaceHits[original] = hit;
+}
+
+[numthreads(64, 1, 1)]
+void CS_ShadeRayHits(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint index = dispatch_id.x;
+    if (index >= RayCounters[0]) return;
+    TraceRay ray = RayQueueA[index];
+    SurfaceHit hit = RaySurfaceHits[index];
+    float3 radiance;
+    if (hit.identity.w == TRACE_MISS || hit.identity.w == TRACE_INACTIVE) radiance = FutureSkyRadiance(ray.direction_tmax.xyz);
+    else radiance = SurfaceOutgoingRadiance(hit);
+    RayRadiance[index] = float4(radiance, 1.0f);
+    uint packed_flags = RayFlags[index];
+    uint probe_index = packed_flags & 0x000fffffu;
+    uint probe_width = Pass.dimensions.x;
+    uint2 probe = uint2(probe_index % probe_width, probe_index / probe_width);
+    float3 direction = ray.direction_tmax.xyz;
+    uint2 texel = ProbeDirectionTexel(direction);
+    ProbeCurrentRadiance[ProbeAtlasCoord(probe, texel)] = float4(radiance, 1.0f);
+}
+
+[numthreads(8,
