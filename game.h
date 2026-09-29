@@ -113,9 +113,7 @@ bool glb_extract_mesh(const GLB_DOC *doc, MESH *out);
 typedef struct GLTF_VERTEX {
     VEC3 position;
     VEC3 normal;
-
     float u, v;
-
     uint32_t material;
 } GLTF_VERTEX;
 
@@ -199,7 +197,6 @@ typedef struct SPOT_LIGHT {
 
 struct LIGHT {
     LIGHT_TYPE type;
-
     union {
         DIRECTIONAL_LIGHT directional;
         POINT_LIGHT point;
@@ -247,7 +244,14 @@ bool sdf_build_volume(const MESH *mesh, uint32_t resolution, SDF_VOLUME *volume)
 void sdf_free_volume(SDF_VOLUME *volume);
 
 
-typedef enum TRACE_HIT_TYPE { TRACE_INACTIVE = 0, TRACE_MISS = 1, TRACE_SCREEN = 2, TRACE_SDF = 3 } TRACE_HIT_TYPE;
+typedef enum TRACE_HIT_TYPE {
+    TRACE_INACTIVE = 0,
+    TRACE_MISS = 1,
+    TRACE_SCREEN = 2,
+    TRACE_SDF = 3,
+    TRACE_GLOBAL_SDF = 4,
+    TRACE_TRIANGLE = 5
+} TRACE_HIT_TYPE;
 
 typedef struct TRACE_HIT {
     uint32_t type;
@@ -259,12 +263,17 @@ typedef struct TRACE_HIT {
     uint32_t padding[2];
 } TRACE_HIT;
 
-typedef enum TRACE_RAY_TYPE { TRACE_RAY_INACTIVE = 0, TRACE_RAY_DIFFUSE = 1, TRACE_RAY_REFLECTION = 2, TRACE_RAY_SHADOW = 3 } TRACE_RAY_TYPE;
+typedef enum TRACE_RAY_TYPE {
+    TRACE_RAY_INACTIVE = 0,
+    TRACE_RAY_DIFFUSE = 1,
+    TRACE_RAY_REFLECTION = 2,
+    TRACE_RAY_SHADOW = 3,
+    TRACE_RAY_WORLD_PROBE = 4
+} TRACE_RAY_TYPE;
 
 typedef struct TRACE_RAY {
     float origin_tmin[4];
     float direction_tmax[4];
-
     uint32_t type;
     uint32_t destination;
     uint32_t origin_pixel;
@@ -275,12 +284,10 @@ typedef struct GPU_SDF_MODEL {
     MAT4 world_to_local;
     float bounds_min[4];
     float bounds_max[4];
-
     uint32_t voxel_offset;
     uint32_t resolution;
     uint32_t object_id;
     uint32_t state;
-
     uint32_t revision;
     uint32_t padding[3];
 } GPU_SDF_MODEL;
@@ -295,18 +302,161 @@ typedef struct GPU_LIGHT {
 typedef struct SURFACE_CACHE_ENTRY {
     float position[4];
     float normal[4];
-
     float albedo_roughness[4];
     float emissive_metallic[4];
-
     float direct_radiance[4];
     float indirect_radiance[4];
-
     uint32_t object_id;
     uint32_t revision;
     uint32_t last_frame;
     uint32_t confidence;
 } SURFACE_CACHE_ENTRY;
+
+/* Permanent Pony Radiance GPU ABI. Future stages populate these layouts without changing shader.hlsl. */
+typedef struct GPU_SCENE_TRIANGLE {
+    float p0[4];
+    float p1[4];
+    float p2[4];
+    float uv01[4];
+    float uv2_area[4];
+    uint32_t meta[4];
+} GPU_SCENE_TRIANGLE;
+
+typedef struct GPU_EMISSIVE_TRIANGLE {
+    uint32_t meta[4];
+    float radiance_area[4];
+    float sampling[4];
+} GPU_EMISSIVE_TRIANGLE;
+
+typedef struct GPU_DYNAMIC_GRID_CELL {
+    uint32_t range_flags[4];
+    float bounds_min[4];
+    float bounds_max[4];
+} GPU_DYNAMIC_GRID_CELL;
+
+typedef struct GPU_GLOBAL_SDF_CLIPMAP {
+    float center_extent[4];
+    float voxel_brick[4];
+    uint32_t grid[4];
+    uint32_t data[4];
+} GPU_GLOBAL_SDF_CLIPMAP;
+
+typedef struct SURFACE_HIT {
+    float position_distance[4];
+    float normal_confidence[4];
+    float uv_bary[4];
+    uint32_t identity[4];
+    uint32_t meta[4];
+} SURFACE_HIT;
+
+typedef struct SURFACE_RADIANCE_ENTRY {
+    float position_distance[4];
+    float normal_confidence[4];
+    float albedo_roughness[4];
+    float emissive_metallic[4];
+    float direct_radiance[4];
+    float indirect_radiance[4];
+    uint32_t identity[4];
+    uint32_t state[4];
+} SURFACE_RADIANCE_ENTRY;
+
+typedef struct SCREEN_PROBE_STATE {
+    float position_depth[4];
+    float normal_confidence[4];
+    uint32_t history[4];
+    float statistics[4];
+} SCREEN_PROBE_STATE;
+
+typedef struct WORLD_PROBE_STATE {
+    float position_radius[4];
+    uint32_t identity[4];
+    float statistics[4];
+    uint32_t state[4];
+} WORLD_PROBE_STATE;
+
+typedef struct RAY_BUDGET {
+    uint32_t counts[4];
+    float priority[4];
+} RAY_BUDGET;
+
+typedef struct RADIANCE_CONSTANTS {
+    uint32_t scene_counts[4];
+    uint32_t sdf_counts[4];
+    uint32_t cache_counts[4];
+    uint32_t probe_config[4];
+    float trace_params[4];
+    uint32_t trace_limits[4];
+    float temporal_params[4];
+    uint32_t feature_flags[4];
+    float adaptive_params[4];
+    float reflection_params[4];
+    uint32_t dynamic_grid[4];
+    float dynamic_grid_origin_cell[4];
+    float global_sdf_params[4];
+    uint32_t world_probe_config[4];
+    float world_probe_params[4];
+    uint32_t reserved[4];
+} RADIANCE_CONSTANTS;
+
+typedef struct PASS_CONSTANTS {
+    uint32_t dispatch[4];
+    uint32_t range[4];
+    uint32_t dimensions[4];
+    uint32_t flags[4];
+} PASS_CONSTANTS;
+
+_Static_assert(sizeof(GPU_SCENE_TRIANGLE) == 96u, "GPU_SCENE_TRIANGLE GPU layout changed");
+_Static_assert(sizeof(GPU_EMISSIVE_TRIANGLE) == 48u, "GPU_EMISSIVE_TRIANGLE GPU layout changed");
+_Static_assert(sizeof(GPU_DYNAMIC_GRID_CELL) == 48u, "GPU_DYNAMIC_GRID_CELL GPU layout changed");
+_Static_assert(sizeof(GPU_GLOBAL_SDF_CLIPMAP) == 64u, "GPU_GLOBAL_SDF_CLIPMAP GPU layout changed");
+_Static_assert(sizeof(SURFACE_HIT) == 80u, "SURFACE_HIT GPU layout changed");
+_Static_assert(sizeof(SURFACE_RADIANCE_ENTRY) == 128u, "SURFACE_RADIANCE_ENTRY GPU layout changed");
+_Static_assert(sizeof(SCREEN_PROBE_STATE) == 64u, "SCREEN_PROBE_STATE GPU layout changed");
+_Static_assert(sizeof(WORLD_PROBE_STATE) == 64u, "WORLD_PROBE_STATE GPU layout changed");
+_Static_assert(sizeof(RAY_BUDGET) == 32u, "RAY_BUDGET GPU layout changed");
+_Static_assert(sizeof(RADIANCE_CONSTANTS) == 256u, "RADIANCE_CONSTANTS GPU layout changed");
+_Static_assert(sizeof(PASS_CONSTANTS) == 64u, "PASS_CONSTANTS GPU layout changed");
+
+typedef enum RADIANCE_FEATURE {
+    RADIANCE_FEATURE_EMISSIVE = 1u << 0,
+    RADIANCE_FEATURE_DYNAMIC_GRID = 1u << 1,
+    RADIANCE_FEATURE_GLOBAL_SDF = 1u << 2,
+    RADIANCE_FEATURE_SURFACE_CACHE = 1u << 3,
+    RADIANCE_FEATURE_TEMPORAL_PROBES = 1u << 4,
+    RADIANCE_FEATURE_SPATIAL_PROBES = 1u << 5,
+    RADIANCE_FEATURE_WORLD_CACHE = 1u << 6,
+    RADIANCE_FEATURE_MULTIBOUNCE = 1u << 7,
+    RADIANCE_FEATURE_ADAPTIVE_RAYS = 1u << 8,
+    RADIANCE_FEATURE_REFLECTIONS = 1u << 9
+} RADIANCE_FEATURE;
+
+typedef enum RADIANCE_DEBUG_VIEW {
+    RADIANCE_DEBUG_FINAL_GI = 0,
+    RADIANCE_DEBUG_ALBEDO,
+    RADIANCE_DEBUG_NORMALS,
+    RADIANCE_DEBUG_DEPTH,
+    RADIANCE_DEBUG_ROUGHNESS,
+    RADIANCE_DEBUG_METALLIC,
+    RADIANCE_DEBUG_VELOCITY,
+    RADIANCE_DEBUG_OBJECT_ID,
+    RADIANCE_DEBUG_MATERIAL_ID,
+    RADIANCE_DEBUG_PRIMITIVE_ID,
+    RADIANCE_DEBUG_HZB,
+    RADIANCE_DEBUG_DIRECT_RADIANCE,
+    RADIANCE_DEBUG_EMISSIVE,
+    RADIANCE_DEBUG_SCREEN_TRACE,
+    RADIANCE_DEBUG_LOCAL_SDF,
+    RADIANCE_DEBUG_GLOBAL_SDF,
+    RADIANCE_DEBUG_SURFACE_CACHE,
+    RADIANCE_DEBUG_SCREEN_PROBE_DIRECTIONAL,
+    RADIANCE_DEBUG_SCREEN_PROBE_IRRADIANCE,
+    RADIANCE_DEBUG_SCREEN_PROBE_CONFIDENCE,
+    RADIANCE_DEBUG_SCREEN_PROBE_VARIANCE,
+    RADIANCE_DEBUG_SCREEN_PROBE_HISTORY,
+    RADIANCE_DEBUG_WORLD_RADIANCE,
+    RADIANCE_DEBUG_RAY_BUDGET,
+    RADIANCE_DEBUG_REFLECTIONS
+} RADIANCE_DEBUG_VIEW;
 
 typedef struct CAMERA {
     VEC3 position;
@@ -328,7 +478,11 @@ typedef struct CAMERA {
 #define SURFACE_CACHE_CAPACITY 262144u
 #define SCREEN_PROBE_TILE_SIZE 8u
 #define SCREEN_PROBE_DIRECTION_SIZE 4u
-#define SCREEN_PROBE_DIRECTION_COUNT (SCREEN_PROBE_DIRECTION_SIZE * SCREENPROBE_DIRECTION_SIZE)
+#define SCREEN_PROBE_DIRECTION_COUNT (SCREEN_PROBE_DIRECTION_SIZE * SCREEN_PROBE_DIRECTION_SIZE)
+#define RADIANCE_MAX_SCREEN_PROBE_DIRECTION_SIZE 8u
+#define RADIANCE_MAX_SCREEN_PROBE_RAYS 32u
+#define RADIANCE_MAX_GLOBAL_SDF_CLIPMAPS 8u
+#define RADIANCE_INVALID_INDEX UINT32_MAX
 
 typedef struct HZB {
     NriTexture *texture;

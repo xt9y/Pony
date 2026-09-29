@@ -27,6 +27,13 @@ static void format_sources(void) {
  *        (brew install vulkan-tools molten-vk installs the Vulkan stack, not slangc).
  * Arch/CachyOS: sudo pacman -S vulkan-devel, then install LunarG SDK or Slang for slangc.
  */
+typedef struct SHADER_JOB {
+    const char *entry;
+    const char *stage;
+    const char *output;
+    const char *define;
+} SHADER_JOB;
+
 static void compile_shaders(void) {
 #if defined(_WIN32)
     if (system("where slangc >nul 2>&1") != 0) {
@@ -49,38 +56,60 @@ static void compile_shaders(void) {
         exit(1);
     }
 
-    const char *commands[] = {
-        "slangc shader.hlsl -entry VS_GBuffer -stage vertex -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
-        "build/shaders/gbuffer.vs.spv",
-        "slangc shader.hlsl -entry PS_GBuffer -stage fragment -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
-        "build/shaders/gbuffer.ps.spv",
-        "slangc shader.hlsl -entry VS_Present -stage vertex -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
-        "build/shaders/present.vs.spv",
-        "slangc shader.hlsl -entry PS_Present -stage fragment -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 "
-        "-DFINAL_GI -o build/shaders/present.ps.spv",
-        "slangc shader.hlsl -entry CS_HZB -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
-        "build/shaders/hzb.cs.spv",
-        "slangc shader.hlsl -entry CS_DirectRadiance -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
-        "build/shaders/direct_radiance.cs.spv",
-        "slangc shader.hlsl -entry CS_SurfaceCacheUpdate -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
-        "build/shaders/surface_cache.cs.spv",
-        "slangc shader.hlsl -entry CS_ScreenTrace -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
-        "build/shaders/screen_trace.cs.spv",
-        "slangc shader.hlsl -entry CS_ResetTraceQueue -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
-        "build/shaders/trace_reset.cs.spv",
-        "slangc shader.hlsl -entry CS_CompactTraceMisses -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
-        "build/shaders/trace_compact.cs.spv",
-        "slangc shader.hlsl -entry CS_BuildTraceDispatchArgs -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
-        "build/shaders/trace_args.cs.spv",
-        "slangc shader.hlsl -entry CS_SDFTrace -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
-        "build/shaders/sdf_trace.cs.spv",
-        "slangc shader.hlsl -entry CS_ScreenProbes -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "
-        "build/shaders/screen_probes.cs.spv"
+    static const SHADER_JOB jobs[] = {
+        {"VS_GBuffer", "vertex", "gbuffer.vs.spv", NULL},
+        {"PS_GBuffer", "fragment", "gbuffer.ps.spv", NULL},
+        {"PS_GBufferFull", "fragment", "gbuffer_full.ps.spv", NULL},
+        {"VS_Present", "vertex", "present.vs.spv", NULL},
+        {"PS_Present", "fragment", "present.ps.spv", "FINAL_GI"},
+        {"PS_PresentRuntime", "fragment", "present_runtime.ps.spv", NULL},
+
+        {"CS_HZB", "compute", "hzb.cs.spv", NULL},
+        {"CS_DirectRadiance", "compute", "direct_radiance.cs.spv", NULL},
+        {"CS_SurfaceCacheUpdate", "compute", "surface_cache.cs.spv", NULL},
+        {"CS_ScreenTrace", "compute", "screen_trace.cs.spv", NULL},
+        {"CS_ResetTraceQueue", "compute", "trace_reset.cs.spv", NULL},
+        {"CS_CompactTraceMisses", "compute", "trace_compact.cs.spv", NULL},
+        {"CS_BuildTraceDispatchArgs", "compute", "trace_args.cs.spv", NULL},
+        {"CS_SDFTrace", "compute", "sdf_trace.cs.spv", NULL},
+        {"CS_ScreenProbes", "compute", "screen_probes.cs.spv", NULL},
+
+        {"CS_RadianceDirect", "compute", "radiance_direct.cs.spv", NULL},
+        {"CS_ResetWavefront", "compute", "radiance_wave_reset.cs.spv", NULL},
+        {"CS_ClassifyRayBudgets", "compute", "radiance_budget.cs.spv", NULL},
+        {"CS_GenerateProbeRays", "compute", "radiance_generate.cs.spv", NULL},
+        {"CS_WavefrontScreenTrace", "compute", "radiance_screen.cs.spv", NULL},
+        {"CS_WavefrontDynamicTrace", "compute", "radiance_dynamic.cs.spv", NULL},
+        {"CS_WavefrontLocalTrace", "compute", "radiance_local.cs.spv", NULL},
+        {"CS_WavefrontGlobalTrace", "compute", "radiance_global.cs.spv", NULL},
+        {"CS_ShadeRayHits", "compute", "radiance_shade.cs.spv", NULL},
+        {"CS_EmissiveGather", "compute", "radiance_emissive.cs.spv", NULL},
+        {"CS_ResolveDirectionalProbes", "compute", "radiance_probe_resolve.cs.spv", NULL},
+        {"CS_ReprojectScreenProbes", "compute", "radiance_probe_temporal.cs.spv", NULL},
+        {"CS_SpatialReuseScreenProbes", "compute", "radiance_probe_spatial.cs.spv", NULL},
+        {"CS_UpdateWorldRadianceCache", "compute", "radiance_world_cache.cs.spv", NULL},
+        {"CS_InvalidateRadiance", "compute", "radiance_invalidate.cs.spv", NULL},
+        {"CS_ReflectionTrace", "compute", "radiance_reflections.cs.spv", NULL}
     };
 
-    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
-        if (system(commands[i]) != 0) {
-            fprintf(stderr, "SPIR-V shader compilation failed\n");
+    for (size_t i = 0; i < sizeof(jobs) / sizeof(jobs[0]); ++i) {
+        char command[1024];
+        const SHADER_JOB *job = &jobs[i];
+        const int written = snprintf(
+            command,
+            sizeof(command),
+            "slangc shader.hlsl -entry %s -stage %s -target spirv -profile sm_6_6 -capability spirv_1_5 "
+            "-matrix-layout-row-major -fvk-use-dx-layout -O3 %s%s%s -o build/shaders/%s",
+            job->entry,
+            job->stage,
+            job->define ? "-D" : "",
+            job->define ? job->define : "",
+            job->define ? " " : "",
+            job->output
+        );
+
+        if (written < 0 || (size_t)written >= sizeof(command) || system(command) != 0) {
+            fprintf(stderr, "SPIR-V shader compilation failed: %s\n", job->entry);
             exit(1);
         }
     }
