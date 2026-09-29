@@ -287,7 +287,18 @@ TraceHit MakeTraceHit(uint type, float distance) {
     return hit;
 }
 
-TraceHit TraceScreenRay(float3 origin, float3 direction, uint2 origin_pixel, float max_distance, float thickness, float skip_thickness, uint max_steps, uint max_start_level) {
+TraceHit TraceScreenRay(
+    float3 origin,
+    float3 direction,
+    uint2 origin_pixel,
+    uint source_object_id,
+    float3 source_normal,
+    float max_distance,
+    float thickness,
+    float skip_thickness,
+    uint max_steps,
+    uint max_start_level) {
+
     TraceHit result = MakeTraceHit(TRACE_MISS, max_distance);
     float4 clip_origin = mul(float4(origin, 1.0), TraceFrame.view_projection);
     float4 clip_direction = mul(float4(direction, 0.0), TraceFrame.view_projection);
@@ -344,17 +355,87 @@ TraceHit TraceScreenRay(float3 origin, float3 direction, uint2 origin_pixel, flo
         float ray_linear_b = LinearizeDepth(exit_depth);
         float segment_near = min(ray_linear_a, ray_linear_b);
         float segment_far = max(ray_linear_a, ray_linear_b);
-        bool overlap = scene_linear >= segment_near - thickness && scene_linear <= segment_far + thickness;
+        bool overlap =
+            scene_linear >= segment_near - thickness &&
+            scene_linear <= segment_far + thickness;
 
         if (overlap && !all(cell == origin_pixel)) {
-            result.type = TRACE_SCREEN;
-            result.object_id = TraceObjectId.Load(int3(cell, 0));
-            result.hit_pixel = cell;
-            result.distance = 0.5 * (distance + exit_distance);
-            result.confidence = 1.0;
-            return result;
-        }
+            uint hit_object_id =
+                TraceObjectId.Load(int3(cell, 0));
 
+            float3 hit_position =
+                ReconstructWorldPosition(
+                    cell,
+                    scene_depth
+                );
+
+            float3 hit_normal =
+                normalize(
+                    TraceNormalRoughness.Load(
+                        int3(cell, 0)
+                    ).xyz
+                );
+
+            float3 to_hit =
+                hit_position - origin;
+
+            float ray_distance =
+                dot(to_hit, direction);
+
+            float3 closest_point =
+                origin + direction * ray_distance;
+
+            float off_ray_distance =
+                length(
+                    hit_position - closest_point
+                );
+
+            /*
+             * Reject neighboring pixels belonging to the
+             * physical surface that launched this ray.
+             *
+             * The Cornell box is one MODEL/object, so object
+             * id alone cannot be used: floor, walls and ceiling
+             * all share the same id.
+             */
+            float plane_distance =
+                abs(dot(to_hit, source_normal));
+
+            bool same_surface =
+                hit_object_id == source_object_id &&
+                abs(dot(hit_normal, source_normal)) > 0.95 &&
+                plane_distance <
+                    max(
+                        TraceFrame.trace_params.z * 2.0,
+                        skip_thickness * 4.0
+                    );
+
+            /*
+             * Also reject HZB/depth candidates which overlap
+             * in screen space but are not actually close to
+             * the world-space ray.
+             */
+            float ray_tolerance =
+                max(
+                    thickness * 2.0,
+                    ray_distance * 0.0025
+                );
+
+            bool valid_world_hit =
+                ray_distance > 0.0 &&
+                ray_distance < max_distance &&
+                off_ray_distance <= ray_tolerance;
+
+            if (!same_surface && valid_world_hit) {
+                result.type = TRACE_SCREEN;
+                result.object_id = hit_object_id;
+                result.hit_pixel = cell;
+                result.distance = ray_distance;
+                result.confidence = 1.0;
+
+                return result;
+            }
+        }
         float next_distance = exit_distance + max(1.0e-4, exit_distance * 1.0e-5);
         float2 next_uv;
         float next_depth;
@@ -577,7 +658,7 @@ TraceRay BuildDiffuseProbeRay(uint2 ray_pixel) {
     return MakeTraceRay(
         position + normal * bias,
         direction,
-        0.0,
+        bias *2.0,
         TraceFrame.trace_params.x,
         TRACE_RAY_DIFFUSE,
         destination,
@@ -627,6 +708,8 @@ float DirectVisibility(
             origin,
             direction,
             source_pixel,
+            source_object_id,
+            normal,
             tmax,
             TraceFrame.trace_params.y,
             TraceFrame.trace_params.w,
@@ -833,19 +916,45 @@ void CS_ScreenTrace(
     uint2 origin_pixel =
         UnpackPixel(ray.origin_pixel);
 
-    TraceHit hit =
-        TraceScreenRay(
-            ray.origin_tmin.xyz,
-            ray.direction_tmax.xyz,
-            origin_pixel,
-            ray.direction_tmax.w,
-            TraceFrame.trace_params.y,
-            TraceFrame.trace_params.w,
-            TraceFrame.trace_limits.x,
-            TraceFrame.trace_limits.y
+    float3 source_normal =
+        normalize(
+            TraceNormalRoughness.Load(
+                int3(origin_pixel, 0)
+            ).xyz
         );
 
-    ScreenTraceHits[index] = hit;
+    float3 source_position =
+        ReconstructWorldPosition(
+            origin_pixel,
+            TraceDepth.Load(
+                int3(origin_pixel, 0)
+            )
+        );
+
+    float3 source_view_direction =
+        normalize(
+            source_position -
+            TraceFrame.camera_position.xyz
+        );
+
+    if (dot(source_normal, source_view_direction) > 0.0)
+        source_normal = -source_normal;
+
+    TraceHit hit =
+        TraceScreenRay(
+        ray.origin_tmin.xyz,
+        ray.direction_tmax.xyz,
+        origin_pixel,
+        ray.source_object_id,
+        source_normal,
+        ray.direction_tmax.w,
+        TraceFrame.trace_params.y,
+        TraceFrame.trace_params.w,
+        TraceFrame.trace_limits.x,
+        TraceFrame.trace_limits.y
+    );
+
+    // ScreenTraceHits[index] = hit;
 
     if (hit.type == TRACE_SCREEN) {
         float3 radiance =
@@ -857,7 +966,10 @@ void CS_ScreenTrace(
             float4(radiance, 1.0);
 
         ScreenTraceOutput[ray_pixel] =
-            float4(radiance, 1.0);
+            float4(0.0, 0.0, 1.0, 1.0);
+
+        // ScreenTraceOutput[ray_pixel] =
+        //     float4(radiance, 1.0);
 
         return;
     }
@@ -910,21 +1022,24 @@ void CS_CompactTraceMisses(
         return;
     }
 
-    uint index =
-        ray_pixel.x +
-        ray_pixel.y * ray_width;
-
-    if (ScreenTraceHits[index].type !=
-        TRACE_MISS) {
-        return;
-    }
-
     TraceRay ray =
         BuildDiffuseProbeRay(ray_pixel);
 
     if (ray.type == TRACE_RAY_INACTIVE)
         return;
 
+    /*
+     * IMPORTANT:
+     *
+     * Do not queue only screen misses.
+     *
+     * Screen tracing is camera-dependent and therefore
+     * cannot be the authoritative geometry test for GI.
+     *
+     * Every active diffuse ray gets world-space SDF
+     * validation. The screen result remains available
+     * as a fallback candidate.
+     */
     uint queue_index;
 
     InterlockedAdd(
@@ -991,6 +1106,95 @@ float SampleSDF(GPUSDFModel model, float3 local_position) {
     return lerp(lerp(c00, c10, f.y), lerp(c01, c11, f.y), f.z);
 }
 
+float3 EstimateSDFLocalNormal(
+    GPUSDFModel model,
+    float3 local_position
+) {
+    float3 size = max(
+        model.bounds_max.xyz -
+            model.bounds_min.xyz,
+        float3(1.0e-6, 1.0e-6, 1.0e-6)
+    );
+
+    float voxel_size =
+        max(
+            size.x,
+            max(size.y, size.z)
+        ) /
+        max((float)model.meta.y, 1.0);
+
+    float epsilon =
+        max(voxel_size * 0.5, 1.0e-4);
+
+    float dx =
+        SampleSDF(
+            model,
+            local_position +
+                float3(epsilon, 0.0, 0.0)
+        ) -
+        SampleSDF(
+            model,
+            local_position -
+                float3(epsilon, 0.0, 0.0)
+        );
+
+    float dy =
+        SampleSDF(
+            model,
+            local_position +
+                float3(0.0, epsilon, 0.0)
+        ) -
+        SampleSDF(
+            model,
+            local_position -
+                float3(0.0, epsilon, 0.0)
+        );
+
+    float dz =
+        SampleSDF(
+            model,
+            local_position +
+                float3(0.0, 0.0, epsilon)
+        ) -
+        SampleSDF(
+            model,
+            local_position -
+                float3(0.0, 0.0, epsilon)
+        );
+
+    float3 gradient =
+        float3(dx, dy, dz);
+
+    if (dot(gradient, gradient) <
+        1.0e-10) {
+        return float3(0.0, 1.0, 0.0);
+    }
+
+    return normalize(gradient);
+}
+
+float3 EstimateSDFWorldNormal(
+    GPUSDFModel model,
+    float3 local_position
+) {
+    float3 local_normal =
+        EstimateSDFLocalNormal(
+            model,
+            local_position
+        );
+
+    /*
+     * world normal transform =
+     * transpose(world_to_local).
+     */
+    return normalize(
+        mul(
+            float4(local_normal, 0.0),
+            transpose(model.world_to_local)
+        ).xyz
+    );
+}
+
 bool TraceSDFModel(TraceRay ray, GPUSDFModel model, float current_best, out float hit_distance) {
     float3 local_origin = TransformPoint(ray.origin_tmin.xyz, model.world_to_local);
     float3 local_direction = TransformVector(ray.direction_tmax.xyz, model.world_to_local);
@@ -1053,49 +1257,107 @@ bool TraceSDFAny(
     return found;
 }
 
-uint SurfaceHash(
-    uint object_id,
-    uint revision,
-    float3 position
-) {
-    /*
-     * 0.5-world-unit cells.
-     */
-    int3 cell =
-        int3(floor(position * 2.0));
-
-    uint h =
-        object_id * 747796405u +
-        revision * 2891336453u;
-
-    h ^=
-        asuint(cell.x) * 277803737u;
-
-    h ^=
-        asuint(cell.y) * 1597334677u;
-
-    h ^=
-        asuint(cell.z) * 3812015801u;
-
-    h ^= h >> 16u;
-
-    /*
-     * Zero means empty slot.
-     */
-    return h | 1u;
-}
-
-uint SurfaceRevision(uint object_id) {
+uint SurfaceModelIndex(uint object_id) {
     for (
         uint i = 0u;
         i < TraceFrame.trace_limits.w;
         ++i
     ) {
         if (SDFModels[i].meta.z == object_id)
-            return SDFModels[i].version.x;
+            return i;
     }
 
-    return 0u;
+    return 0xffffffffu;
+}
+
+uint SurfaceNormalAxis(float3 normal) {
+    float3 a = abs(normal);
+
+    if (a.x >= a.y && a.x >= a.z)
+        return 0u;
+
+    if (a.y >= a.z)
+        return 1u;
+
+    return 2u;
+}
+
+uint3 SurfaceCell(
+    GPUSDFModel model,
+    float3 local_position
+) {
+    float3 size = max(
+        model.bounds_max.xyz -
+            model.bounds_min.xyz,
+        float3(1.0e-6, 1.0e-6, 1.0e-6)
+    );
+
+    float3 uvw = saturate(
+        (local_position -
+         model.bounds_min.xyz) /
+        size
+    );
+
+    /*
+     * Twice the SDF resolution.
+     *
+     * 32^3 SDF -> 64 cells/axis for the
+     * radiance cache.
+     */
+    uint grid =
+        max(model.meta.y * 2u, 8u);
+
+    uint3 limit =
+        uint3(
+            grid - 1u,
+            grid - 1u,
+            grid - 1u
+        );
+
+    return min(
+        (uint3)floor(
+            uvw * (float)grid
+        ),
+        limit
+    );
+}
+
+uint SurfaceHash(
+    uint object_id,
+    uint revision,
+    GPUSDFModel model,
+    float3 local_position,
+    float3 world_normal
+) {
+    uint3 cell =
+        SurfaceCell(
+            model,
+            local_position
+        );
+
+    uint normal_axis =
+        SurfaceNormalAxis(world_normal);
+
+    uint h =
+        object_id * 747796405u +
+        revision * 2891336453u +
+        normal_axis * 2246822519u;
+
+    h ^=
+        cell.x * 277803737u;
+
+    h ^=
+        cell.y * 1597334677u;
+
+    h ^=
+        cell.z * 3812015801u;
+
+    h ^= h >> 16u;
+
+    /*
+     * Zero remains the empty-cache marker.
+     */
+    return h | 1u;
 }
 
 uint SurfaceCacheWriteSlot(uint key) {
@@ -1139,23 +1401,52 @@ uint SurfaceCacheWriteSlot(uint key) {
 }
 
 bool LookupSurfaceCache(
-    uint object_id,
-    uint revision,
-    float3 position,
+    GPUSDFModel model,
+    float3 world_position,
     out float3 radiance
 ) {
+    float3 local_position =
+        TransformPoint(
+            world_position,
+            model.world_to_local
+        );
+
+    float3 world_normal =
+        EstimateSDFWorldNormal(
+            model,
+            local_position
+        );
+
     uint key =
         SurfaceHash(
-            object_id,
-            revision,
-            position
+            model.meta.z,
+            model.version.x,
+            model,
+            local_position,
+            world_normal
         );
 
     const uint mask =
         SURFACE_CACHE_CAPACITY - 1u;
 
+    uint grid =
+        max(model.meta.y * 2u, 8u);
+
+    float3 size = max(
+        model.bounds_max.xyz -
+            model.bounds_min.xyz,
+        float3(1.0e-6, 1.0e-6, 1.0e-6)
+    );
+
+    float3 cell_extent =
+        size / (float)grid;
+
     [unroll]
-    for (uint probe = 0u; probe < 4u; ++probe) {
+    for (
+        uint probe = 0u;
+        probe < 4u;
+        ++probe
+    ) {
         uint slot =
             (key + probe) & mask;
 
@@ -1171,18 +1462,43 @@ bool LookupSurfaceCache(
         SurfaceCacheEntry entry =
             SurfaceCacheEntries[slot];
 
-        if (entry.object_id != object_id)
+        if (entry.object_id != model.meta.z)
             continue;
 
-        if (entry.revision != revision)
+        if (entry.revision != model.version.x)
             continue;
 
-        if (distance(
-                entry.position.xyz,
-                position
-            ) > 0.75) {
+        /*
+         * Do not allow another orthogonal surface
+         * in the same spatial neighborhood.
+         */
+        if (SurfaceNormalAxis(entry.normal.xyz) !=
+            SurfaceNormalAxis(world_normal)) {
             continue;
         }
+
+        /*
+         * Old code allowed 0.75 world units.
+         *
+         * We now require the cache sample to be
+         * within roughly one local cache cell.
+         */
+        float3 cell_delta =
+            abs(
+                entry.position.xyz -
+                local_position
+            ) /
+            max(
+                cell_extent,
+                float3(
+                    1.0e-6,
+                    1.0e-6,
+                    1.0e-6
+                )
+            );
+
+        if (any(cell_delta > 1.5))
+            continue;
 
         radiance =
             entry.direct_radiance.rgb +
@@ -1192,6 +1508,7 @@ bool LookupSurfaceCache(
     }
 
     radiance = 0.0;
+
     return false;
 }
 
@@ -1206,6 +1523,9 @@ void CS_SDFTrace(
 
     TraceRay ray =
         MissQueue[queue_index];
+
+    TraceHit screen_candidate =
+        ScreenTraceHits[ray.destination];
 
     float best =
         ray.direction_tmax.w;
@@ -1237,6 +1557,9 @@ void CS_SDFTrace(
      */
     if (best_model == 0xffffffffu)
         return;
+
+    bool near_self_hit =
+        best < TraceFrame.trace_params.z * 3.0;
 
     GPUSDFModel model =
         SDFModels[best_model];
@@ -1274,8 +1597,7 @@ void CS_SDFTrace(
 
     bool cache_hit =
         LookupSurfaceCache(
-            model.meta.z,
-            model.version.x,
+            model,
             world_position,
             cached_radiance
         );
@@ -1286,35 +1608,115 @@ void CS_SDFTrace(
      *
      * Otherwise we'd leak environment through walls.
      */
+    // ProbeRadianceOutput[destination] =
+    //     cache_hit
+    //         ? float4(
+    //               cached_radiance,
+    //               1.0
+    //           )
+    //         : float4(
+    //               0.0,
+    //               0.0,
+    //               0.0,
+    //               1.0
+    //           );
+
+    if (cache_hit) {
+    /*
+     * World-space result wins.
+     *
+     * This is now the authoritative probe result
+     * whether the target was visible or offscreen.
+     */
     ProbeRadianceOutput[destination] =
-        cache_hit
-            ? float4(
-                  cached_radiance,
-                  1.0
-              )
-            : float4(
-                  0.0,
-                  0.0,
-                  0.0,
-                  1.0
-              );
+        float4(
+            cached_radiance,
+            1.0
+        );
+
+    ScreenTraceHits[ray.destination] =
+        hit;
+} else if (
+    screen_candidate.type != TRACE_SCREEN
+) {
+    /*
+     * Geometry exists but we don't know its radiance.
+     *
+     * If screen tracing had a valid candidate, retain
+     * that instead of replacing it with black.
+     *
+     * If both paths failed to resolve surface radiance,
+     * the geometry must still block the environment.
+     */
+    ProbeRadianceOutput[destination] =
+            float4(
+                0.0,
+                0.0,
+                0.0,
+                1.0
+            );
+
+        ScreenTraceHits[ray.destination] =
+            hit;
+    }
 
     /*
      * Cyan remains useful as the debug indication
      * for an SDF hit whose radiance cache missed.
      */
-    ScreenTraceOutput[destination] =
-        cache_hit
-            ? float4(
-                  cached_radiance,
-                  1.0
-              )
-            : float4(
-                  0.0,
-                  1.0,
-                  1.0,
-                  1.0
-              );
+    // ScreenTraceOutput[destination] =
+    //     cache_hit
+    //         ? float4(
+    //               cached_radiance,
+    //               1.0
+    //           )
+    //         : float4(
+    //               0.0,
+    //               1.0,
+    //               1.0,
+    //               1.0
+    //           );
+
+    // ScreenTraceOutput[destination] =
+    //     float4(0.0, 1.0, 0.0, 1.0);
+
+    /*
+     * DEBUG:
+     *
+     * red   = suspicious near-origin SDF hit
+     * green = normal SDF hit + cache hit
+     * cyan  = normal SDF hit + cache miss
+     */
+    // ScreenTraceOutput[destination] =
+    //     near_self_hit
+    //         ? float4(1.0, 0.0, 0.0, 1.0)
+    //         : cache_hit
+    //             ? float4(0.0, 1.0, 0.0, 1.0)
+    //             : float4(0.0, 1.0, 1.0, 1.0);
+
+    if (cache_hit) {
+        /*
+         * GREEN:
+         * authoritative world-space SDF + cache result
+         */
+        ScreenTraceOutput[destination] =
+            float4(0.0, 1.0, 0.0, 1.0);
+    } else if (
+        screen_candidate.type != TRACE_SCREEN
+    ) {
+        /*
+         * CYAN:
+         * SDF geometry hit but cache couldn't resolve
+         * its radiance.
+         */
+        ScreenTraceOutput[destination] =
+            float4(0.0, 1.0, 1.0, 1.0);
+}
+
+/*
+ * Otherwise leave the BLUE value written by
+ * CS_ScreenTrace because the screen result was kept.
+ */
 }
 
 [numthreads(8, 8, 1)]
@@ -1340,20 +1742,38 @@ void CS_SurfaceCacheUpdate(
 
     if (object_id == 0u)
         return;
+    
+    uint model_index =
+        SurfaceModelIndex(object_id);
+
+    if (model_index == 0xffffffffu)
+        return;
+
+    GPUSDFModel model =
+        SDFModels[model_index];
 
     uint revision =
-        SurfaceRevision(object_id);
+        model.version.x;
 
     float3 position =
         ReconstructWorldPosition(
             pixel,
             depth
         );
+        
+    float3 local_position =
+        TransformPoint(
+            position,
+            model.world_to_local
+        );
 
     float4 normal_roughness =
         TraceNormalRoughness.Load(
             int3(pixel, 0)
         );
+
+    float3 world_normal =
+        normalize(normal_roughness.xyz);
 
     float4 albedo_metallic =
         TraceAlbedoMetallic.Load(
@@ -1374,7 +1794,9 @@ void CS_SurfaceCacheUpdate(
         SurfaceHash(
             object_id,
             revision,
-            position
+            model,
+            local_position,
+            world_normal
         );
 
     uint slot =
@@ -1382,14 +1804,17 @@ void CS_SurfaceCacheUpdate(
 
     SurfaceCacheEntry entry;
 
+   /*
+     * Cache positions are object-local.
+     *
+     * This also means the cache representation does
+     * not depend on camera position.
+     */
     entry.position =
-        float4(position, 1.0);
+        float4(local_position, 1.0);
 
     entry.normal =
-        float4(
-            normalize(normal_roughness.xyz),
-            0.0
-        );
+        float4(world_normal, 0.0); 
 
     entry.albedo_roughness =
         float4(
