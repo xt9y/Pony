@@ -6,6 +6,10 @@
 
 #include <SDL3/SDL.h>
 
+#ifndef max
+#define max(a, b) ((a) > (b) ? (a) : (b))
+#endif
+
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
@@ -19,7 +23,6 @@
 
 #include "NRIDescs.h"
 
-// cant use Externsions/NriRayTracing.h because my M2 doesnt support that :(
 #include <NRI.h>
 #include <Extensions/NRIDeviceCreation.h>
 #include <Extensions/NRIHelper.h>
@@ -100,21 +103,14 @@ bool gpu_init(GPU *gpu, const char *title, int width, int height);
 void gpu_deinit(GPU *gpu);
 
 bool gpu_begin_frame(GPU *gpu, NriCommandBuffer **command_buffer, NriTexture **swapchain_texture, uint32_t *swapchain_index);
-
 bool gpu_clear_frame(GPU *gpu, NriCommandBuffer *command_buffer, uint32_t swapchain_index, NriColor32f clear_color);
-
 bool gpu_end_frame(GPU *gpu, NriCommandBuffer *command_buffer, uint32_t swapchain_index);
-
 bool gpu_resize(GPU *gpu);
 
 bool gpu_create_buffer(GPU *gpu, const NriBufferDesc *desc, NriMemoryLocation memory, NriBuffer **buffer);
-
 bool gpu_create_texture(GPU *gpu, const NriTextureDesc *desc, NriMemoryLocation memory, NriTexture **texture);
-
 bool gpu_upload_buffer(GPU *gpu, NriBuffer *buffer, const void *data, NriAccessStage after);
-
 bool gpu_upload_texture(GPU *gpu, NriTexture *texture, const NriTextureSubresourceUploadDesc *subresources, NriPlaneBits planes, NriAccessLayoutStage after);
-
 void gpu_destroy_buffer(GPU *gpu, NriBuffer *buffer);
 void gpu_destroy_texture(GPU *gpu, NriTexture *texture);
 
