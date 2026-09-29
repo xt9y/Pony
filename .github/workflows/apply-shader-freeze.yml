@@ -1,0 +1,36 @@
+name: apply shader freeze
+
+on:
+  push:
+    branches: [radiance]
+    paths:
+      - .shader-freeze/ready
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Assemble exact frozen sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat .shader-freeze/part-* > shader.hlsl
+          echo '91e75c1889bcb309b1ad4c086b8935d7f8d567f1e50d46f077709988c574f314  shader.hlsl' | sha256sum -c -
+          cp .shader-freeze/game.h game.h
+          cp .shader-freeze/build.c build.c
+          rm -rf .shader-freeze
+      - name: Commit frozen shader architecture
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add shader.hlsl game.h build.c .shader-freeze
+          git commit -m 'freeze radiance shader architecture'
+          git push origin HEAD:radiance
