@@ -42,7 +42,7 @@ static void compile_shaders(void) {
         "slangc shader.hlsl -entry VS_GBuffer -stage vertex -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/gbuffer.vs.spv",
         "slangc shader.hlsl -entry PS_GBuffer -stage fragment -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/gbuffer.ps.spv",
         "slangc shader.hlsl -entry VS_Present -stage vertex -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/present.vs.spv",
-        "slangc shader.hlsl -entry PS_Present -stage fragment -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/present.ps.spv",
+        "slangc shader.hlsl -entry PS_Present -stage fragment -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -DDIRECT_RADIANCE -o build/shaders/present.ps.spv",
         "slangc shader.hlsl -entry CS_HZB -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/hzb.cs.spv",
         "slangc shader.hlsl -entry CS_DirectRadiance -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/direct_radiance.cs.spv",
         "slangc shader.hlsl -entry CS_SurfaceCacheUpdate -stage compute -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o build/shaders/surface_cache.cs.spv",
