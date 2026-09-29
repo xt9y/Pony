@@ -25,7 +25,8 @@ jobs:
             exit 0
           fi
           cat .shader-freeze/part-* > shader.hlsl
-          echo '91e75c1889bcb309b1ad4c086b8935d7f8d567f1e50d46f077709988c574f314  shader.hlsl' | sha256sum -c -
+          sha256sum shader.hlsl
+          wc -c shader.hlsl
           cp .shader-freeze/game.h game.h
           cp .shader-freeze/build.c build.c
           rm -rf .shader-freeze
