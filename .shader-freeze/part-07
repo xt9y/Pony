@@ -1,0 +1,233 @@
+ 8, 1)]
+void CS_EmissiveGather(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint2 probe = dispatch_id.xy;
+    if (probe.x >= Pass.dimensions.x || probe.y >= Pass.dimensions.y) return;
+    ScreenProbeState state;
+    if (!PlaceScreenProbe(probe, state)) return;
+    uint seed = HashCombine(probe.x + probe.y * Pass.dimensions.x, Pass.dispatch.x);
+    uint2 source_pixel = UnpackPixel(state.history.z);
+    float3 contribution = EvaluateEmissiveSample(state.position_depth.xyz, state.normal_confidence.xyz, state.history.w, source_pixel, seed);
+    float4 current = ProbeIrradiance[probe];
+    ProbeIrradiance[probe] = float4(current.rgb + contribution, 1.0f);
+}
+
+[numthreads(8, 8, 1)]
+void CS_ResolveDirectionalProbes(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint2 probe = dispatch_id.xy;
+    if (probe.x >= Pass.dimensions.x || probe.y >= Pass.dimensions.y) return;
+    ScreenProbeState state;
+    if (!PlaceScreenProbe(probe, state)) {
+        ProbeIrradiance[probe] = 0.0f;
+        ProbeCurrentMeta[probe] = 0.0f;
+        return;
+    }
+    float3 irradiance = IntegrateProbeIrradiance(probe, state.normal_confidence.xyz);
+    float previous_luma = dot(ProbePreviousIrradiance.Load(int3(probe, 0)).rgb, float3(0.2126f, 0.7152f, 0.0722f));
+    float current_luma = dot(irradiance, float3(0.2126f, 0.7152f, 0.0722f));
+    float variance = abs(current_luma - previous_luma);
+    ProbeIrradiance[probe] = float4(irradiance, 1.0f);
+    ProbeCurrentMeta[probe] = float4(state.normal_confidence.w, variance, 0.0f, (float)Radiance.feature_flags.y);
+}
+
+// -----------------------------------------------------------------------------
+// Temporal/spatial screen-probe reuse.
+// -----------------------------------------------------------------------------
+[numthreads(8, 8, 1)]
+void CS_ReprojectScreenProbes(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint2 probe = dispatch_id.xy;
+    if (probe.x >= Pass.dimensions.x || probe.y >= Pass.dimensions.y) return;
+    if (!FeatureEnabled(RADIANCE_FEATURE_TEMPORAL_PROBES)) return;
+    uint2 pixel = ProbeRepresentativePixel(probe);
+    float depth = TraceDepth.Load(int3(pixel, 0));
+    if (depth <= 0.0f) return;
+    float2 velocity = VelocityTexture.Load(int3(pixel, 0));
+    float2 previous_pixel = float2(pixel) - velocity * TraceFrame.resolution.xy;
+    float2 previous_probe_f = previous_pixel / (float)ProbeTileSize();
+    int2 previous_probe = int2(round(previous_probe_f));
+    if (any(previous_probe < int2(0, 0)) || previous_probe.x >= (int)Pass.dimensions.x || previous_probe.y >= (int)Pass.dimensions.y) return;
+    uint2 pp = uint2(previous_probe);
+    float previous_depth = ProbeHistoryDepth.Load(int3(pp, 0));
+    float3 previous_normal = normalize(ProbeHistoryNormal.Load(int3(pp, 0)).xyz);
+    float3 current_normal = normalize(TraceNormalRoughness.Load(int3(pixel, 0)).xyz);
+    float depth_tolerance = max(Radiance.temporal_params.z, 1.0e-3f);
+    if (abs(previous_depth - depth) > depth_tolerance || dot(previous_normal, current_normal) < Radiance.temporal_params.w) return;
+    float history_weight = saturate(Radiance.temporal_params.x);
+    uint size = ProbeDirectionSize();
+    for (uint y = 0u; y < size; ++y) {
+        for (uint x = 0u; x < size; ++x) {
+            uint2 texel = uint2(x, y);
+            float3 history = ProbeHistoryRadiance.Load(int3(ProbeAtlasCoord(pp, texel), 0)).rgb;
+            uint2 dst = ProbeAtlasCoord(probe, texel);
+            float3 current = ProbeCurrentRadiance[dst].rgb;
+            ProbeCurrentRadiance[dst] = float4(lerp(current, history, history_weight), 1.0f);
+        }
+    }
+    float4 meta = ProbeHistoryMeta.Load(int3(pp, 0));
+    ProbeCurrentMeta[probe] = float4(meta.x * Radiance.temporal_params.y, meta.y, meta.z + 1.0f, meta.w);
+}
+
+[numthreads(8, 8, 1)]
+void CS_SpatialReuseScreenProbes(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint2 probe = dispatch_id.xy;
+    if (probe.x >= Pass.dimensions.x || probe.y >= Pass.dimensions.y) return;
+    if (!FeatureEnabled(RADIANCE_FEATURE_SPATIAL_PROBES)) return;
+    uint radius = min(Radiance.probe_config.w, 2u);
+    ScreenProbeState center;
+    if (!PlaceScreenProbe(probe, center)) return;
+    uint size = ProbeDirectionSize();
+    for (uint y = 0u; y < size; ++y) {
+        for (uint x = 0u; x < size; ++x) {
+            uint2 texel = uint2(x, y);
+            float3 sum = ProbeCurrentRadiance[ProbeAtlasCoord(probe, texel)].rgb;
+            float weight_sum = 1.0f;
+            for (int oy = -(int)radius; oy <= (int)radius; ++oy) {
+                for (int ox = -(int)radius; ox <= (int)radius; ++ox) {
+                    if (ox == 0 && oy == 0) continue;
+                    int2 np = int2(probe) + int2(ox, oy);
+                    if (np.x < 0 || np.y < 0 || np.x >= (int)Pass.dimensions.x || np.y >= (int)Pass.dimensions.y) continue;
+                    ScreenProbeState neighbor;
+                    if (!PlaceScreenProbe(uint2(np), neighbor)) continue;
+                    float normal_weight = saturate(dot(center.normal_confidence.xyz, neighbor.normal_confidence.xyz));
+                    float distance_weight = rcp(1.0f + length(center.position_depth.xyz - neighbor.position_depth.xyz));
+                    float weight = normal_weight * distance_weight;
+                    sum += ProbeCurrentRadiance[ProbeAtlasCoord(uint2(np), texel)].rgb * weight;
+                    weight_sum += weight;
+                }
+            }
+            ProbeCurrentRadiance[ProbeAtlasCoord(probe, texel)] = float4(sum / max(weight_sum, 1.0e-6f), 1.0f);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// World radiance-cache update and iterative multi-bounce.
+// -----------------------------------------------------------------------------
+[numthreads(64, 1, 1)]
+void CS_UpdateWorldRadianceCache(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint update_index = dispatch_id.x;
+    uint update_count = min(RayCounters[3], Radiance.world_probe_config.y);
+    if (update_index >= update_count) return;
+    uint probe_index = RadianceUpdateList[update_index];
+    if (probe_index >= Radiance.cache_counts.y) return;
+    WorldProbeState state = WorldProbes[probe_index];
+    uint s = max(Radiance.world_probe_config.x, 1u);
+    uint dir_count = s * s;
+    for (uint d = 0u; d < dir_count; ++d) {
+        uint2 texel = uint2(d % s, d / s);
+        float3 direction = OctDecode((float2(texel) + 0.5f) / (float)s);
+        float bias = max(Radiance.trace_params.y, 1.0e-3f);
+        TraceRay ray = MakeTraceRay(state.position_radius.xyz, direction, bias, Radiance.trace_params.x, TRACE_RAY_WORLD_PROBE, d, uint2(0u, 0u), 0u);
+        SurfaceHit hit = TraceUnifiedRay(ray, false);
+        float3 sample = hit.identity.w == TRACE_MISS ? FutureSkyRadiance(direction) : SurfaceOutgoingRadiance(hit);
+        uint address = WorldProbeRadianceIndex(probe_index, texel);
+        float3 old = WorldProbeRadiance[address].rgb;
+        float blend = saturate(Radiance.world_probe_params.y);
+        WorldProbeRadiance[address] = float4(lerp(old, sample, blend), 1.0f);
+    }
+    state.statistics.x = max(state.statistics.x * Radiance.temporal_params.y, 0.0f);
+    state.statistics.y = 0.0f;
+    state.state.x = Pass.dispatch.x;
+    state.state.y = Radiance.feature_flags.y;
+    WorldProbes[probe_index] = state;
+}
+
+[numthreads(64, 1, 1)]
+void CS_InvalidateRadiance(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint index = dispatch_id.x;
+    uint count = Pass.range.x;
+    if (index >= count) return;
+    uint encoded = InvalidationQueue[Pass.range.y + index];
+    uint kind = encoded >> 30u;
+    uint target = encoded & 0x3fffffffu;
+    float confidence_scale = saturate(Radiance.temporal_params.y);
+    if (kind == 0u) {
+        SurfaceCacheInvalidateSlot(target, confidence_scale);
+    } else if (kind == 1u && target < Radiance.cache_counts.y) {
+        WorldProbeState state = WorldProbes[target];
+        state.statistics.x *= confidence_scale;
+        state.state.z = 1u;
+        WorldProbes[target] = state;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Reflection hierarchy.
+// -----------------------------------------------------------------------------
+float3 SampleDirectionalProbeForPixel(uint2 pixel, float3 direction) {
+    uint2 probe = pixel / ProbeTileSize();
+    uint2 texel = ProbeDirectionTexel(direction);
+    return ProbeCurrentRadiance[ProbeAtlasCoord(probe, texel)].rgb;
+}
+
+[numthreads(8, 8, 1)]
+void CS_ReflectionTrace(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint2 pixel = dispatch_id.xy;
+    uint2 resolution = uint2(TraceFrame.resolution.xy);
+    if (any(pixel >= resolution)) return;
+    float depth = TraceDepth.Load(int3(pixel, 0));
+    if (depth <= 0.0f || !FeatureEnabled(RADIANCE_FEATURE_REFLECTIONS)) {
+        ReflectionOutput[pixel] = 0.0f;
+        ReflectionMeta[pixel] = 0.0f;
+        return;
+    }
+    float4 nr = TraceNormalRoughness.Load(int3(pixel, 0));
+    float roughness = nr.w;
+    float3 position = ReconstructWorldPosition(pixel, depth);
+    float3 normal = normalize(nr.xyz);
+    float3 view = normalize(position - TraceFrame.camera_position.xyz);
+    if (dot(normal, view) > 0.0f) normal = -normal;
+    float3 reflected = normalize(reflect(view, normal));
+    float rough_threshold = Radiance.reflection_params.x;
+    float smooth_threshold = Radiance.reflection_params.y;
+    float3 result = 0.0f;
+    uint mode = 0u;
+    if (roughness >= rough_threshold) {
+        result = SampleDirectionalProbeForPixel(pixel, reflected);
+        mode = 1u;
+    } else if (roughness >= smooth_threshold) {
+        result = WorldRadianceFallback(position, reflected);
+        if (all(result == 0.0f)) result = SampleDirectionalProbeForPixel(pixel, reflected);
+        mode = 2u;
+    } else {
+        float bias = max(Radiance.trace_params.y, 1.0e-3f);
+        TraceRay ray = MakeTraceRay(position + normal * bias, reflected, bias, Radiance.trace_params.x, TRACE_RAY_REFLECTION, 0u, pixel, TraceObjectId.Load(int3(pixel, 0)));
+        SurfaceHit hit = TraceUnifiedRay(ray, true);
+        result = hit.identity.w == TRACE_MISS ? FutureSkyRadiance(reflected) : SurfaceOutgoingRadiance(hit);
+        mode = 3u;
+    }
+    ReflectionOutput[pixel] = float4(result, 1.0f);
+    ReflectionMeta[pixel] = float4((float)mode, roughness, 1.0f, 0.0f);
+}
+
+// -----------------------------------------------------------------------------
+// Future material-aware direct-light/cache pass.
+// -----------------------------------------------------------------------------
+[numthreads(8, 8, 1)]
+void CS_RadianceDirect(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint2 pixel = dispatch_id.xy;
+    uint2 resolution = uint2(TraceFrame.resolution.xy);
+    if (any(pixel >= resolution)) return;
+    float depth = TraceDepth.Load(int3(pixel, 0));
+    if (depth <= 0.0f) return;
+    float3 position = ReconstructWorldPosition(pixel, depth);
+    float3 normal = normalize(TraceNormalRoughness.Load(int3(pixel, 0)).xyz);
+    float3 view = normalize(position - TraceFrame.camera_position.xyz);
+    if (dot(normal, view) > 0.0f) normal = -normal;
+    uint material_id = TraceMaterialId.Load(int3(pixel, 0));
+    uint primitive_id = TracePrimitiveId.Load(int3(pixel, 0));
+    uint object_id = TraceObjectId.Load(int3(pixel, 0));
+    GPUMaterial material = material_id < Radiance.scene_counts.y ? SceneMaterials[material_id] : (GPUMaterial)0;
+    float3 direct = material.emissive;
+    for (uint i = 0u; i < Radiance.sdf_counts.w; ++i) {
+        GPULight light = SceneLights[i];
+        uint type = (uint)(light.direction_type.w + 0.5f);
+        if (type == 3u) continue;
+        float3 L;
+        float attenuation = 1.0f;
+        float max_distance = Radiance.trace_params.x;
+        if (type == 0u) {
+            L = normalize(-light.direction_type.xyz);
+        } else {
+            float3 to_light = light.position_range.xyz - position;
+            float d = length(to_light);
+            if (d <= 1.0e-5f || d >= light.posi
