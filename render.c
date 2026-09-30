@@ -1980,6 +1980,30 @@ static bool create_pipeline_layouts(RENDERER *renderer) {
 
     if (renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &radiance_scene_layout, &renderer->radiance_scene_layout) != NriResult_SUCCESS) return false;
 
+    const NriDescriptorRangeDesc radiance_direct_cache_range = {
+        .baseRegisterIndex = 0,
+        .descriptorNum = 2,
+        .descriptorType = NriDescriptorType_STORAGE_STRUCTURED_BUFFER,
+        .shaderStages = NriStageBits_COMPUTE_SHADER
+    };
+
+    const NriDescriptorSetDesc radiance_direct_cache_set = {
+        .registerSpace = 6,
+        .ranges = &radiance_direct_cache_range,
+        .rangeNum = 1
+    };
+
+    const NriDescriptorSetDesc radiance_direct_sets[] = {trace_set, radiance_scene_set, radiance_direct_cache_set};
+
+    const NriPipelineLayoutDesc radiance_direct_layout = {
+        .descriptorSets = radiance_direct_sets,
+        .descriptorSetNum = 3,
+        .shaderStages = NriStageBits_COMPUTE_SHADER,
+        .flags = NriPipelineLayoutBits_IGNORE_GLOBAL_SPIRV_OFFSETS
+    };
+
+    if (renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &radiance_direct_layout, &renderer->radiance_direct_layout) != NriResult_SUCCESS) return false;
+
     const NriDescriptorRangeDesc emissive_probe_range = {
         .baseRegisterIndex = 7,
         .descriptorNum = 1,
@@ -2007,12 +2031,12 @@ static bool create_pipeline_layouts(RENDERER *renderer) {
 
 static bool create_descriptor_pool(RENDERER *renderer) {
     const NriDescriptorPoolDesc desc = {
-        .descriptorSetMaxNum = 7 + HZB_MAX_MIPS,
-        .constantBufferMaxNum = 8,
-        .textureMaxNum = 64,
-        .storageTextureMaxNum = HZB_MAX_MIPS + 9,
-        .structuredBufferMaxNum = 40,
-        .storageStructuredBufferMaxNum = 16
+        .descriptorSetMaxNum = 10 + HZB_MAX_MIPS,
+        .constantBufferMaxNum = 12,
+        .textureMaxNum = 80,
+        .storageTextureMaxNum = HZB_MAX_MIPS + 16,
+        .structuredBufferMaxNum = 64,
+        .storageStructuredBufferMaxNum = 24
     };
 
     if (renderer->gpu->core.CreateDescriptorPool(renderer->gpu->device, &desc, &renderer->descriptor_pool) != NriResult_SUCCESS) return false;
@@ -2022,6 +2046,9 @@ static bool create_descriptor_pool(RENDERER *renderer) {
            renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->hzb_layout, 0, renderer->hzb_sets, HZB_MAX_MIPS, 0) == NriResult_SUCCESS &&
            renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->trace_layout, 0, &renderer->trace_set, 1, 0) == NriResult_SUCCESS &&
            renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->radiance_scene_layout, 0, &renderer->radiance_scene_set, 1, 0) == NriResult_SUCCESS &&
+           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->radiance_direct_layout, 0, &renderer->radiance_direct_trace_set, 1, 0) == NriResult_SUCCESS &&
+           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->radiance_direct_layout, 1, &renderer->radiance_direct_scene_set, 1, 0) == NriResult_SUCCESS &&
+           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->radiance_direct_layout, 2, &renderer->radiance_direct_cache_set, 1, 0) == NriResult_SUCCESS &&
            renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->emissive_layout, 0, &renderer->emissive_trace_set, 1, 0) == NriResult_SUCCESS &&
            renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->emissive_layout, 1, &renderer->emissive_scene_set, 1, 0) == NriResult_SUCCESS &&
            renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->emissive_layout, 2, &renderer->emissive_probe_set, 1, 0) == NriResult_SUCCESS;
@@ -2260,7 +2287,7 @@ static bool create_pipelines(RENDERER *renderer) {
     if (!ok || !create_present_pipeline(renderer, "build/shaders/present.ps.spv", &renderer->present_pipeline)) return false;
 
     return create_compute_pipeline(renderer, "build/shaders/hzb.cs.spv", renderer->hzb_layout, &renderer->hzb_pipeline) &&
-           create_compute_pipeline(renderer, "build/shaders/direct_radiance.cs.spv", renderer->trace_layout, &renderer->direct_radiance_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_direct.cs.spv", renderer->radiance_direct_layout, &renderer->direct_radiance_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/surface_cache.cs.spv", renderer->trace_layout, &renderer->surface_cache_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/screen_trace.cs.spv", renderer->trace_layout, &renderer->screen_trace_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/trace_reset.cs.spv", renderer->trace_layout, &renderer->trace_reset_pipeline) &&
@@ -2401,6 +2428,7 @@ static bool update_trace_descriptor_set(RENDERER *renderer, NriDescriptorSet *de
 
 static void update_trace_descriptors(RENDERER *renderer) {
     if (renderer->trace_set) update_trace_descriptor_set(renderer, renderer->trace_set);
+    if (renderer->radiance_direct_trace_set) update_trace_descriptor_set(renderer, renderer->radiance_direct_trace_set);
     if (renderer->emissive_trace_set) update_trace_descriptor_set(renderer, renderer->emissive_trace_set);
 }
 
@@ -2448,7 +2476,23 @@ static bool update_radiance_scene_descriptor_set(RENDERER *renderer, NriDescript
 
 static bool update_radiance_scene_descriptors(RENDERER *renderer) {
     if (!update_radiance_scene_descriptor_set(renderer, renderer->radiance_scene_set)) return false;
+    if (renderer->radiance_direct_scene_set && !update_radiance_scene_descriptor_set(renderer, renderer->radiance_direct_scene_set)) return false;
     if (renderer->emissive_scene_set && !update_radiance_scene_descriptor_set(renderer, renderer->emissive_scene_set)) return false;
+    return true;
+}
+
+static bool update_radiance_direct_cache_descriptors(RENDERER *renderer) {
+    if (!renderer || !renderer->radiance_direct_cache_set || !renderer->surface_cache.keys_uav || !renderer->surface_cache.entries_uav) return false;
+
+    const NriDescriptor *descriptors[] = {renderer->surface_cache.keys_uav, renderer->surface_cache.entries_uav};
+    const NriUpdateDescriptorRangeDesc update = {
+        .descriptorSet = renderer->radiance_direct_cache_set,
+        .rangeIndex = 0,
+        .descriptors = descriptors,
+        .descriptorNum = 2
+    };
+
+    renderer->gpu->core.UpdateDescriptorRanges(&update, 1);
     return true;
 }
 
@@ -2965,6 +3009,20 @@ static void bind_trace(RENDERER *renderer, NriCommandBuffer *command_buffer, Nri
     renderer->gpu->core.CmdSetDescriptorSet(command_buffer, &set);
 }
 
+static void bind_radiance_direct(RENDERER *renderer, NriCommandBuffer *command_buffer) {
+    renderer->gpu->core.CmdSetPipelineLayout(command_buffer, NriBindPoint_COMPUTE, renderer->radiance_direct_layout);
+    renderer->gpu->core.CmdSetPipeline(command_buffer, renderer->direct_radiance_pipeline);
+
+    const NriSetDescriptorSetDesc sets[] = {
+        {.setIndex = 0, .descriptorSet = renderer->radiance_direct_trace_set, .bindPoint = NriBindPoint_COMPUTE},
+        {.setIndex = 1, .descriptorSet = renderer->radiance_direct_scene_set, .bindPoint = NriBindPoint_COMPUTE},
+        {.setIndex = 2, .descriptorSet = renderer->radiance_direct_cache_set, .bindPoint = NriBindPoint_COMPUTE}
+    };
+
+    for (uint32_t i = 0; i < sizeof(sets) / sizeof(sets[0]); ++i)
+        renderer->gpu->core.CmdSetDescriptorSet(command_buffer, &sets[i]);
+}
+
 static void build_hzb(RENDERER *renderer, NriCommandBuffer *command_buffer) {
     const NriAccessLayoutStage write = {
         .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
@@ -3050,7 +3108,7 @@ static void build_direct_radiance(RENDERER *renderer, NriCommandBuffer *command_
         .textures = &to_write,
         .textureNum = 1
     });
-    bind_trace(renderer, command_buffer, renderer->direct_radiance_pipeline);
+    bind_radiance_direct(renderer, command_buffer);
     renderer->gpu->core.CmdDispatch(
         command_buffer, &(NriDispatchDesc){
             .workGroupNumX = (renderer->width + 7u) / 8u,
@@ -3768,6 +3826,7 @@ bool renderer_init(RENDERER *renderer, GPU *gpu) {
 
     if (!create_pipeline_layouts(renderer) || !create_descriptor_pool(renderer) || !create_frame_buffer(renderer) || !create_radiance_constant_buffers(renderer) ||
         !create_radiance_scene_fallbacks(renderer) || !create_pipelines(renderer) || !create_surface_cache(renderer) ||
+        !update_radiance_direct_cache_descriptors(renderer) ||
         !create_size_dependent_resources(renderer, gpu->swapchain_width, gpu->swapchain_height)) {
         renderer_deinit(renderer);
 
@@ -3830,6 +3889,8 @@ void renderer_deinit(RENDERER *renderer) {
         if (renderer->trace_layout) renderer->gpu->core.DestroyPipelineLayout(renderer->trace_layout);
 
         if (renderer->radiance_scene_layout) renderer->gpu->core.DestroyPipelineLayout(renderer->radiance_scene_layout);
+
+        if (renderer->radiance_direct_layout) renderer->gpu->core.DestroyPipelineLayout(renderer->radiance_direct_layout);
 
         if (renderer->emissive_layout) renderer->gpu->core.DestroyPipelineLayout(renderer->emissive_layout);
     }
@@ -4002,7 +4063,6 @@ bool renderer_frame(RENDERER *renderer) {
     build_sdf_trace(renderer, command_buffer);
     finish_screen_trace(renderer, command_buffer);
     build_screen_probes(renderer, command_buffer);
-    build_emissive_gather(renderer, command_buffer);
     record_present_pass(renderer, command_buffer, swapchain_index);
 
     const bool frame_finished = gpu_end_frame(renderer->gpu, command_buffer, swapchain_index);

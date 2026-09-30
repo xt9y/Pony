@@ -660,6 +660,9 @@ typedef struct RENDERER {
     NriDescriptorSet *hzb_sets[HZB_MAX_MIPS];
     NriDescriptorSet *trace_set;
     NriDescriptorSet *radiance_scene_set;
+    NriDescriptorSet *radiance_direct_trace_set;
+    NriDescriptorSet *radiance_direct_scene_set;
+    NriDescriptorSet *radiance_direct_cache_set;
     NriDescriptorSet *emissive_trace_set;
     NriDescriptorSet *emissive_scene_set;
     NriDescriptorSet *emissive_probe_set;
@@ -669,6 +672,7 @@ typedef struct RENDERER {
     NriPipelineLayout *hzb_layout;
     NriPipelineLayout *trace_layout;
     NriPipelineLayout *radiance_scene_layout;
+    NriPipelineLayout *radiance_direct_layout;
     NriPipelineLayout *emissive_layout;
 
     NriPipeline *gbuffer_pipeline;

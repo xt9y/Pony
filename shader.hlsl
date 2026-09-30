@@ -2093,7 +2093,13 @@ void CS_RadianceDirect(uint3 dispatch_id : SV_DispatchThreadID) {
     uint2 resolution = uint2(TraceFrame.resolution.xy);
     if (any(pixel >= resolution)) return;
     float depth = TraceDepth.Load(int3(pixel, 0));
-    if (depth <= 0.0f) return;
+    if (depth <= 0.0f) {
+        float2 uv = (float2(pixel) + 0.5f) * TraceFrame.resolution.zw;
+        float4 far_world4 = mul(float4(ScreenUVToNDC(uv), 0.0f, 1.0f), TraceFrame.inverse_view_projection);
+        float3 direction = normalize(far_world4.xyz / far_world4.w - TraceFrame.camera_position.xyz);
+        DirectRadianceOutput[pixel] = float4(FutureSkyRadiance(direction), 1.0f);
+        return;
+    }
     float3 position = ReconstructWorldPosition(pixel, depth);
     float3 normal = normalize(TraceNormalRoughness.Load(int3(pixel, 0)).xyz);
     float3 view = normalize(position - TraceFrame.camera_position.xyz);
@@ -2135,6 +2141,7 @@ void CS_RadianceDirect(uint3 dispatch_id : SV_DispatchThreadID) {
     }
     float3 emissive_direct = EvaluateEmissiveSample(position, normal, object_id, pixel, HashCombine(Pass.dispatch.x, PackPixel(pixel)));
     direct += material.base_color.rgb * emissive_direct;
+    DirectRadianceOutput[pixel] = float4(direct, 1.0f);
     SurfaceHit hit = MakeSurfaceHit(TRACE_SCREEN, 0.0f);
     hit.position_distance = float4(position, 0.0f);
     hit.normal_confidence = float4(normal, 1.0f);
