@@ -616,6 +616,8 @@ typedef struct RENDERER {
     RENDER_TEXTURE emissive;
     RENDER_TEXTURE velocity;
     RENDER_TEXTURE object_id;
+    RENDER_TEXTURE material_id;
+    RENDER_TEXTURE primitive_id;
 
     HZB hzb;
     SCREEN_TRACE screen_trace;

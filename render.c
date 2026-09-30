@@ -1018,6 +1018,8 @@ static void destroy_gbuffer(RENDERER *renderer) {
     destroy_render_texture(renderer, &renderer->emissive);
     destroy_render_texture(renderer, &renderer->velocity);
     destroy_render_texture(renderer, &renderer->object_id);
+    destroy_render_texture(renderer, &renderer->material_id);
+    destroy_render_texture(renderer, &renderer->primitive_id);
 }
 
 static bool create_gbuffer(RENDERER *renderer, uint32_t width, uint32_t height) {
@@ -1068,6 +1070,22 @@ static bool create_gbuffer(RENDERER *renderer, uint32_t width, uint32_t height) 
            create_render_texture(
                renderer,
                &renderer->object_id,
+               NriFormat_R32_UINT,
+               NriTextureUsageBits_COLOR_ATTACHMENT | NriTextureUsageBits_SHADER_RESOURCE,
+               NriTextureView_COLOR_ATTACHMENT,
+               NriPlaneBits_COLOR
+           ) &&
+           create_render_texture(
+               renderer,
+               &renderer->material_id,
+               NriFormat_R32_UINT,
+               NriTextureUsageBits_COLOR_ATTACHMENT | NriTextureUsageBits_SHADER_RESOURCE,
+               NriTextureView_COLOR_ATTACHMENT,
+               NriPlaneBits_COLOR
+           ) &&
+           create_render_texture(
+               renderer,
+               &renderer->primitive_id,
                NriFormat_R32_UINT,
                NriTextureUsageBits_COLOR_ATTACHMENT | NriTextureUsageBits_SHADER_RESOURCE,
                NriTextureView_COLOR_ATTACHMENT,
@@ -1879,7 +1897,7 @@ static bool create_pipelines(RENDERER *renderer) {
     void *vs = NULL, *ps = NULL;
     size_t vs_size = 0, ps_size = 0;
 
-    if (!load_shader("build/shaders/gbuffer.vs.spv", &vs, &vs_size) || !load_shader("build/shaders/gbuffer.ps.spv", &ps, &ps_size)) {
+    if (!load_shader("build/shaders/gbuffer.vs.spv", &vs, &vs_size) || !load_shader("build/shaders/gbuffer_full.ps.spv", &ps, &ps_size)) {
         free(vs);
         free(ps);
 
@@ -1985,6 +2003,14 @@ static bool create_pipelines(RENDERER *renderer) {
         {
             .format = NriFormat_RGBA16_SFLOAT,
             .colorWriteMask = NriColorWriteBits_RGBA
+        },
+        {
+            .format = NriFormat_R32_UINT,
+            .colorWriteMask = NriColorWriteBits_RGBA
+        },
+        {
+            .format = NriFormat_R32_UINT,
+            .colorWriteMask = NriColorWriteBits_RGBA
         }
     };
 
@@ -2001,7 +2027,7 @@ static bool create_pipelines(RENDERER *renderer) {
         },
         .outputMerger = {
             .colors = colors,
-            .colorNum = 5,
+            .colorNum = 7,
             .depth = {
                 .compareOp = NriCompareOp_GREATER,
                 .write = true
@@ -2200,7 +2226,7 @@ static void update_trace_descriptors(RENDERER *renderer) {
 static bool update_radiance_scene_descriptors(RENDERER *renderer) {
     if (!renderer || !renderer->radiance_scene_set || !renderer->radiance_constants_srv || !renderer->pass_constants_srv || !renderer->object_srv ||
         !renderer->material_srv || !renderer->radiance_scene.triangles_srv || !renderer->radiance_scene.emissive_triangles_srv || !renderer->sdf.models_srv ||
-        !renderer->sdf.voxels_srv || !renderer->light_srv) {
+        !renderer->sdf.voxels_srv || !renderer->light_srv || !renderer->material_id.srv || !renderer->primitive_id.srv) {
         return false;
     }
 
@@ -2214,11 +2240,13 @@ static bool update_radiance_scene_descriptors(RENDERER *renderer) {
         renderer->sdf.voxels_srv
     };
     const NriDescriptor *lights[] = {renderer->light_srv};
+    const NriDescriptor *identity_textures[] = {renderer->material_id.srv, renderer->primitive_id.srv};
 
     const NriUpdateDescriptorRangeDesc updates[] = {
         {.descriptorSet = renderer->radiance_scene_set, .rangeIndex = 0, .descriptors = constants, .descriptorNum = 2},
         {.descriptorSet = renderer->radiance_scene_set, .rangeIndex = 1, .descriptors = scene_core, .descriptorNum = 6},
-        {.descriptorSet = renderer->radiance_scene_set, .rangeIndex = 3, .descriptors = lights, .descriptorNum = 1}
+        {.descriptorSet = renderer->radiance_scene_set, .rangeIndex = 3, .descriptors = lights, .descriptorNum = 1},
+        {.descriptorSet = renderer->radiance_scene_set, .rangeIndex = 4, .descriptors = identity_textures, .descriptorNum = 2}
     };
 
     renderer->gpu->core.UpdateDescriptorRanges(updates, sizeof(updates) / sizeof(updates[0]));
@@ -2258,6 +2286,8 @@ static bool create_size_dependent_resources(RENDERER *renderer, uint32_t width, 
     update_hzb_descriptors(renderer);
     update_present_descriptors(renderer);
     update_trace_descriptors(renderer);
+
+    if (renderer->radiance_scene.triangles_srv && !update_radiance_scene_descriptors(renderer)) return false;
 
     return true;
 }
@@ -2533,6 +2563,22 @@ static void transition_gbuffer_for_render(RENDERER *renderer, NriCommandBuffer *
             .planes = NriPlaneBits_COLOR
         },
         {
+            .texture = renderer->material_id.texture,
+            .before = renderer->material_id.state,
+            .after = color,
+            .mipNum = 1,
+            .layerNum = 1,
+            .planes = NriPlaneBits_COLOR
+        },
+        {
+            .texture = renderer->primitive_id.texture,
+            .before = renderer->primitive_id.state,
+            .after = color,
+            .mipNum = 1,
+            .layerNum = 1,
+            .planes = NriPlaneBits_COLOR
+        },
+        {
             .texture = renderer->depth.texture,
             .before = renderer->depth.state,
             .after = depth,
@@ -2544,13 +2590,15 @@ static void transition_gbuffer_for_render(RENDERER *renderer, NriCommandBuffer *
 
     renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
         .textures = barriers,
-        .textureNum = 6
+        .textureNum = 8
     });
     renderer->normal_roughness.state = color;
     renderer->albedo_metallic.state = color;
     renderer->emissive.state = color;
     renderer->velocity.state = color;
     renderer->object_id.state = color;
+    renderer->material_id.state = color;
+    renderer->primitive_id.state = color;
     renderer->depth.state = depth;
 }
 
@@ -2624,18 +2672,36 @@ static void transition_gbuffer_for_read(RENDERER *renderer, NriCommandBuffer *co
             .mipNum = 1,
             .layerNum = 1,
             .planes = NriPlaneBits_COLOR
+        },
+        {
+            .texture = renderer->material_id.texture,
+            .before = renderer->material_id.state,
+            .after = read,
+            .mipNum = 1,
+            .layerNum = 1,
+            .planes = NriPlaneBits_COLOR
+        },
+        {
+            .texture = renderer->primitive_id.texture,
+            .before = renderer->primitive_id.state,
+            .after = read,
+            .mipNum = 1,
+            .layerNum = 1,
+            .planes = NriPlaneBits_COLOR
         }
     };
 
     renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
         .textures = barriers,
-        .textureNum = 5
+        .textureNum = 7
     });
     renderer->normal_roughness.state = read;
     renderer->albedo_metallic.state = read;
     renderer->emissive.state = read;
     renderer->velocity.state = read;
     renderer->object_id.state = read;
+    renderer->material_id.state = read;
+    renderer->primitive_id.state = read;
 }
 
 static void bind_trace(RENDERER *renderer, NriCommandBuffer *command_buffer, NriPipeline *pipeline) {
@@ -3205,6 +3271,36 @@ static void record_gbuffer_pass(RENDERER *renderer, NriCommandBuffer *command_bu
             },
             .loadOp = NriLoadOp_CLEAR,
             .storeOp = NriStoreOp_STORE
+        },
+        {
+            .descriptor = renderer->material_id.attachment,
+            .clearValue = {
+                .color = {
+                    .ui = {
+                        .x = 0u,
+                        .y = 0u,
+                        .z = 0u,
+                        .w = 0u
+                    }
+                }
+            },
+            .loadOp = NriLoadOp_CLEAR,
+            .storeOp = NriStoreOp_STORE
+        },
+        {
+            .descriptor = renderer->primitive_id.attachment,
+            .clearValue = {
+                .color = {
+                    .ui = {
+                        .x = 0u,
+                        .y = 0u,
+                        .z = 0u,
+                        .w = 0u
+                    }
+                }
+            },
+            .loadOp = NriLoadOp_CLEAR,
+            .storeOp = NriStoreOp_STORE
         }
     };
 
@@ -3222,7 +3318,7 @@ static void record_gbuffer_pass(RENDERER *renderer, NriCommandBuffer *command_bu
 
     const NriRenderingDesc rendering = {
         .colors = colors,
-        .colorNum = 5,
+        .colorNum = 7,
         .depth = depth
     };
 
