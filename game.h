@@ -240,6 +240,7 @@ void scene_free(SCENE *scene);
 
 typedef struct SDF_VOLUME {
     float *distance;
+    uint32_t *surface_id;
     uint32_t resolution;
     AABB bounds;
 } SDF_VOLUME;
@@ -335,6 +336,25 @@ typedef struct RADIANCE_SCENE_DATA {
     uint32_t triangle_count;
     uint32_t emissive_triangle_count;
 } RADIANCE_SCENE_DATA;
+
+
+typedef struct RADIANCE_SCENE_FALLBACKS {
+    NriBuffer *dynamic_grid_cells;
+    NriBuffer *dynamic_grid_indices;
+    NriBuffer *global_sdf_clipmaps;
+    NriBuffer *global_sdf_page_table;
+    NriBuffer *global_sdf_bricks;
+    NriBuffer *global_sdf_surface_ids;
+
+    NriDescriptor *dynamic_grid_cells_srv;
+    NriDescriptor *dynamic_grid_indices_srv;
+    NriDescriptor *global_sdf_clipmaps_srv;
+    NriDescriptor *global_sdf_page_table_srv;
+    NriDescriptor *global_sdf_bricks_srv;
+    NriDescriptor *global_sdf_surface_ids_srv;
+
+    NriAccessStage state;
+} RADIANCE_SCENE_FALLBACKS;
 
 typedef struct GPU_DYNAMIC_GRID_CELL {
     uint32_t range_flags[4];
@@ -545,10 +565,13 @@ typedef struct TRACE_QUEUE {
 typedef struct SDF_GPU_SCENE {
     NriBuffer *models;
     NriBuffer *voxels;
+    NriBuffer *surface_ids;
     NriDescriptor *models_srv;
     NriDescriptor *voxels_srv;
+    NriDescriptor *surface_ids_srv;
     NriAccessStage models_state;
     NriAccessStage voxels_state;
+    NriAccessStage surface_ids_state;
     GPU_SDF_MODEL *cpu_models;
     uint32_t model_count;
     uint32_t voxel_count;
@@ -629,6 +652,7 @@ typedef struct RENDERER {
     SDF_GPU_SCENE sdf;
     SURFACE_CACHE surface_cache;
     RADIANCE_SCENE_DATA radiance_scene;
+    RADIANCE_SCENE_FALLBACKS radiance_fallbacks;
 
     NriDescriptorPool *descriptor_pool;
     NriDescriptorSet *gbuffer_set;
@@ -636,12 +660,16 @@ typedef struct RENDERER {
     NriDescriptorSet *hzb_sets[HZB_MAX_MIPS];
     NriDescriptorSet *trace_set;
     NriDescriptorSet *radiance_scene_set;
+    NriDescriptorSet *emissive_trace_set;
+    NriDescriptorSet *emissive_scene_set;
+    NriDescriptorSet *emissive_probe_set;
 
     NriPipelineLayout *gbuffer_layout;
     NriPipelineLayout *present_layout;
     NriPipelineLayout *hzb_layout;
     NriPipelineLayout *trace_layout;
     NriPipelineLayout *radiance_scene_layout;
+    NriPipelineLayout *emissive_layout;
 
     NriPipeline *gbuffer_pipeline;
     NriPipeline *present_pipeline;
@@ -654,6 +682,7 @@ typedef struct RENDERER {
     NriPipeline *direct_radiance_pipeline;
     NriPipeline *surface_cache_pipeline;
     NriPipeline *screen_probes_pipeline;
+    NriPipeline *emissive_pipeline;
 
     uint32_t width;
     uint32_t height;

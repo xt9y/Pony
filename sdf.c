@@ -12,6 +12,7 @@ typedef struct SDF_TRIANGLE {
     VEC3 centroid;
     VEC3 min;
     VEC3 max;
+    uint32_t surface_id;
 } SDF_TRIANGLE;
 
 typedef struct SDF_BVH_NODE {
@@ -185,16 +186,20 @@ static uint32_t build_node(SDF_BUILD *build, uint32_t first, uint32_t count) {
     return node_index;
 }
 
-static float nearest_distance_sq(const SDF_BUILD *build, uint32_t node_index, VEC3 p, float best) {
+static float nearest_distance_sq(const SDF_BUILD *build, uint32_t node_index, VEC3 p, float best, uint32_t *surface_id) {
     const SDF_BVH_NODE *node = &build->nodes[node_index];
 
     if (point_aabb_distance_sq(p, node->min, node->max) >= best) return best;
 
     if (node->count) {
         for (uint32_t i = node->first; i < node->first + node->count; ++i) {
-            const float d = point_triangle_distance_sq(p, &build->triangles[i]);
+            const SDF_TRIANGLE *triangle = &build->triangles[i];
+            const float d = point_triangle_distance_sq(p, triangle);
 
-            if (d < best) best = d;
+            if (d < best) {
+                best = d;
+                *surface_id = triangle->surface_id;
+            }
         }
 
         return best;
@@ -204,11 +209,11 @@ static float nearest_distance_sq(const SDF_BUILD *build, uint32_t node_index, VE
     const float dr = point_aabb_distance_sq(p, build->nodes[node->right].min, build->nodes[node->right].max);
 
     if (dl < dr) {
-        best = nearest_distance_sq(build, node->left, p, best);
-        best = nearest_distance_sq(build, node->right, p, best);
+        best = nearest_distance_sq(build, node->left, p, best, surface_id);
+        best = nearest_distance_sq(build, node->right, p, best, surface_id);
     } else {
-        best = nearest_distance_sq(build, node->right, p, best);
-        best = nearest_distance_sq(build, node->left, p, best);
+        best = nearest_distance_sq(build, node->right, p, best, surface_id);
+        best = nearest_distance_sq(build, node->left, p, best, surface_id);
     }
 
     return best;
@@ -248,6 +253,7 @@ bool sdf_build_volume(const MESH *mesh, uint32_t resolution, SDF_VOLUME *volume)
         triangle->centroid = scale3(add3(add3(triangle->a, triangle->b), triangle->c), 1.0f / 3.0f);
         triangle->min = vmin3(triangle->a, vmin3(triangle->b, triangle->c));
         triangle->max = vmax3(triangle->a, vmax3(triangle->b, triangle->c));
+        triangle->surface_id = i;
     }
 
     build_node(&build, 0, triangle_count);
@@ -271,8 +277,11 @@ bool sdf_build_volume(const MESH *mesh, uint32_t resolution, SDF_VOLUME *volume)
     }
 
     float *distance = malloc((size_t)voxel_count64 * sizeof(*distance));
+    uint32_t *surface_id = malloc((size_t)voxel_count64 * sizeof(*surface_id));
 
-    if (!distance) {
+    if (!distance || !surface_id) {
+        free(distance);
+        free(surface_id);
         free(build.triangles);
         free(build.nodes);
 
@@ -287,7 +296,9 @@ bool sdf_build_volume(const MESH *mesh, uint32_t resolution, SDF_VOLUME *volume)
                 const VEC3 uvw = {((float)x + 0.5f) / (float)resolution, ((float)y + 0.5f) / (float)resolution, ((float)z + 0.5f) / (float)resolution};
                 const VEC3 p = {bounds.min.x + size.x * uvw.x, bounds.min.y + size.y * uvw.y, bounds.min.z + size.z * uvw.z};
                 const uint64_t index = (uint64_t)x + (uint64_t)resolution * ((uint64_t)y + (uint64_t)resolution * z);
-                distance[index] = sqrtf(nearest_distance_sq(&build, 0, p, FLT_MAX));
+                uint32_t nearest_surface = UINT32_MAX;
+                distance[index] = sqrtf(nearest_distance_sq(&build, 0, p, FLT_MAX, &nearest_surface));
+                surface_id[index] = nearest_surface;
             }
         }
     }
@@ -296,6 +307,7 @@ bool sdf_build_volume(const MESH *mesh, uint32_t resolution, SDF_VOLUME *volume)
     free(build.nodes);
 
     volume->distance = distance;
+    volume->surface_id = surface_id;
     volume->resolution = resolution;
     volume->bounds = bounds;
 
@@ -305,5 +317,6 @@ bool sdf_build_volume(const MESH *mesh, uint32_t resolution, SDF_VOLUME *volume)
 void sdf_free_volume(SDF_VOLUME *volume) {
     if (!volume) return;
     free(volume->distance);
+    free(volume->surface_id);
     memset(volume, 0, sizeof(*volume));
 }
