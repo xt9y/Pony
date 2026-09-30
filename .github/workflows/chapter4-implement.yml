@@ -28,7 +28,9 @@ jobs:
           echo 'RED confirmed: Chapter 4 requirements are missing'
 
       - name: Apply Chapter 4
-        run: python3 .github/chapter4_apply.py
+        run: |
+          python3 .github/chapter4_fix_helper.py
+          python3 .github/chapter4_apply.py
 
       - name: GREEN - Verify Chapter 4 source structure
         shell: bash
