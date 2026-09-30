@@ -1,0 +1,28 @@
+name: chapter 4 emissive regression
+
+on:
+  push:
+    branches: [radiance]
+
+permissions:
+  contents: write
+
+jobs:
+  regression:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: radiance
+          fetch-depth: 2
+
+      - name: RED - visible emitter still leaks into probe radiance
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 .github/chapter4_emissive_regression_test.py; then
+            echo 'Regression test unexpectedly passed before the fix'
+            exit 1
+          fi
+          echo 'RED confirmed: legacy visible-emitter path is still present'
