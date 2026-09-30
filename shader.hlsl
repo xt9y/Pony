@@ -1161,6 +1161,11 @@ float3 SampleEmissivePoint(uint emitter_index, float2 u, out float3 normal, out 
 
 float3 EvaluateEmissiveSample(float3 surface_position, float3 surface_normal, uint source_object_id, uint2 source_pixel, uint seed) {
     if (!FeatureEnabled(RADIANCE_FEATURE_EMISSIVE) || Radiance.scene_counts.w == 0u) return 0.0f;
+    uint source_material_id = TraceMaterialId.Load(int3(source_pixel, 0));
+    if (source_material_id < Radiance.scene_counts.y) {
+        GPUMaterial source_material = SceneMaterials[source_material_id];
+        if (dot(source_material.emissive, source_material.emissive) > 1.0e-8f) return 0.0f;
+    }
     float selector = HashFloat(seed);
     uint emitter_index = SelectEmissiveTriangle(selector);
     if (emitter_index == INVALID_INDEX) return 0.0f;
@@ -1182,7 +1187,7 @@ float3 EvaluateEmissiveSample(float3 surface_position, float3 surface_normal, ui
     TraceRay shadow = MakeTraceRay(surface_position + surface_normal * bias, L, bias, max(distance - bias * 2.0f, bias), TRACE_RAY_SHADOW, 0u, source_pixel, source_object_id);
     if (TraceUnifiedOcclusion(shadow)) return 0.0f;
     float geometry = cos_surface * cos_light / max(distance_sq, 1.0e-6f);
-    return emitted * geometry / max(pdf_area, 1.0e-8f);
+    return emitted * geometry / max(pdf_area * PI, 1.0e-8f);
 }
 
 float3 SkyRadiance(float3 direction) {
@@ -1215,8 +1220,6 @@ float DirectVisibility(uint2 source_pixel, uint source_object_id, float3 positio
     float tmax = max(max_distance - bias * 2.0f, 0.0f);
     if (tmax <= 0.0f) return 1.0f;
     float3 origin = position + normal * bias * 2.0f;
-    TraceHit screen_hit = TraceScreenRay(origin, direction, source_pixel, source_object_id, normal, tmax, TraceFrame.trace_params.y, TraceFrame.trace_params.w, TraceFrame.trace_limits.x, TraceFrame.trace_limits.y);
-    if (screen_hit.type == TRACE_SCREEN) return 0.0f;
     TraceRay shadow_ray = MakeTraceRay(origin, direction, 0.0f, tmax, TRACE_RAY_SHADOW, 0u, source_pixel, source_object_id);
     float sdf_hit_distance;
     if (TraceLegacySDFAny(shadow_ray, sdf_hit_distance)) return 0.0f;
@@ -1343,9 +1346,8 @@ void CS_ScreenTrace(uint3 dispatch_id : SV_DispatchThreadID) {
         ScreenTraceOutput[ray_pixel] = float4(radiance, 1.0f);
         return;
     }
-    float3 sky = SkyRadiance(ray.direction_tmax.xyz);
-    ProbeRadianceOutput[ray_pixel] = float4(sky, 1.0f);
-    ScreenTraceOutput[ray_pixel] = float4(sky, 1.0f);
+    ProbeRadianceOutput[ray_pixel] = 0.0f;
+    ScreenTraceOutput[ray_pixel] = 0.0f;
 }
 
 [numthreads(1, 1, 1)]
@@ -1469,7 +1471,15 @@ void CS_SDFTrace(uint3 dispatch_id : SV_DispatchThreadID) {
         float hit_distance;
         if (TraceLegacySDFModel(ray, SDFModels[i], best, hit_distance)) { best = hit_distance; best_model = i; }
     }
-    if (best_model == INVALID_INDEX) return;
+    if (best_model == INVALID_INDEX) {
+        uint miss_width, miss_height;
+        ProbeRadianceOutput.GetDimensions(miss_width, miss_height);
+        uint2 miss_destination = uint2(ray.destination % miss_width, ray.destination / miss_width);
+        float3 sky = SkyRadiance(ray.direction_tmax.xyz);
+        ProbeRadianceOutput[miss_destination] = float4(sky, 1.0f);
+        ScreenTraceOutput[miss_destination] = float4(sky, 1.0f);
+        return;
+    }
     GPUSDFModel model = SDFModels[best_model];
     TraceHit hit = MakeTraceHit(TRACE_SDF, best);
     hit.object_id = model.meta.z;
