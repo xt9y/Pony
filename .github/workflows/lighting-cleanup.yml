@@ -1,0 +1,101 @@
+name: lighting cleanup
+
+on:
+  push:
+    branches: [radiance]
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: radiance
+          fetch-depth: 2
+
+      - name: RED - confirm current lighting artifacts are still encoded in source
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq '#define PI 3.14159265358979323846f' shader.hlsl
+          ! grep -Fq '#define INV_PI' shader.hlsl
+          grep -Fq 'reflected += material.base_color.rgb * light.color_intensity.rgb * light.color_intensity.w * attenuation * ndotl;' shader.hlsl
+          grep -Fq 'float3 emissive_direct = EvaluateEmissiveSampleForMaterial(position, normal, hit.identity.x, hit.identity.y, seed);' shader.hlsl
+          grep -Fq 'return lerp(lerp(p00, p10, blend.x), lerp(p01, p11, blend.x), blend.y);' shader.hlsl
+          grep -Fq 'constants.trace_params[1] = 0.10f;' render.c
+          grep -Fq '.trace_params = {200.0f, 0.05f, 0.10f, 0.05f},' render.c
+          echo 'RED confirmed: overbright Lambertian term, single emitter sample, blind probe blend, and oversized biases are present'
+
+      - name: Apply cleanup
+        run: python3 .github/lighting_cleanup.py
+
+      - name: GREEN - verify corrected lighting path
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq '#define INV_PI 0.31830988618379067154f' shader.hlsl
+          grep -Fq '#define DIRECT_EMISSIVE_SAMPLE_COUNT 4u' shader.hlsl
+          grep -Fq 'attenuation * ndotl * INV_PI;' shader.hlsl
+          grep -Fq 'for (uint sample_index = 0u; sample_index < DIRECT_EMISSIVE_SAMPLE_COUNT; ++sample_index)' shader.hlsl
+          grep -Fq 'uint seed = HashCombine(SurfaceCacheKey(hit), HashCombine(Pass.dispatch.x, Radiance.feature_flags.y));' shader.hlsl
+          grep -Fq 'float normal_similarity = saturate(dot(normal, probe_normal));' shader.hlsl
+          grep -Fq 'float depth_weight = exp(-abs(probe_linear_depth - linear_depth) / depth_scale);' shader.hlsl
+          grep -Fq 'constants.trace_params[1] = 0.005f;' render.c
+          grep -Fq '.trace_params = {200.0f, 0.05f, 0.005f, 0.05f},' render.c
+          ! grep -Fq 'return lerp(lerp(p00, p10, blend.x), lerp(p01, p11, blend.x), blend.y);' shader.hlsl
+          ! grep -Fq 'RayRadiance[index] = float4(ReflectedDirectAtPixel(UnpackPixel(hit.meta.x)), 1.0f);' shader.hlsl
+          git diff --check
+
+      - name: Compile affected shader entry points
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 \
+            -o /tmp/slang.tar.gz \
+            https://github.com/shader-slang/slang/releases/download/v2026.18.3/slang-2026.18.3-linux-x86_64-glibc-2.27.tar.gz
+          mkdir -p /tmp/slang
+          tar -xzf /tmp/slang.tar.gz -C /tmp/slang
+          SLANGC="$(find /tmp/slang -type f -name slangc | head -n1)"
+          test -n "$SLANGC"
+          chmod +x "$SLANGC"
+          export LD_LIBRARY_PATH="$(dirname "$SLANGC")/../lib:${LD_LIBRARY_PATH:-}"
+          compile() {
+            entry="$1"; stage="$2"; out="/tmp/${entry}.spv"
+            "$SLANGC" shader.hlsl -entry "$entry" -stage "$stage" -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "$out"
+            test -s "$out"
+          }
+          compile CS_RadianceDirect compute
+          compile CS_ScreenTrace compute
+          compile CS_SDFTrace compute
+          compile CS_ScreenProbes compute
+          compile CS_WavefrontScreenTrace compute
+          compile PS_Present fragment
+
+      - name: Syntax compile C translation units
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libsdl3-dev >/dev/null 2>&1 || true
+          if [ -d /usr/include/SDL3 ]; then SDL_FLAGS='-I/usr/include'; else SDL_FLAGS="$(pkg-config --cflags sdl3 2>/dev/null || true)"; fi
+          git clone --depth 1 https://github.com/NVIDIAGameWorks/NRI.git /tmp/NRI >/dev/null 2>&1
+          NRI_FLAGS='-I/tmp/NRI/Include -I/tmp/NRI/Include/Extensions'
+          for f in *.c; do
+            echo "syntax $f"
+            clang -std=c11 -fsyntax-only -I. $SDL_FLAGS $NRI_FLAGS "$f"
+          done
+
+      - name: Commit cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add shader.hlsl render.c
+          git diff --cached --quiet && exit 0
+          git commit -m 'clean lighting artifacts'
+          git push origin HEAD:radiance
