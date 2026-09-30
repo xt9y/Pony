@@ -1,9 +1,0 @@
-from pathlib import Path
-
-path = Path('.github/chapter4_apply.py')
-text = path.read_text()
-old = '''def replace_function(text: str, signature: str, replacement: str) -> str:\n    start = text.find(signature)\n    if start < 0:\n        raise SystemExit(f"function not found: {signature}")\n    brace = text.find("{", start)\n    if brace < 0:\n        raise SystemExit(f"function has no body: {signature}")\n    depth = 0\n    end = None\n    for i in range(brace, len(text)):\n        if text[i] == "{":\n            depth += 1\n        elif text[i] == "}":\n            depth -= 1\n            if depth == 0:\n                end = i + 1\n                break\n    if end is None:\n        raise SystemExit(f"unterminated function: {signature}")\n    return text[:start] + replacement.rstrip() + text[end:]\n'''
-new = '''def replace_function(text: str, signature: str, replacement: str) -> str:\n    search_from = 0\n    while True:\n        start = text.find(signature, search_from)\n        if start < 0:\n            raise SystemExit(f"function definition not found: {signature}")\n        brace = text.find("{", start)\n        semicolon = text.find(";", start)\n        if brace >= 0 and (semicolon < 0 or brace < semicolon):\n            break\n        search_from = start + len(signature)\n\n    depth = 0\n    end = None\n    for i in range(brace, len(text)):\n        if text[i] == "{":\n            depth += 1\n        elif text[i] == "}":\n            depth -= 1\n            if depth == 0:\n                end = i + 1\n                break\n    if end is None:\n        raise SystemExit(f"unterminated function: {signature}")\n    return text[:start] + replacement.rstrip() + text[end:]\n'''
-if text.count(old) != 1:
-    raise SystemExit('replace_function helper shape changed')
-path.write_text(text.replace(old, new, 1))
