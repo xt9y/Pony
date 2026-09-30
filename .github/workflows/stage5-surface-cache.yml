@@ -38,7 +38,7 @@ jobs:
           s = p.read_text()
           begin = s.index('# SDF probe misses now synchronize/use the permanent cache rather than the')
           end = s.index('# Allocate both caches:', begin)
-          scoped = r'''# SDF probe misses now synchronize/use the permanent cache rather than the
+          scoped = r"""# SDF probe misses now synchronize/use the permanent cache rather than the
           # visible-pixel legacy cache. Replace the whole function so similarly named
           # barriers elsewhere cannot be modified accidentally.
           pattern = r"static void build_sdf_trace\(RENDERER \*renderer, NriCommandBuffer \*command_buffer\) \{.*?\n\}\n\nstatic void finish_screen_trace"
@@ -94,7 +94,7 @@ jobs:
           static void finish_screen_trace'''
           s = sub_once(s, pattern, replacement, "SDF permanent cache function")
 
-          '''
+          """
           p.write_text(s[:begin] + scoped + s[end:])
           PY
 
