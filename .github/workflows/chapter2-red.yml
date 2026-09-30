@@ -1,0 +1,22 @@
+name: chapter 2 red
+
+on:
+  push:
+    branches: [radiance]
+
+jobs:
+  red:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Chapter 2 requirements are present
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'NriBuffer \*radiance_constants_buffer;' game.h
+          grep -q 'NriDescriptorSet \*radiance_scene_set;' game.h
+          grep -q 'static bool create_radiance_scene_gpu_resources' render.c
+          grep -q 'static bool create_radiance_constant_buffers' render.c
+          grep -q 'static bool update_radiance_scene_descriptors' render.c
+          ! git diff --quiet -- shader.hlsl || exit 1
