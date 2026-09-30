@@ -65,7 +65,6 @@ static void compile_shaders(void) {
         {"PS_PresentRuntime", "fragment", "present_runtime.ps.spv", NULL},
 
         {"CS_HZB", "compute", "hzb.cs.spv", NULL},
-        {"CS_DirectRadiance", "compute", "direct_radiance.cs.spv", NULL},
         {"CS_SurfaceCacheUpdate", "compute", "surface_cache.cs.spv", NULL},
         {"CS_ScreenTrace", "compute", "screen_trace.cs.spv", NULL},
         {"CS_ResetTraceQueue", "compute", "trace_reset.cs.spv", NULL},

@@ -2340,9 +2340,9 @@ static bool create_pipelines(RENDERER *renderer) {
     if (!ok || !create_present_pipeline(renderer, "build/shaders/present.ps.spv", &renderer->present_pipeline)) return false;
 
     return create_compute_pipeline(renderer, "build/shaders/hzb.cs.spv", renderer->hzb_layout, &renderer->hzb_pipeline) &&
-           create_compute_pipeline(renderer, "build/shaders/radiance_direct.cs.spv", renderer->radiance_direct_layout, &renderer->direct_radiance_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_direct.cs.spv", renderer->trace_layout, &renderer->direct_radiance_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/surface_cache.cs.spv", renderer->trace_layout, &renderer->surface_cache_pipeline) &&
-           create_compute_pipeline(renderer, "build/shaders/screen_trace.cs.spv", renderer->radiance_direct_layout, &renderer->screen_trace_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/screen_trace.cs.spv", renderer->trace_layout, &renderer->screen_trace_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/trace_reset.cs.spv", renderer->trace_layout, &renderer->trace_reset_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/trace_compact.cs.spv", renderer->trace_layout, &renderer->trace_compact_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/trace_args.cs.spv", renderer->trace_layout, &renderer->trace_args_pipeline) &&
@@ -2584,7 +2584,7 @@ static bool create_size_dependent_resources(RENDERER *renderer, uint32_t width, 
         /* full-resolution direct lighting */
         !create_compute_texture(renderer, &renderer->direct_radiance, width, height) ||
 
-        /* 4x4 directional samples per 8x8 probe */
+        /* 4x4 storage slots per 8x8 probe; only 8 rays are active */
         !create_compute_texture(renderer, &renderer->screen_probe_radiance, ray_width, ray_height) ||
 
         /* one resolved value per screen probe */
@@ -3157,31 +3157,21 @@ static void build_direct_radiance(RENDERER *renderer, NriCommandBuffer *command_
         .planes = NriPlaneBits_COLOR
     };
 
-    const NriAccessStage cache_storage = {
-        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
-        .stages = NriStageBits_COMPUTE_SHADER
-    };
-    const NriBufferBarrierDesc cache_barriers[] = {
-        {.buffer = renderer->radiance_surface_cache.keys, .before = renderer->radiance_surface_cache.keys_state, .after = cache_storage},
-        {.buffer = renderer->radiance_surface_cache.entries, .before = renderer->radiance_surface_cache.entries_state, .after = cache_storage}
-    };
-
     renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
         .textures = &to_write,
-        .textureNum = 1,
-        .buffers = cache_barriers,
-        .bufferNum = 2
+        .textureNum = 1
     });
-    renderer->radiance_surface_cache.keys_state = cache_storage;
-    renderer->radiance_surface_cache.entries_state = cache_storage;
-    bind_radiance_world(renderer, command_buffer, renderer->direct_radiance_pipeline);
+
+    bind_trace(renderer, command_buffer, renderer->direct_radiance_pipeline);
     renderer->gpu->core.CmdDispatch(
-        command_buffer, &(NriDispatchDesc){
+        command_buffer,
+        &(NriDispatchDesc){
             .workGroupNumX = (renderer->width + 7u) / 8u,
             .workGroupNumY = (renderer->height + 7u) / 8u,
             .workGroupNumZ = 1
         }
     );
+
     const NriAccessLayoutStage read = {
         .access = NriAccessBits_SHADER_RESOURCE,
         .layout = NriLayout_SHADER_RESOURCE,
@@ -3286,27 +3276,8 @@ static void build_screen_trace(RENDERER *renderer, NriCommandBuffer *command_buf
     renderer->screen_trace.state = texture_write;
     renderer->screen_probe_radiance.state = texture_write;
     renderer->trace_hits.state = buffer_write;
-    const NriBufferBarrierDesc cache_barriers[] = {
-        {
-            .buffer = renderer->radiance_surface_cache.keys,
-            .before = renderer->radiance_surface_cache.keys_state,
-            .after = buffer_write
-        },
-        {
-            .buffer = renderer->radiance_surface_cache.entries,
-            .before = renderer->radiance_surface_cache.entries_state,
-            .after = buffer_write
-        }
-    };
 
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .buffers = cache_barriers,
-        .bufferNum = 2
-    });
-    renderer->radiance_surface_cache.keys_state = buffer_write;
-    renderer->radiance_surface_cache.entries_state = buffer_write;
-
-    bind_radiance_world(renderer, command_buffer, renderer->screen_trace_pipeline);
+    bind_trace(renderer, command_buffer, renderer->screen_trace_pipeline);
     renderer->gpu->core.CmdDispatch(
         command_buffer,
         &(NriDispatchDesc){
@@ -4151,6 +4122,7 @@ bool renderer_frame(RENDERER *renderer) {
     build_sdf_trace(renderer, command_buffer);
     finish_screen_trace(renderer, command_buffer);
     build_screen_probes(renderer, command_buffer);
+    build_emissive_gather(renderer, command_buffer);
     record_present_pass(renderer, command_buffer, swapchain_index);
 
     const bool frame_finished = gpu_end_frame(renderer->gpu, command_buffer, swapchain_index);
