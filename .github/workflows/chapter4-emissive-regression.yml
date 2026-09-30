@@ -26,3 +26,25 @@ jobs:
             exit 1
           fi
           echo 'RED confirmed: legacy visible-emitter path is still present'
+
+      - name: Apply emissive visibility fix
+        run: python3 .github/chapter4_emissive_apply.py
+
+      - name: GREEN - visible emitter no longer leaks into probe radiance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/chapter4_emissive_regression_test.py
+          git diff --check
+          git diff --exit-code -- game.h render.c sdf.c build.c
+
+      - name: Commit emissive visibility fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add shader.hlsl
+          git diff --cached --quiet && exit 0
+          git commit -m 's4 emissive fix'
+          git push origin HEAD:radiance
