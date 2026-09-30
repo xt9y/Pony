@@ -2,6 +2,7 @@
 #define NEAR_PLANE 0.05f
 #define INVALID_INDEX 0xffffffffu
 #define PI 3.14159265358979323846f
+#define INV_PI 0.31830988618379067154f
 #define TWO_PI 6.28318530717958647692f
 
 #define TRACE_INACTIVE 0u
@@ -58,6 +59,7 @@
 #define SCREEN_PROBE_TILE_SIZE 8u
 #define SCREEN_PROBE_DIRECTION_SIZE 4u
 #define SCREEN_PROBE_RAY_COUNT 16u
+#define DIRECT_EMISSIVE_SAMPLE_COUNT 4u
 
 #define MAX_SCREEN_PROBE_DIRECTION_SIZE 8u
 #define MAX_SCREEN_PROBE_RAYS 32u
@@ -1373,7 +1375,7 @@ float3 EvaluateEmissiveSampleForMaterial(float3 surface_position, float3 surface
     float cos_light = saturate(abs(dot(light_normal, -L)));
     if (cos_surface <= 0.0f || cos_light <= 0.0f) return 0.0f;
     float bias = max(Radiance.trace_params.y, 1.0e-3f);
-    TraceRay shadow = MakeTraceRay(surface_position + surface_normal * bias, L, bias, max(distance - bias * 2.0f, bias), TRACE_RAY_SHADOW, 0u, uint2(0u, 0u), source_object_id);
+    TraceRay shadow = MakeTraceRay(surface_position + surface_normal * bias, L, 1.0e-4f, max(distance - bias, 1.0e-4f), TRACE_RAY_SHADOW, 0u, uint2(0u, 0u), source_object_id);
     if (TraceUnifiedOcclusion(shadow)) return 0.0f;
     float geometry = cos_surface * cos_light / max(distance_sq, 1.0e-6f);
     return emitted * geometry / max(pdf_area * PI, 1.0e-8f);
@@ -1442,13 +1444,19 @@ float3 EvaluateSurfaceReflectedDirect(SurfaceHit hit, uint seed) {
         float ndotl = saturate(dot(normal, L));
         if (ndotl <= 0.0f) continue;
         float bias = max(Radiance.trace_params.y, 1.0e-3f);
-        float tmax = max(max_distance - bias * 2.0f, bias);
-        TraceRay shadow = MakeTraceRay(position + normal * bias, L, bias, tmax, TRACE_RAY_SHADOW, 0u, uint2(0u, 0u), hit.identity.x);
+        float tmax = max(max_distance - bias, 1.0e-4f);
+        TraceRay shadow = MakeTraceRay(position + normal * bias, L, 1.0e-4f, tmax, TRACE_RAY_SHADOW, 0u, uint2(0u, 0u), hit.identity.x);
         if (TraceUnifiedOcclusion(shadow)) continue;
-        reflected += material.base_color.rgb * light.color_intensity.rgb * light.color_intensity.w * attenuation * ndotl;
+        reflected += material.base_color.rgb * light.color_intensity.rgb * light.color_intensity.w * attenuation * ndotl * INV_PI;
     }
 
-    float3 emissive_direct = EvaluateEmissiveSampleForMaterial(position, normal, hit.identity.x, hit.identity.y, seed);
+    float3 emissive_direct = 0.0f;
+    [unroll]
+    for (uint sample_index = 0u; sample_index < DIRECT_EMISSIVE_SAMPLE_COUNT; ++sample_index) {
+        uint sample_seed = HashCombine(seed, 0x9e3779b9u * (sample_index + 1u));
+        emissive_direct += EvaluateEmissiveSampleForMaterial(position, normal, hit.identity.x, hit.identity.y, sample_seed);
+    }
+    emissive_direct /= (float)DIRECT_EMISSIVE_SAMPLE_COUNT;
     reflected += material.base_color.rgb * emissive_direct;
     return reflected;
 }
@@ -2072,7 +2080,7 @@ void CS_WavefrontScreenTrace(uint3 dispatch_id : SV_DispatchThreadID) {
     RaySurfaceHits[index] = hit;
     if (hit.identity.w == TRACE_SCREEN) {
         RaySurfaceHits[index] = hit;
-        RayRadiance[index] = float4(ReflectedDirectAtPixel(UnpackPixel(hit.meta.x)), 1.0f);
+        RayRadiance[index] = float4(SurfaceReflectedRadiance(hit), 1.0f);
         return;
     }
     uint out_index;
@@ -2376,7 +2384,7 @@ void CS_RadianceDirect(uint3 dispatch_id : SV_DispatchThreadID) {
     }
 
     GPUMaterial material = hit.identity.y < Radiance.scene_counts.y ? SceneMaterials[hit.identity.y] : (GPUMaterial)0;
-    uint seed = HashCombine(Pass.dispatch.x, PackPixel(pixel));
+    uint seed = HashCombine(SurfaceCacheKey(hit), HashCombine(Pass.dispatch.x, Radiance.feature_flags.y));
     float3 reflected = EvaluateSurfaceReflectedDirect(hit, seed);
     DirectRadianceOutput[pixel] = float4(material.emissive + reflected, 1.0f);
     SurfaceCacheStore(hit, reflected, 0.0f, 1.0f);
@@ -2393,14 +2401,56 @@ float3 LegacyLoadScreenProbe(int2 probe) {
 }
 
 float3 LegacyInterpolateScreenProbeGI(int2 pixel) {
+    uint full_width, full_height;
+    DepthTexture.GetDimensions(full_width, full_height);
+
+    float depth = DepthTexture.Load(int3(pixel, 0));
+    if (depth <= 0.0f) return 0.0f;
+
+    float3 normal = normalize(NormalRoughnessTexture.Load(int3(pixel, 0)).xyz);
+    float linear_depth = LinearizeDepth(depth);
     float2 probe_position = (float2(pixel) + 0.5f) / (float)SCREEN_PROBE_TILE_SIZE - 0.5f;
-    int2 base = int2(floor(probe_position));
-    float2 blend = frac(probe_position);
-    float3 p00 = LegacyLoadScreenProbe(base);
-    float3 p10 = LegacyLoadScreenProbe(base + int2(1, 0));
-    float3 p01 = LegacyLoadScreenProbe(base + int2(0, 1));
-    float3 p11 = LegacyLoadScreenProbe(base + int2(1, 1));
-    return lerp(lerp(p00, p10, blend.x), lerp(p01, p11, blend.x), blend.y);
+    int2 center = int2(round(probe_position));
+
+    uint probe_width, probe_height;
+    ScreenProbesTexture.GetDimensions(probe_width, probe_height);
+
+    float3 sum = 0.0f;
+    float weight_sum = 0.0f;
+    float depth_scale = max(0.05f, linear_depth * 0.035f);
+
+    [unroll]
+    for (int y = -1; y <= 1; ++y) {
+        [unroll]
+        for (int x = -1; x <= 1; ++x) {
+            int2 probe = clamp(center + int2(x, y), int2(0, 0), int2((int)probe_width - 1, (int)probe_height - 1));
+            uint2 representative = min(
+                uint2(probe) * SCREEN_PROBE_TILE_SIZE + uint2(SCREEN_PROBE_TILE_SIZE / 2u, SCREEN_PROBE_TILE_SIZE / 2u),
+                uint2(full_width - 1u, full_height - 1u)
+            );
+
+            float probe_depth = DepthTexture.Load(int3(representative, 0));
+            if (probe_depth <= 0.0f) continue;
+
+            float3 probe_normal = normalize(NormalRoughnessTexture.Load(int3(representative, 0)).xyz);
+            float normal_similarity = saturate(dot(normal, probe_normal));
+            if (normal_similarity <= 0.35f) continue;
+
+            float probe_linear_depth = LinearizeDepth(probe_depth);
+            float depth_weight = exp(-abs(probe_linear_depth - linear_depth) / depth_scale);
+            float2 delta = float2(probe) - probe_position;
+            float spatial_weight = rcp(1.0f + dot(delta, delta));
+            float normal_weight = normal_similarity * normal_similarity;
+            normal_weight *= normal_weight;
+            float weight = spatial_weight * depth_weight * normal_weight;
+
+            sum += ScreenProbesTexture.Load(int3(probe, 0)).rgb * weight;
+            weight_sum += weight;
+        }
+    }
+
+    if (weight_sum > 1.0e-5f) return sum / weight_sum;
+    return LegacyLoadScreenProbe(center);
 }
 
 float3 PresentHZB(int2 pixel) {

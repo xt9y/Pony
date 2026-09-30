@@ -1806,7 +1806,7 @@ static bool update_radiance_constants(RENDERER *renderer) {
     constants.probe_config[2] = SCREEN_PROBE_DIRECTION_COUNT;
     constants.probe_config[3] = 0u;
     constants.trace_params[0] = 200.0f;
-    constants.trace_params[1] = 0.10f;
+    constants.trace_params[1] = 0.005f;
     constants.trace_params[2] = 0.05f;
     constants.trace_params[3] = 0.05f;
     constants.trace_limits[0] = 128u;
@@ -2667,7 +2667,7 @@ static bool make_frame_constants(RENDERER *renderer, MAT4 *view_projection, FRAM
         .camera_position = {renderer->camera.position.x, renderer->camera.position.y, renderer->camera.position.z, (float)(renderer->gpu->frame_index & 0x00ffffffu)},
         .resolution =
         {(float)renderer->width, (float)renderer->height, 1.0f / renderer->width, 1.0f / renderer->height}, // ^^ carries frame stamp for SURFACE_CACHE_ENTRY.last_frame
-        .trace_params = {200.0f, 0.05f, 0.10f, 0.05f},
+        .trace_params = {200.0f, 0.05f, 0.005f, 0.05f},
         .trace_limits = {128u, 5u, renderer->light_count, renderer->sdf.model_count}
     };
 
