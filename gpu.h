@@ -86,7 +86,7 @@ typedef struct GPU_OBJECT {
     uint32_t revision;
     uint32_t state;
     uint32_t type;
-    uint32_t padding;
+    uint32_t triangle_offset;
 } GPU_OBJECT;
 
 typedef struct GPU_MATERIAL {

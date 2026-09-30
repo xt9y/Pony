@@ -651,6 +651,7 @@ typedef struct RENDERER {
     TRACE_QUEUE miss_queue;
     SDF_GPU_SCENE sdf;
     SURFACE_CACHE surface_cache;
+    SURFACE_CACHE radiance_surface_cache;
     RADIANCE_SCENE_DATA radiance_scene;
     RADIANCE_SCENE_FALLBACKS radiance_fallbacks;
 

@@ -566,6 +566,57 @@ static bool create_surface_cache(RENDERER *renderer) {
     return clear_surface_cache(renderer);
 }
 
+static bool clear_radiance_surface_cache(RENDERER *renderer) {
+    SURFACE_CACHE *cache = &renderer->radiance_surface_cache;
+    if (!cache->keys || !cache->capacity) return false;
+    uint32_t *zero_keys = calloc(cache->capacity, sizeof(*zero_keys));
+    if (!zero_keys) return false;
+    const NriAccessStage storage = {
+        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
+        .stages = NriStageBits_COMPUTE_SHADER
+    };
+    const bool ok = gpu_upload_buffer(renderer->gpu, cache->keys, zero_keys, storage);
+    free(zero_keys);
+    if (!ok) return false;
+    cache->keys_state = storage;
+    return true;
+}
+
+static void destroy_radiance_surface_cache(RENDERER *renderer) {
+    SURFACE_CACHE *cache = &renderer->radiance_surface_cache;
+    if (cache->keys_uav) renderer->gpu->core.DestroyDescriptor(cache->keys_uav);
+    if (cache->entries_uav) renderer->gpu->core.DestroyDescriptor(cache->entries_uav);
+    if (cache->keys) gpu_destroy_buffer(renderer->gpu, cache->keys);
+    if (cache->entries) gpu_destroy_buffer(renderer->gpu, cache->entries);
+    memset(cache, 0, sizeof(*cache));
+}
+
+static bool create_radiance_surface_cache(RENDERER *renderer) {
+    destroy_radiance_surface_cache(renderer);
+    SURFACE_CACHE *cache = &renderer->radiance_surface_cache;
+    cache->capacity = SURFACE_CACHE_CAPACITY;
+
+    const NriBufferDesc keys_desc = {
+        .size = (uint64_t)cache->capacity * sizeof(uint32_t),
+        .structureStride = sizeof(uint32_t),
+        .usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE
+    };
+    const NriBufferDesc entries_desc = {
+        .size = (uint64_t)cache->capacity * sizeof(SURFACE_RADIANCE_ENTRY),
+        .structureStride = sizeof(SURFACE_RADIANCE_ENTRY),
+        .usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE
+    };
+
+    if (!gpu_create_buffer(renderer->gpu, &keys_desc, NriMemoryLocation_DEVICE, &cache->keys) ||
+        !gpu_create_buffer(renderer->gpu, &entries_desc, NriMemoryLocation_DEVICE, &cache->entries))
+        return false;
+    if (!create_buffer_view(renderer, cache->keys, NriBufferView_STORAGE_STRUCTURED_BUFFER, keys_desc.size, sizeof(uint32_t), &cache->keys_uav) ||
+        !create_buffer_view(renderer, cache->entries, NriBufferView_STORAGE_STRUCTURED_BUFFER, entries_desc.size, sizeof(SURFACE_RADIANCE_ENTRY), &cache->entries_uav))
+        return false;
+
+    return clear_radiance_surface_cache(renderer);
+}
+
 static void destroy_radiance_scene_gpu_resources(RENDERER *renderer) {
     if (!renderer) return;
 
@@ -684,6 +735,7 @@ static bool build_radiance_scene_data(RENDERER *renderer, SCENE *scene) {
         POINT *points = geometry->vertices.buffer;
         MESH_FACE *faces = geometry->faces.buffer;
         GPU_OBJECT *gpu_object = &renderer->cpu_objects[object_index];
+        gpu_object->triangle_offset = triangle_index;
 
         for (uint32_t face_index = 0; face_index < (uint32_t)geometry->faces.count; ++face_index) {
             MESH_FACE *face = &faces[face_index];
@@ -1745,7 +1797,7 @@ static bool update_radiance_constants(RENDERER *renderer) {
     constants.sdf_counts[1] = 0u;
     constants.sdf_counts[2] = 0u;
     constants.sdf_counts[3] = renderer->light_count;
-    constants.cache_counts[0] = 0u;
+    constants.cache_counts[0] = renderer->radiance_surface_cache.capacity;
     constants.cache_counts[1] = 0u;
     constants.cache_counts[2] = 0u;
     constants.cache_counts[3] = 0u;
@@ -1761,7 +1813,8 @@ static bool update_radiance_constants(RENDERER *renderer) {
     constants.trace_limits[1] = 5u;
     constants.trace_limits[2] = 96u;
     constants.trace_limits[3] = 128u;
-    constants.feature_flags[0] = renderer->radiance_scene.emissive_triangle_count ? RADIANCE_FEATURE_EMISSIVE : 0u;
+    constants.feature_flags[0] = RADIANCE_FEATURE_SURFACE_CACHE;
+    if (renderer->radiance_scene.emissive_triangle_count) constants.feature_flags[0] |= RADIANCE_FEATURE_EMISSIVE;
     constants.feature_flags[1] = 1u;
     constants.feature_flags[2] = RADIANCE_DEBUG_FINAL_GI;
     constants.feature_flags[3] = 0u;
@@ -2293,7 +2346,7 @@ static bool create_pipelines(RENDERER *renderer) {
            create_compute_pipeline(renderer, "build/shaders/trace_reset.cs.spv", renderer->trace_layout, &renderer->trace_reset_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/trace_compact.cs.spv", renderer->trace_layout, &renderer->trace_compact_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/trace_args.cs.spv", renderer->trace_layout, &renderer->trace_args_pipeline) &&
-           create_compute_pipeline(renderer, "build/shaders/sdf_trace.cs.spv", renderer->trace_layout, &renderer->sdf_trace_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/sdf_trace.cs.spv", renderer->radiance_direct_layout, &renderer->sdf_trace_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/screen_probes.cs.spv", renderer->trace_layout, &renderer->screen_probes_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_emissive.cs.spv", renderer->emissive_layout, &renderer->emissive_pipeline);
 }
@@ -2482,9 +2535,9 @@ static bool update_radiance_scene_descriptors(RENDERER *renderer) {
 }
 
 static bool update_radiance_direct_cache_descriptors(RENDERER *renderer) {
-    if (!renderer || !renderer->radiance_direct_cache_set || !renderer->surface_cache.keys_uav || !renderer->surface_cache.entries_uav) return false;
+    if (!renderer || !renderer->radiance_direct_cache_set || !renderer->radiance_surface_cache.keys_uav || !renderer->radiance_surface_cache.entries_uav) return false;
 
-    const NriDescriptor *descriptors[] = {renderer->surface_cache.keys_uav, renderer->surface_cache.entries_uav};
+    const NriDescriptor *descriptors[] = {renderer->radiance_surface_cache.keys_uav, renderer->radiance_surface_cache.entries_uav};
     const NriUpdateDescriptorRangeDesc update = {
         .descriptorSet = renderer->radiance_direct_cache_set,
         .rangeIndex = 0,
@@ -3009,9 +3062,9 @@ static void bind_trace(RENDERER *renderer, NriCommandBuffer *command_buffer, Nri
     renderer->gpu->core.CmdSetDescriptorSet(command_buffer, &set);
 }
 
-static void bind_radiance_direct(RENDERER *renderer, NriCommandBuffer *command_buffer) {
+static void bind_radiance_world(RENDERER *renderer, NriCommandBuffer *command_buffer, NriPipeline *pipeline) {
     renderer->gpu->core.CmdSetPipelineLayout(command_buffer, NriBindPoint_COMPUTE, renderer->radiance_direct_layout);
-    renderer->gpu->core.CmdSetPipeline(command_buffer, renderer->direct_radiance_pipeline);
+    renderer->gpu->core.CmdSetPipeline(command_buffer, pipeline);
 
     const NriSetDescriptorSetDesc sets[] = {
         {.setIndex = 0, .descriptorSet = renderer->radiance_direct_trace_set, .bindPoint = NriBindPoint_COMPUTE},
@@ -3104,11 +3157,24 @@ static void build_direct_radiance(RENDERER *renderer, NriCommandBuffer *command_
         .planes = NriPlaneBits_COLOR
     };
 
+    const NriAccessStage cache_storage = {
+        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
+        .stages = NriStageBits_COMPUTE_SHADER
+    };
+    const NriBufferBarrierDesc cache_barriers[] = {
+        {.buffer = renderer->radiance_surface_cache.keys, .before = renderer->radiance_surface_cache.keys_state, .after = cache_storage},
+        {.buffer = renderer->radiance_surface_cache.entries, .before = renderer->radiance_surface_cache.entries_state, .after = cache_storage}
+    };
+
     renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
         .textures = &to_write,
-        .textureNum = 1
+        .textureNum = 1,
+        .buffers = cache_barriers,
+        .bufferNum = 2
     });
-    bind_radiance_direct(renderer, command_buffer);
+    renderer->radiance_surface_cache.keys_state = cache_storage;
+    renderer->radiance_surface_cache.entries_state = cache_storage;
+    bind_radiance_world(renderer, command_buffer, renderer->direct_radiance_pipeline);
     renderer->gpu->core.CmdDispatch(
         command_buffer, &(NriDispatchDesc){
             .workGroupNumX = (renderer->width + 7u) / 8u,
@@ -3356,13 +3422,13 @@ static void build_sdf_trace(RENDERER *renderer, NriCommandBuffer *command_buffer
 
     const NriBufferBarrierDesc cache_sync[] = {
         {
-            .buffer = renderer->surface_cache.keys,
-            .before = renderer->surface_cache.keys_state,
+            .buffer = renderer->radiance_surface_cache.keys,
+            .before = renderer->radiance_surface_cache.keys_state,
             .after = storage
         },
         {
-            .buffer = renderer->surface_cache.entries,
-            .before = renderer->surface_cache.entries_state,
+            .buffer = renderer->radiance_surface_cache.entries,
+            .before = renderer->radiance_surface_cache.entries_state,
             .after = storage
         }
     };
@@ -3384,8 +3450,10 @@ static void build_sdf_trace(RENDERER *renderer, NriCommandBuffer *command_buffer
     });
 
     renderer->screen_probe_radiance.state = texture_storage;
+    renderer->radiance_surface_cache.keys_state = storage;
+    renderer->radiance_surface_cache.entries_state = storage;
 
-    bind_trace(renderer, command_buffer, renderer->sdf_trace_pipeline);
+    bind_radiance_world(renderer, command_buffer, renderer->sdf_trace_pipeline);
     renderer->gpu->core.CmdDispatchIndirect(command_buffer, renderer->miss_queue.dispatch_args, 0u);
 }
 
@@ -3826,7 +3894,7 @@ bool renderer_init(RENDERER *renderer, GPU *gpu) {
 
     if (!create_pipeline_layouts(renderer) || !create_descriptor_pool(renderer) || !create_frame_buffer(renderer) || !create_radiance_constant_buffers(renderer) ||
         !create_radiance_scene_fallbacks(renderer) || !create_pipelines(renderer) || !create_surface_cache(renderer) ||
-        !update_radiance_direct_cache_descriptors(renderer) ||
+        !create_radiance_surface_cache(renderer) || !update_radiance_direct_cache_descriptors(renderer) ||
         !create_size_dependent_resources(renderer, gpu->swapchain_width, gpu->swapchain_height)) {
         renderer_deinit(renderer);
 
@@ -3866,6 +3934,7 @@ void renderer_deinit(RENDERER *renderer) {
         destroy_trace_queue(renderer);
         destroy_trace_buffer(renderer, &renderer->trace_hits);
         destroy_surface_cache(renderer);
+        destroy_radiance_surface_cache(renderer);
         destroy_compute_texture(renderer, &renderer->direct_radiance);
         destroy_compute_texture(renderer, &renderer->screen_probe_radiance);
         destroy_compute_texture(renderer, &renderer->screen_probes);
@@ -3932,7 +4001,7 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
     renderer->previous_view_projection = mat4_identity();
     renderer->has_previous_frame = false;
 
-    if (!clear_surface_cache(renderer)) return false;
+    if (!clear_surface_cache(renderer) || !clear_radiance_surface_cache(renderer)) return false;
     update_gbuffer_descriptors(renderer);
     update_trace_descriptors(renderer);
 
@@ -4057,7 +4126,6 @@ bool renderer_frame(RENDERER *renderer) {
     build_hzb(renderer, command_buffer);
     transition_gbuffer_for_read(renderer, command_buffer);
     build_direct_radiance(renderer, command_buffer);
-    build_surface_cache(renderer, command_buffer);
     build_screen_trace(renderer, command_buffer);
     build_miss_queue(renderer, command_buffer);
     build_sdf_trace(renderer, command_buffer);

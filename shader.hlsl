@@ -503,6 +503,7 @@ struct GBufferVSOutput {
     [[vk::location(3)]] nointerpolation uint object_id : TEXCOORD2;
     [[vk::location(4)]] float4 current_clip : TEXCOORD3;
     [[vk::location(5)]] float4 previous_clip : TEXCOORD4;
+    [[vk::location(6)]] nointerpolation uint primitive_base : TEXCOORD5;
 };
 
 GBufferVSOutput VS_GBuffer(GBufferVSInput input) {
@@ -517,6 +518,7 @@ GBufferVSOutput VS_GBuffer(GBufferVSInput input) {
     output.uv = input.uv;
     output.material = object.draw.w + input.material;
     output.object_id = object.draw.z;
+    output.primitive_base = object.meta.w;
     return output;
 }
 
@@ -562,7 +564,7 @@ GBufferFullOutput PS_GBufferFull(GBufferVSOutput input, uint primitive_id : SV_P
     output.velocity = (current_ndc - previous_ndc) * float2(0.5f, -0.5f);
     output.object_id = input.object_id;
     output.material_id = input.material;
-    output.primitive_id = primitive_id;
+    output.primitive_id = input.primitive_base + primitive_id;
     return output;
 }
 
@@ -930,6 +932,11 @@ bool TraceLocalSDFModel(TraceRay ray, uint model_index, float current_best, out 
         uint surface_id;
         float d = SampleLocalSDF(model, lp, surface_id);
         if (d <= epsilon) {
+            float near_limit = ray.origin_tmin.w + epsilon * 1.5f;
+            if (t <= near_limit) {
+                t += max(epsilon * 1.5f / direction_scale, 1.0e-4f);
+                continue;
+            }
             float3 world_position = ray.origin_tmin.xyz + ray.direction_tmax.xyz * t;
             float3 local_normal = LocalSDFNormal(model, lp);
             float3 world_normal = normalize(mul(float4(local_normal, 0.0f), transpose(model.world_to_local)).xyz);
@@ -1159,9 +1166,8 @@ float3 SampleEmissivePoint(uint emitter_index, float2 u, out float3 normal, out 
     return p;
 }
 
-float3 EvaluateEmissiveSample(float3 surface_position, float3 surface_normal, uint source_object_id, uint2 source_pixel, uint seed) {
+float3 EvaluateEmissiveSampleForMaterial(float3 surface_position, float3 surface_normal, uint source_object_id, uint source_material_id, uint seed) {
     if (!FeatureEnabled(RADIANCE_FEATURE_EMISSIVE) || Radiance.scene_counts.w == 0u) return 0.0f;
-    uint source_material_id = TraceMaterialId.Load(int3(source_pixel, 0));
     if (source_material_id < Radiance.scene_counts.y) {
         GPUMaterial source_material = SceneMaterials[source_material_id];
         if (dot(source_material.emissive, source_material.emissive) > 1.0e-8f) return 0.0f;
@@ -1184,10 +1190,15 @@ float3 EvaluateEmissiveSample(float3 surface_position, float3 surface_normal, ui
     float cos_light = saturate(abs(dot(light_normal, -L)));
     if (cos_surface <= 0.0f || cos_light <= 0.0f) return 0.0f;
     float bias = max(Radiance.trace_params.y, 1.0e-3f);
-    TraceRay shadow = MakeTraceRay(surface_position + surface_normal * bias, L, bias, max(distance - bias * 2.0f, bias), TRACE_RAY_SHADOW, 0u, source_pixel, source_object_id);
+    TraceRay shadow = MakeTraceRay(surface_position + surface_normal * bias, L, bias, max(distance - bias * 2.0f, bias), TRACE_RAY_SHADOW, 0u, uint2(0u, 0u), source_object_id);
     if (TraceUnifiedOcclusion(shadow)) return 0.0f;
     float geometry = cos_surface * cos_light / max(distance_sq, 1.0e-6f);
     return emitted * geometry / max(pdf_area * PI, 1.0e-8f);
+}
+
+float3 EvaluateEmissiveSample(float3 surface_position, float3 surface_normal, uint source_object_id, uint2 source_pixel, uint seed) {
+    uint source_material_id = TraceMaterialId.Load(int3(source_pixel, 0));
+    return EvaluateEmissiveSampleForMaterial(surface_position, surface_normal, source_object_id, source_material_id, seed);
 }
 
 float3 SkyRadiance(float3 direction) {
@@ -1211,6 +1222,55 @@ float3 FutureSkyRadiance(float3 direction) {
     }
     return result;
 }
+
+float3 EvaluateSurfaceReflectedDirect(SurfaceHit hit, uint seed) {
+    if (hit.identity.y >= Radiance.scene_counts.y) return 0.0f;
+    GPUMaterial material = SceneMaterials[hit.identity.y];
+    float3 position = hit.position_distance.xyz;
+    float3 normal = normalize(hit.normal_confidence.xyz);
+    if (dot(normal, normal) <= 1.0e-8f) return 0.0f;
+
+    float3 reflected = 0.0f;
+    for (uint i = 0u; i < Radiance.sdf_counts.w; ++i) {
+        GPULight light = SceneLights[i];
+        uint type = (uint)(light.direction_type.w + 0.5f);
+        if (type == 3u) continue;
+
+        float3 L;
+        float attenuation = 1.0f;
+        float max_distance = Radiance.trace_params.x;
+        if (type == 0u) {
+            L = normalize(-light.direction_type.xyz);
+        } else {
+            float3 to_light = light.position_range.xyz - position;
+            float d = length(to_light);
+            if (d <= 1.0e-5f || d >= light.position_range.w) continue;
+            L = to_light / d;
+            max_distance = d;
+            float range_term = saturate(1.0f - d / max(light.position_range.w, 1.0e-3f));
+            attenuation = range_term * range_term / max(1.0f, d * d);
+            if (type == 2u) {
+                float cone = dot(normalize(light.direction_type.xyz), -L);
+                float cone_term = saturate((cone - light.spot_angles.y) / max(light.spot_angles.x - light.spot_angles.y, 1.0e-4f));
+                attenuation *= cone_term * cone_term;
+            }
+        }
+
+        float ndotl = saturate(dot(normal, L));
+        if (ndotl <= 0.0f) continue;
+        float bias = max(Radiance.trace_params.y, 1.0e-3f);
+        float tmax = max(max_distance - bias * 2.0f, bias);
+        TraceRay shadow = MakeTraceRay(position + normal * bias, L, bias, tmax, TRACE_RAY_SHADOW, 0u, uint2(0u, 0u), hit.identity.x);
+        if (TraceUnifiedOcclusion(shadow)) continue;
+        reflected += material.base_color.rgb * light.color_intensity.rgb * light.color_intensity.w * attenuation * ndotl;
+    }
+
+    float3 emissive_direct = EvaluateEmissiveSampleForMaterial(position, normal, hit.identity.x, hit.identity.y, seed);
+    reflected += material.base_color.rgb * emissive_direct;
+    return reflected;
+}
+
+float3 SurfaceReflectedRadiance(SurfaceHit hit);
 
 // -----------------------------------------------------------------------------
 // Compatibility direct lighting.
@@ -1465,34 +1525,30 @@ void CS_SDFTrace(uint3 dispatch_id : SV_DispatchThreadID) {
     uint queue_index = dispatch_id.x;
     if (queue_index >= MissCount[0]) return;
     TraceRay ray = MissQueue[queue_index];
-    float best = ray.direction_tmax.w;
-    uint best_model = INVALID_INDEX;
-    for (uint i = 0u; i < TraceFrame.trace_limits.w; ++i) {
-        float hit_distance;
-        if (TraceLegacySDFModel(ray, SDFModels[i], best, hit_distance)) { best = hit_distance; best_model = i; }
-    }
-    if (best_model == INVALID_INDEX) {
-        uint miss_width, miss_height;
-        ProbeRadianceOutput.GetDimensions(miss_width, miss_height);
-        uint2 miss_destination = uint2(ray.destination % miss_width, ray.destination / miss_width);
-        float3 sky = SkyRadiance(ray.direction_tmax.xyz);
-        ProbeRadianceOutput[miss_destination] = float4(sky, 1.0f);
-        ScreenTraceOutput[miss_destination] = float4(sky, 1.0f);
-        return;
-    }
-    GPUSDFModel model = SDFModels[best_model];
-    TraceHit hit = MakeTraceHit(TRACE_SDF, best);
-    hit.object_id = model.meta.z;
-    hit.confidence = 1.0f;
-    ScreenTraceHits[ray.destination] = hit;
+
     uint ray_width, ray_height;
     ProbeRadianceOutput.GetDimensions(ray_width, ray_height);
     uint2 destination = uint2(ray.destination % ray_width, ray.destination / ray_width);
-    float3 world_position = ray.origin_tmin.xyz + ray.direction_tmax.xyz * best;
-    float3 cached_radiance;
-    bool cache_hit = LegacySurfaceCacheLookup(model, world_position, cached_radiance);
-    ProbeRadianceOutput[destination] = cache_hit ? float4(cached_radiance, 1.0f) : float4(0.0f, 0.0f, 0.0f, 1.0f);
-    ScreenTraceOutput[destination] = ProbeRadianceOutput[destination];
+
+    SurfaceHit surface = TraceUnifiedRay(ray, false);
+    if (surface.identity.w == TRACE_MISS) {
+        float3 sky = FutureSkyRadiance(ray.direction_tmax.xyz);
+        ProbeRadianceOutput[destination] = float4(sky, 1.0f);
+        ScreenTraceOutput[destination] = float4(sky, 1.0f);
+        ScreenTraceHits[ray.destination] = MakeTraceHit(TRACE_MISS, ray.direction_tmax.w);
+        return;
+    }
+
+    TraceHit hit = MakeTraceHit(surface.identity.w, surface.position_distance.w);
+    hit.object_id = surface.identity.x;
+    hit.confidence = surface.normal_confidence.w;
+    ScreenTraceHits[ray.destination] = hit;
+
+    // Diffuse screen probes already receive explicit emitter NEE in the direct
+    // pass, so gather reflected surface radiance here rather than raw emission.
+    float3 radiance = SurfaceReflectedRadiance(surface);
+    ProbeRadianceOutput[destination] = float4(radiance, 1.0f);
+    ScreenTraceOutput[destination] = float4(radiance, 1.0f);
 }
 
 [numthreads(8, 8, 1)]
@@ -1583,15 +1639,11 @@ bool SurfaceCacheLookup(SurfaceHit hit, out SurfaceCacheEntry entry) {
     uint slot = SurfaceCacheFindSlot(SurfaceCacheKey(hit), false);
     if (slot == INVALID_INDEX) return false;
     entry = SurfaceCacheEntries[slot];
-    return entry.identity.x == hit.identity.x && entry.identity.z == hit.identity.z && entry.identity.w == hit.meta.y && entry.state.w != 0u;
-}
-
-float3 SurfaceOutgoingRadiance(SurfaceHit hit) {
-    if (hit.identity.w == TRACE_MISS) return FutureSkyRadiance(normalize(hit.normal_confidence.xyz));
-    SurfaceCacheEntry entry;
-    if (SurfaceCacheLookup(hit, entry)) return entry.emissive_metallic.rgb + entry.direct_radiance.rgb + entry.indirect_radiance.rgb;
-    if (hit.identity.y < Radiance.scene_counts.y) return SceneMaterials[hit.identity.y].emissive;
-    return 0.0f;
+    return entry.identity.x == hit.identity.x &&
+           entry.identity.z == hit.identity.z &&
+           entry.identity.w == hit.meta.y &&
+           entry.state.x == Radiance.feature_flags.y &&
+           entry.state.w != 0u;
 }
 
 void SurfaceCacheStore(SurfaceHit hit, float3 direct, float3 indirect, float confidence) {
@@ -1610,6 +1662,22 @@ void SurfaceCacheStore(SurfaceHit hit, float3 direct, float3 indirect, float con
     entry.identity = uint4(hit.identity.x, hit.identity.y, hit.identity.z, hit.meta.y);
     entry.state = uint4(Radiance.feature_flags.y, Pass.dispatch.x, 0u, 1u);
     SurfaceCacheEntries[slot] = entry;
+}
+
+float3 SurfaceReflectedRadiance(SurfaceHit hit) {
+    if (hit.identity.w == TRACE_MISS || hit.identity.y >= Radiance.scene_counts.y) return 0.0f;
+    SurfaceCacheEntry entry;
+    if (SurfaceCacheLookup(hit, entry)) return entry.direct_radiance.rgb + entry.indirect_radiance.rgb;
+    uint seed = HashCombine(SurfaceCacheKey(hit), HashCombine(Pass.dispatch.x, Radiance.feature_flags.y));
+    float3 reflected = EvaluateSurfaceReflectedDirect(hit, seed);
+    SurfaceCacheStore(hit, reflected, 0.0f, 1.0f);
+    return reflected;
+}
+
+float3 SurfaceOutgoingRadiance(SurfaceHit hit) {
+    if (hit.identity.w == TRACE_MISS) return FutureSkyRadiance(normalize(hit.normal_confidence.xyz));
+    if (hit.identity.y >= Radiance.scene_counts.y) return 0.0f;
+    return SceneMaterials[hit.identity.y].emissive + SurfaceReflectedRadiance(hit);
 }
 
 void SurfaceCacheInvalidateSlot(uint slot, float confidence_scale) {
@@ -2100,54 +2168,29 @@ void CS_RadianceDirect(uint3 dispatch_id : SV_DispatchThreadID) {
         DirectRadianceOutput[pixel] = float4(FutureSkyRadiance(direction), 1.0f);
         return;
     }
+
     float3 position = ReconstructWorldPosition(pixel, depth);
     float3 normal = normalize(TraceNormalRoughness.Load(int3(pixel, 0)).xyz);
     float3 view = normalize(position - TraceFrame.camera_position.xyz);
     if (dot(normal, view) > 0.0f) normal = -normal;
-    uint material_id = TraceMaterialId.Load(int3(pixel, 0));
+
     uint primitive_id = TracePrimitiveId.Load(int3(pixel, 0));
-    uint object_id = TraceObjectId.Load(int3(pixel, 0));
-    GPUMaterial material = material_id < Radiance.scene_counts.y ? SceneMaterials[material_id] : (GPUMaterial)0;
-    float3 direct = material.emissive;
-    for (uint i = 0u; i < Radiance.sdf_counts.w; ++i) {
-        GPULight light = SceneLights[i];
-        uint type = (uint)(light.direction_type.w + 0.5f);
-        if (type == 3u) continue;
-        float3 L;
-        float attenuation = 1.0f;
-        float max_distance = Radiance.trace_params.x;
-        if (type == 0u) {
-            L = normalize(-light.direction_type.xyz);
-        } else {
-            float3 to_light = light.position_range.xyz - position;
-            float d = length(to_light);
-            if (d <= 1.0e-5f || d >= light.position_range.w) continue;
-            L = to_light / d;
-            max_distance = d;
-            float range_term = saturate(1.0f - d / max(light.position_range.w, 1.0e-3f));
-            attenuation = range_term * range_term / max(1.0f, d * d);
-            if (type == 2u) {
-                float cone = dot(normalize(light.direction_type.xyz), -L);
-                float cone_term = saturate((cone - light.spot_angles.y) / max(light.spot_angles.x - light.spot_angles.y, 1.0e-4f));
-                attenuation *= cone_term * cone_term;
-            }
-        }
-        float ndotl = saturate(dot(normal, L));
-        if (ndotl <= 0.0f) continue;
-        float bias = max(Radiance.trace_params.y, 1.0e-3f);
-        TraceRay shadow = MakeTraceRay(position + normal * bias, L, bias, max_distance - bias, TRACE_RAY_SHADOW, 0u, pixel, object_id);
-        if (TraceUnifiedOcclusion(shadow)) continue;
-        direct += material.base_color.rgb * light.color_intensity.rgb * light.color_intensity.w * attenuation * ndotl;
+    SurfaceHit hit = SurfaceFromTriangle(primitive_id, position, normal, 0.0f, TRACE_SCREEN);
+    if (hit.identity.z == INVALID_INDEX) {
+        hit.position_distance = float4(position, 0.0f);
+        hit.normal_confidence = float4(normal, 1.0f);
+        hit.identity = uint4(TraceObjectId.Load(int3(pixel, 0)), TraceMaterialId.Load(int3(pixel, 0)), primitive_id, TRACE_SCREEN);
+        hit.meta.y = Radiance.feature_flags.y;
+    } else {
+        uint object_index = SceneTriangles[primitive_id].meta.x;
+        hit.meta.y = object_index < Radiance.scene_counts.x ? SceneObjects[object_index].meta.x : Radiance.feature_flags.y;
     }
-    float3 emissive_direct = EvaluateEmissiveSample(position, normal, object_id, pixel, HashCombine(Pass.dispatch.x, PackPixel(pixel)));
-    direct += material.base_color.rgb * emissive_direct;
-    DirectRadianceOutput[pixel] = float4(direct, 1.0f);
-    SurfaceHit hit = MakeSurfaceHit(TRACE_SCREEN, 0.0f);
-    hit.position_distance = float4(position, 0.0f);
-    hit.normal_confidence = float4(normal, 1.0f);
-    hit.identity = uint4(object_id, material_id, primitive_id, TRACE_SCREEN);
-    hit.meta.y = Radiance.feature_flags.y;
-    SurfaceCacheStore(hit, direct, 0.0f, 1.0f);
+
+    GPUMaterial material = hit.identity.y < Radiance.scene_counts.y ? SceneMaterials[hit.identity.y] : (GPUMaterial)0;
+    uint seed = HashCombine(Pass.dispatch.x, PackPixel(pixel));
+    float3 reflected = EvaluateSurfaceReflectedDirect(hit, seed);
+    DirectRadianceOutput[pixel] = float4(material.emissive + reflected, 1.0f);
+    SurfaceCacheStore(hit, reflected, 0.0f, 1.0f);
 }
 
 // -----------------------------------------------------------------------------
