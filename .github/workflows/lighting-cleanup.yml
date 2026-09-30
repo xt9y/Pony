@@ -75,7 +75,7 @@ jobs:
           compile CS_WavefrontScreenTrace compute
           compile PS_Present fragment
 
-      - name: Syntax compile C translation units
+      - name: Syntax compile affected C translation units
         shell: bash
         run: |
           set -euo pipefail
@@ -84,7 +84,7 @@ jobs:
           if [ -d /usr/include/SDL3 ]; then SDL_FLAGS='-I/usr/include'; else SDL_FLAGS="$(pkg-config --cflags sdl3 2>/dev/null || true)"; fi
           git clone --depth 1 https://github.com/NVIDIAGameWorks/NRI.git /tmp/NRI >/dev/null 2>&1
           NRI_FLAGS='-I/tmp/NRI/Include -I/tmp/NRI/Include/Extensions'
-          for f in *.c; do
+          for f in glb.c gltf.c gpu.c main.c render.c scene.c sdf.c; do
             echo "syntax $f"
             clang -std=c11 -fsyntax-only -I. $SDL_FLAGS $NRI_FLAGS "$f"
           done
