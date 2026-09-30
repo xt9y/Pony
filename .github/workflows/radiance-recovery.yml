@@ -33,7 +33,9 @@ jobs:
           echo 'RED confirmed: per-pixel world tracing and cache writes are active'
 
       - name: Apply recovery
-        run: python3 .github/radiance_recovery.py
+        run: |
+          python3 .github/radiance_recovery.py
+          python3 .github/radiance_recovery_post.py
 
       - name: GREEN - verify sparse radiance workload
         shell: bash
@@ -49,6 +51,7 @@ jobs:
           grep -Fq 'build_emissive_gather(renderer, command_buffer);' render.c
           grep -Fq 'create_compute_pipeline(renderer, "build/shaders/radiance_direct.cs.spv", renderer->trace_layout' render.c
           grep -Fq 'create_compute_pipeline(renderer, "build/shaders/screen_trace.cs.spv", renderer->trace_layout' render.c
+          ! grep -Fq 'void CS_DirectRadiance' shader.hlsl
           ! grep -Fq '{"CS_DirectRadiance", "compute", "direct_radiance.cs.spv", NULL}' build.c
 
           python3 - <<'PY'
