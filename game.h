@@ -29,6 +29,7 @@ typedef struct POINT {
 typedef struct MESH_FACE {
     uint32_t indices[3];
     VEC3 normal;
+    uint32_t material;
 } MESH_FACE;
 
 typedef struct AABB {
@@ -113,7 +114,9 @@ bool glb_extract_mesh(const GLB_DOC *doc, MESH *out);
 typedef struct GLTF_VERTEX {
     VEC3 position;
     VEC3 normal;
+
     float u, v;
+
     uint32_t material;
 } GLTF_VERTEX;
 
@@ -197,6 +200,7 @@ typedef struct SPOT_LIGHT {
 
 struct LIGHT {
     LIGHT_TYPE type;
+
     union {
         DIRECTIONAL_LIGHT directional;
         POINT_LIGHT point;
@@ -244,14 +248,7 @@ bool sdf_build_volume(const MESH *mesh, uint32_t resolution, SDF_VOLUME *volume)
 void sdf_free_volume(SDF_VOLUME *volume);
 
 
-typedef enum TRACE_HIT_TYPE {
-    TRACE_INACTIVE = 0,
-    TRACE_MISS = 1,
-    TRACE_SCREEN = 2,
-    TRACE_SDF = 3,
-    TRACE_GLOBAL_SDF = 4,
-    TRACE_TRIANGLE = 5
-} TRACE_HIT_TYPE;
+typedef enum TRACE_HIT_TYPE { TRACE_INACTIVE = 0, TRACE_MISS = 1, TRACE_SCREEN = 2, TRACE_SDF = 3, TRACE_GLOBAL_SDF = 4, TRACE_TRIANGLE = 5 } TRACE_HIT_TYPE;
 
 typedef struct TRACE_HIT {
     uint32_t type;
@@ -263,13 +260,7 @@ typedef struct TRACE_HIT {
     uint32_t padding[2];
 } TRACE_HIT;
 
-typedef enum TRACE_RAY_TYPE {
-    TRACE_RAY_INACTIVE = 0,
-    TRACE_RAY_DIFFUSE = 1,
-    TRACE_RAY_REFLECTION = 2,
-    TRACE_RAY_SHADOW = 3,
-    TRACE_RAY_WORLD_PROBE = 4
-} TRACE_RAY_TYPE;
+typedef enum TRACE_RAY_TYPE { TRACE_RAY_INACTIVE = 0, TRACE_RAY_DIFFUSE = 1, TRACE_RAY_REFLECTION = 2, TRACE_RAY_SHADOW = 3, TRACE_RAY_WORLD_PROBE = 4 } TRACE_RAY_TYPE;
 
 typedef struct TRACE_RAY {
     float origin_tmin[4];
@@ -327,6 +318,14 @@ typedef struct GPU_EMISSIVE_TRIANGLE {
     float radiance_area[4];
     float sampling[4];
 } GPU_EMISSIVE_TRIANGLE;
+
+typedef struct RADIANCE_SCENE_DATA {
+    GPU_SCENE_TRIANGLE *cpu_triangle;
+    GPU_EMISSIVE_TRIANGLE *cpu_emissive_triangles;
+
+    uint32_t triangle_count;
+    uint32_t emissive_triangle_count;
+} RADIANCE_SCENE_DATA;
 
 typedef struct GPU_DYNAMIC_GRID_CELL {
     uint32_t range_flags[4];
@@ -609,6 +608,7 @@ typedef struct RENDERER {
     TRACE_QUEUE miss_queue;
     SDF_GPU_SCENE sdf;
     SURFACE_CACHE surface_cache;
+    RADIANCE_SCENE_DATA radiance_scene;
 
     NriDescriptorPool *descriptor_pool;
     NriDescriptorSet *gbuffer_set;

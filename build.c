@@ -150,6 +150,10 @@ void build(C_Build *b) {
     c_use(app, nri);
     c_standard(app, C_STANDARD_C11);
     c_warnings_strict(app);
+#if defined(__clang__)
+    c_flag(app, "-Wno-gnu-zero-variadic-macro-arguments");
+    c_flag(app, "-Wno-variadic-macro-arguments-omitted");
+#endif
 
 #if defined(__APPLE__)
     c_include(app, "/opt/homebrew/include");

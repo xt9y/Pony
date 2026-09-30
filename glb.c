@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <math.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -981,7 +982,7 @@ static VEC3 norm3(VEC3 a) {
     return l > 0.0f ? (VEC3){a.x / l, a.y / l, a.z / l} : (VEC3){0, 1, 0};
 }
 
-static bool mesh_face_push(MESH *m, uint32_t a, uint32_t b, uint32_t c) {
+static bool mesh_face_push(MESH *m, uint32_t a, uint32_t b, uint32_t c, uint32_t material) {
 
     if (a == b || b == c || c == a || a >= m->vertices.count || b >= m->vertices.count || c >= m->vertices.count) {
         return true;
@@ -992,8 +993,14 @@ static bool mesh_face_push(MESH *m, uint32_t a, uint32_t b, uint32_t c) {
     if (!vec_reserve(v, v->count + 1u)) return false;
 
     POINT *p = m->vertices.buffer;
+
     const VEC3 n = norm3(cross3(sub3(p[b].p, p[a].p), sub3(p[c].p, p[a].p)));
-    ((MESH_FACE *)v->buffer)[v->count++] = (MESH_FACE){{a, b, c}, n};
+
+    ((MESH_FACE *)v->buffer)[v->count++] = (MESH_FACE){
+        .indices = {a, b, c},
+        .normal = n,
+        .material = material
+    };
 
     return true;
 }
@@ -1014,6 +1021,13 @@ static bool primitive_index(const GLB_ACCESSOR *idx, size_t i, size_t vertex_cou
 static bool extract_primitive(const GLB_DOC *d, int prim, GM4 world, MESH *out) {
 
     const int attrs = glb_get(d, prim, "attributes");
+
+    uint32_t material = UINT32_MAX;
+    const int material_token = glb_get(d, prim, "material");
+
+    if (material_token >= 0 && !tok_u32(d, material_token, &material)) {
+        return false;
+    }
 
     uint32_t pos_index;
 
@@ -1079,7 +1093,7 @@ static bool extract_primitive(const GLB_DOC *d, int prim, GM4 world, MESH *out) 
                 c = t;
             }
 
-            if (!mesh_face_push(out, base + a, base + b, base + c)) return false;
+            if (!mesh_face_push(out, base + a, base + b, base + c, material)) return false;
         }
 
     } else if (mode == 5) {
@@ -1104,7 +1118,7 @@ static bool extract_primitive(const GLB_DOC *d, int prim, GM4 world, MESH *out) 
                 c = t;
             }
 
-            if (!mesh_face_push(out, base + a, base + b, base + c)) return false;
+            if (!mesh_face_push(out, base + a, base + b, base + c, material)) return false;
         }
 
     } else if (mode == 6 && icount >= 3) {
@@ -1126,7 +1140,7 @@ static bool extract_primitive(const GLB_DOC *d, int prim, GM4 world, MESH *out) 
                 c = t;
             }
 
-            if (!mesh_face_push(out, base + a, base + b, base + c)) return false;
+            if (!mesh_face_push(out, base + a, base + b, base + c, material)) return false;
         }
     }
 

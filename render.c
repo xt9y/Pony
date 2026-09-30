@@ -73,6 +73,25 @@ static MAT4 mat4_transform(TRANSFORM t) {
     return r;
 }
 
+static VEC3 mat4_point(MAT4 matrix, VEC3 point) {
+    return v3(
+        point.x * matrix.m[0] + point.y * matrix.m[4] + point.z * matrix.m[8] + matrix.m[12],
+        point.x * matrix.m[1] + point.y * matrix.m[5] + point.z * matrix.m[9] + matrix.m[13],
+        point.x * matrix.m[2] + point.y * matrix.m[6] + point.z * matrix.m[10] + matrix.m[14]
+    );
+}
+
+static float triangle_area(VEC3 a, VEC3 b, VEC3 c) {
+    const VEC3 ab = v3_sub(b, a);
+    const VEC3 ac = v3_sub(c, a);
+
+    return 0.5f * sqrtf(v3_len_sq(v3_cross(ab, ac)));
+}
+
+static float emissive_luminance(const float emissive[3]) {
+    return emissive[0] * 0.2126f + emissive[1] * 0.7152f + emissive[2] * 0.0722f;
+}
+
 static MAT4 mat4_normal_transform(TRANSFORM t) {
     const float x = t.rotation[0], y = t.rotation[1], z = t.rotation[2], w = t.rotation[3];
     const float x2 = x + x, y2 = y + y, z2 = z + z;
@@ -187,6 +206,22 @@ static bool mat4_inverse(MAT4 matrix, MAT4 *inverse) {
     for (uint32_t row = 0; row < 4; ++row)
         for (uint32_t column = 0; column < 4; ++column)
             inverse->m[row * 4 + column] = a[row][4 + column];
+
+    return true;
+}
+
+
+static bool resolve_face_material(const MESH_FACE *face, const GLTF_SCENE *visual, uint32_t *material) {
+
+    if (!face || !visual || !material) return false;
+
+    uint32_t index = face->material;
+
+    if (index == UINT32_MAX) index = visual->default_material;
+
+    if (index >= visual->material_count) return false;
+
+    *material = index;
 
     return true;
 }
@@ -526,6 +561,232 @@ static bool create_surface_cache(RENDERER *renderer) {
         return false;
 
     return clear_surface_cache(renderer);
+}
+
+static void destroy_radiance_scene_data(RENDERER *renderer) {
+
+    if (!renderer) return;
+
+    free(renderer->radiance_scene.cpu_triangle);
+    free(renderer->radiance_scene.cpu_emissive_triangles);
+
+    memset(&renderer->radiance_scene, 0, sizeof(renderer->radiance_scene));
+}
+
+static bool build_radiance_scene_data(RENDERER *renderer, SCENE *scene) {
+
+    destroy_radiance_scene_data(renderer);
+
+    if (!renderer || !scene || !renderer->cpu_objects) return false;
+
+    uint64_t triangle_count = 0;
+    uint64_t possible_emitter_count = 0;
+
+    for (uint32_t scene_index = 0; scene_index < scene->object_count; ++scene_index) {
+        OBJECT *object = &scene->objects[scene_index];
+
+        if (object->type != MODEL) continue;
+
+        struct MODEL *model = object->data;
+
+        if (!model || !model->geometry || !model->visual || !model->geometry->faces.buffer || !model->geometry->vertices.buffer || !model->visual->vertices ||
+            !model->visual->materials) {
+            return false;
+        }
+
+        MESH *geometry = model->geometry;
+        GLTF_SCENE *visual = model->visual;
+
+        if (geometry->faces.count > SIZE_MAX / 3u) {
+            return false;
+        }
+
+        if (visual->vertex_count != geometry->faces.count * 3u) {
+            SDL_Log("Radiance triangle mismatch: %zu mesh faces vs %zu visual vertices", geometry->faces.count, visual->vertex_count);
+
+            return false;
+        }
+
+        triangle_count += geometry->faces.count;
+
+        if (triangle_count > UINT32_MAX) return false;
+
+        MESH_FACE *faces = geometry->faces.buffer;
+
+        for (size_t face_index = 0; face_index < geometry->faces.count; ++face_index) {
+            uint32_t material_index;
+
+            if (!resolve_face_material(&faces[face_index], visual, &material_index)) {
+                return false;
+            }
+
+            const GLTF_MATERIAL *material = &visual->materials[material_index];
+
+            if (emissive_luminance(material->emissive) > 1.0e-6f) {
+                ++possible_emitter_count;
+            }
+        }
+    }
+
+    if (!triangle_count) return false;
+
+    if (possible_emitter_count > UINT32_MAX) return false;
+
+    GPU_SCENE_TRIANGLE *triangles = calloc((size_t)triangle_count, sizeof(*triangles));
+
+    GPU_EMISSIVE_TRIANGLE *emitters = possible_emitter_count ? calloc((size_t)possible_emitter_count, sizeof(*emitters)) : NULL;
+
+    if (!triangles || (possible_emitter_count && !emitters)) {
+        free(triangles);
+        free(emitters);
+
+        return false;
+    }
+
+    uint32_t triangle_index = 0;
+    uint32_t emitter_index = 0;
+    uint32_t object_index = 0;
+    uint32_t material_offset = 0;
+
+    double total_emissive_weight = 0.0;
+
+    for (uint32_t scene_index = 0; scene_index < scene->object_count; ++scene_index) {
+        OBJECT *object = &scene->objects[scene_index];
+
+        if (object->type != MODEL) continue;
+
+        struct MODEL *model = object->data;
+        MESH *geometry = model->geometry;
+        GLTF_SCENE *visual = model->visual;
+        POINT *points = geometry->vertices.buffer;
+        MESH_FACE *faces = geometry->faces.buffer;
+        GPU_OBJECT *gpu_object = &renderer->cpu_objects[object_index];
+
+        for (uint32_t face_index = 0; face_index < (uint32_t)geometry->faces.count; ++face_index) {
+            MESH_FACE *face = &faces[face_index];
+
+            uint32_t local_material;
+
+            if (!resolve_face_material(face, visual, &local_material)) {
+                free(triangles);
+                free(emitters);
+
+                return false;
+            }
+
+            const uint32_t global_material = material_offset + local_material;
+
+            const VEC3 a = points[face->indices[0]].p;
+            const VEC3 b = points[face->indices[1]].p;
+            const VEC3 c = points[face->indices[2]].p;
+
+            const GLTF_VERTEX *v0 = &visual->vertices[(size_t)face_index * 3u + 0u];
+            const GLTF_VERTEX *v1 = &visual->vertices[(size_t)face_index * 3u + 1u];
+            const GLTF_VERTEX *v2 = &visual->vertices[(size_t)face_index * 3u + 2u];
+
+            GPU_SCENE_TRIANGLE *triangle = &triangles[triangle_index];
+
+            triangle->p0[0] = a.x;
+            triangle->p0[1] = a.y;
+            triangle->p0[2] = a.z;
+            triangle->p0[3] = 1.0f;
+
+            triangle->p1[0] = b.x;
+            triangle->p1[1] = b.y;
+            triangle->p1[2] = b.z;
+            triangle->p1[3] = 1.0f;
+
+            triangle->p2[0] = c.x;
+            triangle->p2[1] = c.y;
+            triangle->p2[2] = c.z;
+            triangle->p2[3] = 1.0f;
+
+            triangle->uv01[0] = v0->u;
+            triangle->uv01[1] = v0->v;
+            triangle->uv01[2] = v1->u;
+            triangle->uv01[3] = v1->v;
+
+            triangle->uv2_area[0] = v2->u;
+            triangle->uv2_area[1] = v2->v;
+            triangle->uv2_area[2] = triangle_area(a, b, c);
+            triangle->uv2_area[3] = 0.0f;
+
+            triangle->meta[0] = object_index;
+            triangle->meta[1] = global_material;
+            triangle->meta[2] = face_index;
+            triangle->meta[3] = (uint32_t)object->state;
+
+            const GLTF_MATERIAL *material = &visual->materials[local_material];
+
+            const float luminance = emissive_luminance(material->emissive);
+
+            if (luminance > 1.0e-6f) {
+                const VEC3 world_a = mat4_point(gpu_object->world, a);
+                const VEC3 world_b = mat4_point(gpu_object->world, b);
+                const VEC3 world_c = mat4_point(gpu_object->world, c);
+
+                const float world_area = triangle_area(world_a, world_b, world_c);
+
+                if (world_area > 1.0e-8f) {
+                    GPU_EMISSIVE_TRIANGLE *emitter = &emitters[emitter_index++];
+
+                    emitter->meta[0] = triangle_index;
+                    emitter->meta[1] = global_material;
+                    emitter->meta[2] = object_index;
+                    emitter->meta[3] = object->revision;
+
+                    emitter->radiance_area[0] = material->emissive[0];
+                    emitter->radiance_area[1] = material->emissive[1];
+                    emitter->radiance_area[2] = material->emissive[2];
+                    emitter->radiance_area[3] = world_area;
+
+                    const float weight = world_area * luminance;
+
+                    emitter->sampling[2] = weight;
+
+                    total_emissive_weight += (double)weight;
+                }
+            }
+
+            ++triangle_index;
+        }
+
+        material_offset += visual->material_count;
+
+        ++object_index;
+    }
+
+    if (emitter_index && total_emissive_weight > 0.0) {
+
+        double cumulative = 0.0;
+
+        for (uint32_t i = 0; i < emitter_index; ++i) {
+            GPU_EMISSIVE_TRIANGLE *emitter = &emitters[i];
+
+            const float probability = (float)((double)emitter->sampling[2] / total_emissive_weight);
+
+            cumulative += probability;
+
+            emitter->sampling[0] = i + 1u == emitter_index ? 1.0f : (float)cumulative;
+            emitter->sampling[1] = probability;
+            // emitter->sampling[2] = emitter->sampling[2];
+            emitter->sampling[3] = 0.0f;
+        }
+    } else {
+        free(emitters);
+
+        emitters = NULL;
+        emitter_index = 0;
+    }
+
+    renderer->radiance_scene.cpu_triangle = triangles;
+    renderer->radiance_scene.cpu_emissive_triangles = emitters;
+    renderer->radiance_scene.triangle_count = triangle_index;
+    renderer->radiance_scene.emissive_triangle_count = emitter_index;
+
+    SDL_Log("Radiance scene : %u triangles, %u emissive triangles", triangle_index, emitter_index);
+
+    return true;
 }
 
 static void destroy_screen_trace(RENDERER *renderer) {
@@ -887,6 +1148,7 @@ static bool create_sdf_scene(RENDERER *renderer, SCENE *scene) {
 }
 
 static void destroy_scene_resources(RENDERER *renderer) {
+    destroy_radiance_scene_data(renderer);
     destroy_sdf_scene(renderer);
 
     if (renderer->object_srv) renderer->gpu->core.DestroyDescriptor(renderer->object_srv);
@@ -1050,6 +1312,15 @@ static bool create_scene_resources(RENDERER *renderer, SCENE *scene) {
     renderer->vertex_count = (uint32_t)total_vertices;
     renderer->material_count = (uint32_t)total_materials;
     renderer->light_count = light_index;
+
+    if (!build_radiance_scene_data(renderer, scene)) {
+        free(vertices);
+        free(materials);
+
+        destroy_scene_resources(renderer);
+
+        return false;
+    }
 
     const NriBufferDesc vertex_desc = {
         .size = (uint64_t)renderer->vertex_count * sizeof(GLTF_VERTEX),
