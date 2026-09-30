@@ -320,8 +320,17 @@ typedef struct GPU_EMISSIVE_TRIANGLE {
 } GPU_EMISSIVE_TRIANGLE;
 
 typedef struct RADIANCE_SCENE_DATA {
-    GPU_SCENE_TRIANGLE *cpu_triangle;
+    GPU_SCENE_TRIANGLE *cpu_triangles;
     GPU_EMISSIVE_TRIANGLE *cpu_emissive_triangles;
+
+    NriBuffer *triangles;
+    NriBuffer *emissive_triangles;
+
+    NriDescriptor *triangles_srv;
+    NriDescriptor *emissive_triangles_srv;
+
+    NriAccessStage triangles_state;
+    NriAccessStage emissive_triangles_state;
 
     uint32_t triangle_count;
     uint32_t emissive_triangle_count;
@@ -579,13 +588,22 @@ typedef struct RENDERER {
     NriBuffer *light_buffer;
     NriBuffer *frame_buffer;
 
+    NriBuffer *radiance_constants_buffer;
+    NriBuffer *pass_constants_buffer;
+
     NriDescriptor *material_srv;
     NriDescriptor *object_srv;
     NriDescriptor *light_srv;
     NriDescriptor *frame_srv;
 
+    NriDescriptor *radiance_constants_srv;
+    NriDescriptor *pass_constants_srv;
+
     GPU_OBJECT *cpu_objects;
     GPU_LIGHT *cpu_lights;
+
+    RADIANCE_CONSTANTS radiance_constants;
+    PASS_CONSTANTS pass_constants;
 
     uint32_t gpu_object_count;
     uint32_t vertex_count;
@@ -615,11 +633,13 @@ typedef struct RENDERER {
     NriDescriptorSet *present_set;
     NriDescriptorSet *hzb_sets[HZB_MAX_MIPS];
     NriDescriptorSet *trace_set;
+    NriDescriptorSet *radiance_scene_set;
 
     NriPipelineLayout *gbuffer_layout;
     NriPipelineLayout *present_layout;
     NriPipelineLayout *hzb_layout;
     NriPipelineLayout *trace_layout;
+    NriPipelineLayout *radiance_scene_layout;
 
     NriPipeline *gbuffer_pipeline;
     NriPipeline *present_pipeline;
@@ -640,6 +660,9 @@ typedef struct RENDERER {
     NriAccessStage object_state;
     NriAccessStage light_state;
     NriAccessStage frame_state;
+
+    NriAccessStage radiance_constants_state;
+    NriAccessStage pass_constants_state;
 
     uint64_t frame_index;
 } RENDERER;
