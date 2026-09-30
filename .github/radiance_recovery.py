@@ -156,14 +156,13 @@ void CS_ScreenTrace(uint3 dispatch_id : SV_DispatchThreadID) {
 void CS_ResetTraceQueue'''
 shader = sub_once(shader, pattern, replacement, "cheap screen trace")
 
-# Sparse offscreen surfaces use the same cheap analytic direct model. No shadow
-# rays and no emissive NEE are evaluated per hit.
-shader = replace_once(
-    shader,
-    "    uint seed = HashCombine(SurfaceCacheKey(hit), HashCombine(Pass.dispatch.x, Radiance.feature_flags.y));\n    float3 reflected = EvaluateSurfaceReflectedDirect(hit, seed);\n",
-    "    float3 reflected = EvaluateSurfaceReflectedDirect(hit);\n",
-    "surface cache miss direct",
-)
+# Both old call sites are converted to the cheap signature. The full-resolution
+# one is then removed entirely by the CS_RadianceDirect replacement below.
+old_call = "    uint seed = HashCombine(SurfaceCacheKey(hit), HashCombine(Pass.dispatch.x, Radiance.feature_flags.y));\n    float3 reflected = EvaluateSurfaceReflectedDirect(hit, seed);\n"
+call_count = shader.count(old_call)
+if call_count != 2:
+    raise SystemExit(f"surface direct call sites: expected 2, found {call_count}")
+shader = shader.replace(old_call, "    float3 reflected = EvaluateSurfaceReflectedDirect(hit);\n", 2)
 
 # Full-resolution direct pass: raster/G-buffer only. No SDF, no surface-cache
 # atomics, no emitter shadow rays. Emissive area-light NEE is probe-frequency.
