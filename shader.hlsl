@@ -1223,6 +1223,12 @@ float DirectVisibility(uint2 source_pixel, uint source_object_id, float3 positio
     return 1.0f;
 }
 
+float3 ReflectedDirectAtPixel(uint2 pixel) {
+    float3 direct = TraceDirectRadiance.Load(int3(pixel, 0)).rgb;
+    float3 emissive = TraceEmissive.Load(int3(pixel, 0)).rgb;
+    return max(direct - emissive, 0.0f);
+}
+
 [numthreads(8, 8, 1)]
 void CS_DirectRadiance(uint3 dispatch_id : SV_DispatchThreadID) {
     uint2 pixel = dispatch_id.xy;
@@ -1332,7 +1338,7 @@ void CS_ScreenTrace(uint3 dispatch_id : SV_DispatchThreadID) {
     TraceHit hit = TraceScreenRay(ray.origin_tmin.xyz, ray.direction_tmax.xyz, origin_pixel, ray.source_object_id, source_normal, ray.direction_tmax.w, TraceFrame.trace_params.y, TraceFrame.trace_params.w, TraceFrame.trace_limits.x, TraceFrame.trace_limits.y);
     ScreenTraceHits[index] = hit;
     if (hit.type == TRACE_SCREEN) {
-        float3 radiance = TraceDirectRadiance.Load(int3(hit.hit_pixel, 0)).rgb;
+        float3 radiance = ReflectedDirectAtPixel(hit.hit_pixel);
         ProbeRadianceOutput[ray_pixel] = float4(radiance, 1.0f);
         ScreenTraceOutput[ray_pixel] = float4(radiance, 1.0f);
         return;
@@ -1505,7 +1511,7 @@ void CS_SurfaceCacheUpdate(uint3 dispatch_id : SV_DispatchThreadID) {
     entry.normal = float4(world_normal, 0.0f);
     entry.albedo_roughness = float4(albedo_metallic.rgb, normal_roughness.w);
     entry.emissive_metallic = float4(emissive.rgb, albedo_metallic.w);
-    entry.direct_radiance = direct;
+    entry.direct_radiance = float4(ReflectedDirectAtPixel(pixel), direct.w);
     entry.indirect_radiance = 0.0f;
     entry.object_id = object_id;
     entry.revision = model.version.x;
@@ -1801,7 +1807,7 @@ void CS_WavefrontScreenTrace(uint3 dispatch_id : SV_DispatchThreadID) {
     RaySurfaceHits[index] = hit;
     if (hit.identity.w == TRACE_SCREEN) {
         RaySurfaceHits[index] = hit;
-        RayRadiance[index] = float4(TraceDirectRadiance.Load(int3(UnpackPixel(hit.meta.x), 0)).rgb, 1.0f);
+        RayRadiance[index] = float4(ReflectedDirectAtPixel(UnpackPixel(hit.meta.x)), 1.0f);
         return;
     }
     uint out_index;
