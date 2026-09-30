@@ -1106,7 +1106,7 @@ SurfaceHit TraceUnifiedRay(TraceRay ray, bool allow_screen) {
 }
 
 bool TraceUnifiedOcclusion(TraceRay ray) {
-    SurfaceHit hit = TraceUnifiedRay(ray, true);
+    SurfaceHit hit = TraceUnifiedRay(ray, false);
     return hit.identity.w != TRACE_MISS && hit.position_distance.w < ray.direction_tmax.w;
 }
 
@@ -1176,7 +1176,7 @@ float3 EvaluateEmissiveSample(float3 surface_position, float3 surface_normal, ui
     float distance = sqrt(distance_sq);
     float3 L = to_light / distance;
     float cos_surface = saturate(dot(surface_normal, L));
-    float cos_light = saturate(dot(light_normal, -L));
+    float cos_light = saturate(abs(dot(light_normal, -L)));
     if (cos_surface <= 0.0f || cos_light <= 0.0f) return 0.0f;
     float bias = max(Radiance.trace_params.y, 1.0e-3f);
     TraceRay shadow = MakeTraceRay(surface_position + surface_normal * bias, L, bias, max(distance - bias * 2.0f, bias), TRACE_RAY_SHADOW, 0u, source_pixel, source_object_id);
