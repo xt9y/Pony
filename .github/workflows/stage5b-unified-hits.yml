@@ -1,0 +1,113 @@
+name: stage5b unified surface hits
+
+on:
+  push:
+    branches: [radiance]
+
+permissions:
+  contents: write
+
+jobs:
+  stage5b:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: radiance
+          fetch-depth: 2
+
+      - name: RED - confirm dual shading and coarse SDF hit path
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'float3 radiance = ReflectedDirectAtPixel(hit.hit_pixel);' shader.hlsl
+          grep -Fq 'float3 local_normal = LocalSDFNormal(model, lp);' shader.hlsl
+          ! grep -Fq 'bool RefineLocalSDFSurface(' shader.hlsl
+          echo 'RED confirmed: visible hits and SDF hits use different shading/geometry paths'
+
+      - name: Apply unified surface-hit implementation
+        run: python3 .github/stage5b_unified_hits.py
+
+      - name: GREEN - verify canonical shading and triangle refinement
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'bool RefineLocalSDFSurface(' shader.hlsl
+          grep -Fq 'bool IntersectSceneTriangle(' shader.hlsl
+          grep -Fq 'float3 SceneTriangleFacingNormal(' shader.hlsl
+          grep -Fq 'SurfaceHit surface = TraceScreenSurface(ray);' shader.hlsl
+          grep -Fq 'float3 radiance = SurfaceReflectedRadiance(surface);' shader.hlsl
+          grep -Fq 'if (RefineLocalSDFSurface(model, ray, lp, t, epsilon, direction_scale, limit, refined))' shader.hlsl
+          grep -Fq 'float3 normal = SceneTriangleFacingNormal(primitive_id, view);' shader.hlsl
+          ! grep -Fq 'float3 radiance = ReflectedDirectAtPixel(hit.hit_pixel);' shader.hlsl
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          s = Path('shader.hlsl').read_text()
+
+          screen = re.search(r'void CS_ScreenTrace\([^)]*\) \{(.*?)\n\}', s, re.S)
+          assert screen, 'CS_ScreenTrace missing'
+          body = screen.group(1)
+          assert 'TraceScreenSurface(ray)' in body
+          assert 'SurfaceReflectedRadiance(surface)' in body
+          assert 'ReflectedDirectAtPixel' not in body
+
+          sdf = re.search(r'bool TraceLocalSDFModel\([^)]*\) \{(.*?)\n\}', s, re.S)
+          assert sdf, 'TraceLocalSDFModel missing'
+          body = sdf.group(1)
+          assert 'RefineLocalSDFSurface' in body
+          assert 'LocalSDFNormal' not in body
+          assert 'SurfaceFromTriangle(surface_id, world_position, world_normal' not in body
+
+          trace_screen = re.search(r'SurfaceHit TraceScreenSurface\([^)]*\) \{(.*?)\n\}', s, re.S)
+          assert trace_screen, 'TraceScreenSurface missing'
+          body = trace_screen.group(1)
+          assert 'TracePrimitiveId.Load' in body
+          assert 'IntersectSceneTriangle' in body
+          assert 'SurfaceFromTriangle' in body
+          assert 'SceneObjects[object_index].meta.x' in body
+
+          direct = re.search(r'void CS_RadianceDirect\([^)]*\) \{(.*?)\n\}', s, re.S)
+          assert direct, 'CS_RadianceDirect missing'
+          assert 'SceneTriangleFacingNormal(primitive_id, view)' in direct.group(1)
+          print('canonical screen/SDF surface path verified')
+          PY
+          git diff --check
+
+      - name: Compile affected shader entry points
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 \
+            -o /tmp/slang.tar.gz \
+            https://github.com/shader-slang/slang/releases/download/v2026.18.3/slang-2026.18.3-linux-x86_64-glibc-2.27.tar.gz
+          mkdir -p /tmp/slang
+          tar -xzf /tmp/slang.tar.gz -C /tmp/slang
+          SLANGC="$(find /tmp/slang -type f -name slangc | head -n1)"
+          test -n "$SLANGC"
+          chmod +x "$SLANGC"
+          export LD_LIBRARY_PATH="$(dirname "$SLANGC")/../lib:${LD_LIBRARY_PATH:-}"
+          compile() {
+            entry="$1"; stage="$2"; out="/tmp/${entry}.spv"
+            "$SLANGC" shader.hlsl -entry "$entry" -stage "$stage" -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "$out"
+            test -s "$out"
+          }
+          compile VS_GBuffer vertex
+          compile PS_GBufferFull fragment
+          compile CS_RadianceDirect compute
+          compile CS_ScreenTrace compute
+          compile CS_SDFTrace compute
+          compile CS_ScreenProbes compute
+          compile PS_Present fragment
+
+      - name: Commit Stage 5b
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add shader.hlsl
+          git diff --cached --quiet && exit 0
+          git commit -m 's5b unified surface hits'
+          git push origin HEAD:radiance
