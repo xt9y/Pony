@@ -79,10 +79,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libsdl3-dev >/dev/null 2>&1 || true
-          if [ -d /usr/include/SDL3 ]; then SDL_FLAGS='-I/usr/include'; else SDL_FLAGS="$(pkg-config --cflags sdl3 2>/dev/null || true)"; fi
+          git clone --depth 1 https://github.com/libsdl-org/SDL.git /tmp/SDL >/dev/null 2>&1
           git clone --depth 1 https://github.com/NVIDIAGameWorks/NRI.git /tmp/NRI >/dev/null 2>&1
+          SDL_FLAGS='-I/tmp/SDL/include'
           NRI_FLAGS='-I/tmp/NRI/Include -I/tmp/NRI/Include/Extensions'
           for f in glb.c gltf.c gpu.c main.c render.c scene.c sdf.c; do
             echo "syntax $f"
