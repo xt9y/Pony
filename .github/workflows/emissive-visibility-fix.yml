@@ -1,0 +1,51 @@
+name: emissive visibility fix
+
+on:
+  push:
+    branches: [radiance]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: radiance
+          fetch-depth: 2
+
+      - name: RED - confirm camera-dependent emissive path
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'SurfaceHit hit = TraceUnifiedRay(ray, true);' shader.hlsl
+          grep -Fq 'float cos_light = saturate(dot(light_normal, -L));' shader.hlsl
+          echo 'RED confirmed: emissive visibility still uses screen tracing and one-sided emission'
+
+      - name: Apply fix
+        run: python3 .github/emissive_visibility_fix.py
+
+      - name: GREEN - verify emissive path is world-space and two-sided
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'SurfaceHit hit = TraceUnifiedRay(ray, false);' shader.hlsl
+          grep -Fq 'float cos_light = saturate(abs(dot(light_normal, -L)));' shader.hlsl
+          ! grep -Fq 'SurfaceHit hit = TraceUnifiedRay(ray, true);' shader.hlsl
+          ! grep -Fq 'float cos_light = saturate(dot(light_normal, -L));' shader.hlsl
+          git diff --check
+          git diff --exit-code -- game.h render.c sdf.c build.c
+
+      - name: Commit fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add shader.hlsl
+          git diff --cached --quiet && exit 0
+          git commit -m 's4 emissive world visibility'
+          git push origin HEAD:radiance
