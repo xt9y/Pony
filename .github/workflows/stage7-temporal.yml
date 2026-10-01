@@ -18,14 +18,48 @@ jobs:
           fetch-depth: 2
 
       - name: Apply chapter 7
+        shell: bash
         run: |
-          python3 .github/stage7_apply.py
-          python3 .github/stage7_fix.py
+          set -euo pipefail
+          if ! grep -Fq 'NriPipeline *wavefront_temporal_pipeline;' game.h; then
+            python3 .github/stage7_apply.py
+            python3 .github/stage7_fix.py
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('shader.hlsl')
+          s = p.read_text()
+          dead_meta = '''    float4 meta = ProbeHistoryMeta.Load(int3(pp, 0));\n    ProbeCurrentMeta[probe] = float4(meta.x * Radiance.temporal_params.y, meta.y, meta.z + 1.0f, meta.w);\n'''
+          if dead_meta in s:
+              s = s.replace(dead_meta, '', 1)
+          p.write_text(s)
+
+          p = Path('render.c')
+          r = p.read_text()
+          if 'NriTextureBarrierDesc emissive_sync' not in r:
+              old = '''    if (!enabled) return;\n\n    bind_wavefront(renderer, command_buffer, renderer->emissive_pipeline);'''
+              new = '''    if (!enabled) return;\n\n    const NriAccessLayoutStage compute_storage = {\n        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,\n        .layout = NriLayout_SHADER_RESOURCE_STORAGE,\n        .stages = NriStageBits_COMPUTE_SHADER\n    };\n    const NriTextureBarrierDesc emissive_sync = {\n        .texture = renderer->screen_probes.texture,\n        .before = renderer->screen_probes.state,\n        .after = compute_storage,\n        .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR\n    };\n    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = &emissive_sync, .textureNum = 1});\n    renderer->screen_probes.state = compute_storage;\n\n    bind_wavefront(renderer, command_buffer, renderer->emissive_pipeline);'''
+              if r.count(old) != 1:
+                  raise SystemExit(f'emissive sync insertion point count={r.count(old)}')
+              r = r.replace(old, new, 1)
+
+          if 'NriTextureBarrierDesc commit_inputs[]' not in r:
+              old = '''    const NriAccessLayoutStage present_read = {\n        .access = NriAccessBits_SHADER_RESOURCE,\n        .layout = NriLayout_SHADER_RESOURCE,\n        .stages = NriStageBits_FRAGMENT_SHADER\n    };\n\n    NriTextureBarrierDesc to_write[] = {'''
+              new = '''    const NriAccessLayoutStage present_read = {\n        .access = NriAccessBits_SHADER_RESOURCE,\n        .layout = NriLayout_SHADER_RESOURCE,\n        .stages = NriStageBits_FRAGMENT_SHADER\n    };\n\n    NriTextureBarrierDesc commit_inputs[] = {\n        {.texture = p->current_meta.texture, .before = p->current_meta.state, .after = compute_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},\n        {.texture = renderer->screen_probes.texture, .before = renderer->screen_probes.state, .after = compute_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR}\n    };\n    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = commit_inputs, .textureNum = 2});\n    p->current_meta.state = compute_storage;\n    renderer->screen_probes.state = compute_storage;\n\n    NriTextureBarrierDesc to_write[] = {'''
+              if r.count(old) != 1:
+                  raise SystemExit(f'history input sync insertion point count={r.count(old)}')
+              r = r.replace(old, new, 1)
+          p.write_text(r)
+          PY
 
       - name: GREEN - architecture test
         run: |
           set -euo pipefail
           python3 .github/stage7_temporal_test.py
+          grep -Fq 'NriTextureBarrierDesc emissive_sync' render.c
+          grep -Fq 'NriTextureBarrierDesc commit_inputs[]' render.c
+          ! grep -Fq 'ProbeCurrentMeta[probe] = float4(meta.x * Radiance.temporal_params.y' shader.hlsl
           git diff --check
 
       - name: Compile active shader entries
@@ -83,5 +117,5 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add game.h render.c shader.hlsl build.c
           git diff --cached --quiet && exit 0
-          git commit -m 's7 temporal spatial probe reuse'
+          git commit -m 's7 synchronize probe history'
           git push origin HEAD:radiance
