@@ -474,7 +474,7 @@ static bool create_wavefront(RENDERER *renderer, uint32_t probe_capacity) {
         !create_storage_uav(renderer, 4u * sizeof(uint32_t), sizeof(uint32_t), 0, &w->counters, &w->counters_uav) ||
         !create_storage_uav(renderer, 3u * sizeof(uint32_t), sizeof(uint32_t), NriBufferUsageBits_ARGUMENT, &w->dispatch_args, &w->dispatch_args_uav) ||
         !create_storage_uav(renderer, (uint64_t)probe_capacity * sizeof(RAY_BUDGET), sizeof(RAY_BUDGET), 0, &w->budgets, &w->budgets_uav) ||
-        !create_storage_uav(renderer, (uint64_t)probe_capacity * sizeof(uint32_t), sizeof(uint32_t), 0, &w->update_list, &w->update_list_uav) ||
+        !create_storage_uav(renderer, (uint64_t)(probe_capacity > WORLD_PROBE_UPDATES_PER_FRAME ? probe_capacity : WORLD_PROBE_UPDATES_PER_FRAME) * sizeof(uint32_t), sizeof(uint32_t), 0, &w->update_list, &w->update_list_uav) ||
         !create_storage_uav(renderer, (uint64_t)w->ray_capacity * 4u * sizeof(float), 4u * sizeof(float), 0, &w->radiance, &w->radiance_uav) ||
         !create_storage_uav(renderer, (uint64_t)w->ray_capacity * sizeof(uint32_t), sizeof(uint32_t), 0, &w->flags, &w->flags_uav)) {
         destroy_wavefront(renderer);
@@ -485,6 +485,9 @@ static bool create_wavefront(RENDERER *renderer, uint32_t probe_capacity) {
 
 static void destroy_world_radiance_resources(RENDERER *renderer) {
     RADIANCE_WORLD_RESOURCES *w = &renderer->world_radiance;
+    free(w->cpu_probes);
+    free(w->cpu_keys);
+    free(w->cpu_update_list);
     destroy_storage_uav(renderer, &w->probes, &w->probes_uav);
     destroy_storage_uav(renderer, &w->radiance, &w->radiance_uav);
     destroy_storage_uav(renderer, &w->keys, &w->keys_uav);
@@ -495,15 +498,81 @@ static void destroy_world_radiance_resources(RENDERER *renderer) {
 static bool create_world_radiance_resources(RENDERER *renderer) {
     destroy_world_radiance_resources(renderer);
     RADIANCE_WORLD_RESOURCES *w = &renderer->world_radiance;
-    if (!create_storage_uav(renderer, sizeof(WORLD_PROBE_STATE), sizeof(WORLD_PROBE_STATE), 0, &w->probes, &w->probes_uav) ||
-        !create_storage_uav(renderer, 4u * sizeof(float), 4u * sizeof(float), 0, &w->radiance, &w->radiance_uav) ||
-        !create_storage_uav(renderer, sizeof(uint32_t), sizeof(uint32_t), 0, &w->keys, &w->keys_uav) ||
-        !create_storage_uav(renderer, sizeof(uint32_t), sizeof(uint32_t), 0, &w->invalidation_queue, &w->invalidation_queue_uav)) {
+    w->probe_capacity = WORLD_PROBE_CAPACITY;
+    w->hash_capacity = WORLD_PROBE_HASH_CAPACITY;
+    w->direction_count = WORLD_PROBE_DIRECTION_COUNT;
+    w->bank_count = WORLD_PROBE_BANK_COUNT;
+    w->cpu_probes = calloc(WORLD_PROBE_CAPACITY, sizeof(*w->cpu_probes));
+    w->cpu_keys = calloc(WORLD_PROBE_HASH_CAPACITY, sizeof(*w->cpu_keys));
+    w->cpu_update_list = calloc(WORLD_PROBE_UPDATES_PER_FRAME, sizeof(*w->cpu_update_list));
+    if (!w->cpu_probes || !w->cpu_keys || !w->cpu_update_list ||
+        !create_storage_uav(renderer, (uint64_t)WORLD_PROBE_CAPACITY * sizeof(WORLD_PROBE_STATE), sizeof(WORLD_PROBE_STATE), 0, &w->probes, &w->probes_uav) ||
+        !create_storage_uav(renderer, (uint64_t)WORLD_PROBE_CAPACITY * WORLD_PROBE_DIRECTION_COUNT * WORLD_PROBE_BANK_COUNT * 4u * sizeof(float), 4u * sizeof(float), 0, &w->radiance, &w->radiance_uav) ||
+        !create_storage_uav(renderer, (uint64_t)WORLD_PROBE_HASH_CAPACITY * sizeof(uint32_t), sizeof(uint32_t), 0, &w->keys, &w->keys_uav) ||
+        !create_storage_uav(renderer, (uint64_t)WORLD_PROBE_CAPACITY * sizeof(uint32_t), sizeof(uint32_t), 0, &w->invalidation_queue, &w->invalidation_queue_uav)) {
         destroy_world_radiance_resources(renderer);
         return false;
     }
     return true;
 }
+
+static uint32_t radiance_hash_bytes(uint32_t hash, const void *data, size_t size) {
+    const uint8_t *bytes = data;
+    for (size_t i = 0u; i < size; ++i) {
+        hash ^= bytes[i];
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static uint32_t compute_radiance_revision(const RENDERER *renderer) {
+    uint32_t hash = 2166136261u;
+    hash = radiance_hash_bytes(hash, renderer->cpu_lights, (size_t)renderer->light_count * sizeof(*renderer->cpu_lights));
+    for (uint32_t i = 0u; i < renderer->radiance_scene.emissive_triangle_count; ++i) {
+        const GPU_EMISSIVE_TRIANGLE *e = &renderer->radiance_scene.cpu_emissive_triangles[i];
+        hash = radiance_hash_bytes(hash, e->meta, sizeof(e->meta));
+        hash = radiance_hash_bytes(hash, e->radiance_area, sizeof(e->radiance_area));
+    }
+    return hash ? hash : 1u;
+}
+
+static void refresh_radiance_revision(RENDERER *renderer) {
+    const uint32_t revision = compute_radiance_revision(renderer);
+    if (revision == renderer->radiance_revision) return;
+    renderer->radiance_revision = revision;
+    renderer->radiance_constants.feature_flags[1] = revision;
+    renderer->world_radiance.update_cursor = 0u;
+}
+
+static bool build_world_radiance_scene(RENDERER *renderer) {
+    RADIANCE_WORLD_RESOURCES *w = &renderer->world_radiance;
+    if (!w->cpu_probes || !w->cpu_keys || !w->probes || !w->radiance || !w->keys) return false;
+    memset(w->cpu_probes, 0, (size_t)WORLD_PROBE_CAPACITY * sizeof(*w->cpu_probes));
+    memset(w->cpu_keys, 0, (size_t)WORLD_PROBE_HASH_CAPACITY * sizeof(*w->cpu_keys));
+    w->probe_count = 0u;
+    if (!sdf_build_world_probes(&renderer->global_sdf, &renderer->radiance_scene, renderer->cpu_objects, renderer->gpu_object_count,
+                                w->cpu_probes, WORLD_PROBE_CAPACITY, &w->probe_count, w->cpu_keys, WORLD_PROBE_HASH_CAPACITY,
+                                WORLD_PROBE_SPACING, WORLD_PROBE_RADIUS, WORLD_PROBE_CLEARANCE, WORLD_PROBE_MIN_CLEARANCE))
+        return false;
+    w->update_cursor = 0u;
+    w->update_count = 0u;
+    renderer->radiance_revision = compute_radiance_revision(renderer);
+    const NriAccessStage storage = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER};
+    const uint64_t radiance_values = (uint64_t)WORLD_PROBE_CAPACITY * WORLD_PROBE_DIRECTION_COUNT * WORLD_PROBE_BANK_COUNT;
+    float *zero_radiance = calloc((size_t)radiance_values, sizeof(float[4]));
+    uint32_t *zero_invalidations = calloc(WORLD_PROBE_CAPACITY, sizeof(uint32_t));
+    if (!zero_radiance || !zero_invalidations) { free(zero_radiance); free(zero_invalidations); return false; }
+    bool ok = gpu_upload_buffer(renderer->gpu, w->probes, w->cpu_probes, storage) &&
+              gpu_upload_buffer(renderer->gpu, w->keys, w->cpu_keys, storage) &&
+              gpu_upload_buffer(renderer->gpu, w->radiance, zero_radiance, storage) &&
+              gpu_upload_buffer(renderer->gpu, w->invalidation_queue, zero_invalidations, storage);
+    free(zero_radiance); free(zero_invalidations);
+    if (!ok) return false;
+    w->state = storage;
+    return true;
+}
+
+
 
 static void destroy_radiance_probes(RENDERER *renderer) {
     RADIANCE_PROBES *p = &renderer->probes;
@@ -2058,13 +2127,21 @@ static bool update_radiance_constants(RENDERER *renderer) {
     constants.sdf_counts[2] = renderer->global_sdf.valid ? renderer->global_sdf.clip_count : 0u;
     constants.sdf_counts[3] = renderer->light_count;
     constants.cache_counts[0] = renderer->radiance_surface_cache.capacity;
-    constants.cache_counts[1] = 0u;
-    constants.cache_counts[2] = 0u;
-    constants.cache_counts[3] = 0u;
+    constants.cache_counts[1] = renderer->world_radiance.probe_count;
+    constants.cache_counts[2] = WORLD_PROBE_HASH_CAPACITY;
+    constants.cache_counts[3] = WORLD_PROBE_CAPACITY;
     constants.probe_config[0] = SCREEN_PROBE_TILE_SIZE;
     constants.probe_config[1] = SCREEN_PROBE_DIRECTION_SIZE;
     constants.probe_config[2] = SCREEN_PROBE_DIRECTION_COUNT;
     constants.probe_config[3] = 1u;
+    constants.world_probe_config[0] = WORLD_PROBE_DIRECTION_SIZE;
+    constants.world_probe_config[1] = WORLD_PROBE_UPDATES_PER_FRAME;
+    constants.world_probe_config[2] = WORLD_PROBE_BANK_COUNT;
+    constants.world_probe_config[3] = 0u;
+    constants.world_probe_params[0] = WORLD_PROBE_SPACING;
+    constants.world_probe_params[1] = WORLD_PROBE_BLEND;
+    constants.world_probe_params[2] = WORLD_PROBE_RADIUS;
+    constants.world_probe_params[3] = WORLD_PROBE_CLEARANCE;
     constants.trace_params[0] = 200.0f;
     constants.trace_params[1] = 0.005f;
     constants.trace_params[2] = 0.05f;
@@ -2082,7 +2159,8 @@ static bool update_radiance_constants(RENDERER *renderer) {
     apply_dynamic_grid_constants(renderer, &constants);
     constants.feature_flags[0] &= ~RADIANCE_FEATURE_GLOBAL_SDF;
     if (renderer->global_sdf.valid && renderer->global_sdf.clip_count) constants.feature_flags[0] |= RADIANCE_FEATURE_GLOBAL_SDF;
-    constants.feature_flags[1] = 1u;
+    if (renderer->world_radiance.probe_count) constants.feature_flags[0] |= RADIANCE_FEATURE_WORLD_CACHE | RADIANCE_FEATURE_MULTIBOUNCE;
+    constants.feature_flags[1] = renderer->radiance_revision ? renderer->radiance_revision : 1u;
     constants.feature_flags[2] = renderer->wavefront.ray_capacity;
     constants.feature_flags[3] = 0u;
     constants.reserved[0] = RADIANCE_DEBUG_FINAL_GI;
@@ -3303,12 +3381,13 @@ static void barrier_wavefront_buffers(RENDERER *renderer, NriCommandBuffer *comm
         {.buffer = w->counters, .before = w->state, .after = state},
         {.buffer = w->dispatch_args, .before = w->state, .after = state},
         {.buffer = w->budgets, .before = w->state, .after = state},
-        {.buffer = w->update_list, .before = w->state, .after = state},
+        {.buffer = w->update_list, .before = w->update_list_state, .after = state},
         {.buffer = w->radiance, .before = w->state, .after = state},
         {.buffer = w->flags, .before = w->state, .after = state}
     };
     renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.buffers = barriers, .bufferNum = 9});
     w->state = state;
+    w->update_list_state = state;
 }
 
 static void build_wavefront_screen_probes(RENDERER *renderer, NriCommandBuffer *command_buffer) {
@@ -3947,7 +4026,7 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
 
     if (!create_scene_resources(renderer, scene)) return false;
     renderer->scene = scene;
-    if (!create_dynamic_grid(renderer) || !rebuild_dynamic_grid(renderer) || !create_global_sdf_resources(renderer) || !update_radiance_constants(renderer)) {
+    if (!create_dynamic_grid(renderer) || !rebuild_dynamic_grid(renderer) || !create_global_sdf_resources(renderer) || !build_world_radiance_scene(renderer) || !update_radiance_constants(renderer)) {
         renderer->scene = NULL;
         destroy_scene_resources(renderer);
         return false;
@@ -4072,6 +4151,7 @@ bool renderer_frame(RENDERER *renderer) {
     if (!renderer || !renderer->gpu || !renderer->gpu->device || !renderer->scene) return false;
 
     if (!update_scene_objects(renderer) || !refresh_dynamic_grid(renderer) || !refresh_emissive_sampling(renderer)) return false;
+    refresh_radiance_revision(renderer);
     update_orbit_camera(renderer);
 
     NriCommandBuffer *command_buffer = NULL;
