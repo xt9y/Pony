@@ -3285,6 +3285,20 @@ static void build_emissive_gather(RENDERER *renderer, NriCommandBuffer *command_
                          (renderer->radiance_constants.feature_flags[0] & RADIANCE_FEATURE_EMISSIVE);
     if (!enabled) return;
 
+    const NriAccessLayoutStage compute_storage = {
+        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
+        .layout = NriLayout_SHADER_RESOURCE_STORAGE,
+        .stages = NriStageBits_COMPUTE_SHADER
+    };
+    const NriTextureBarrierDesc emissive_sync = {
+        .texture = renderer->screen_probes.texture,
+        .before = renderer->screen_probes.state,
+        .after = compute_storage,
+        .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR
+    };
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = &emissive_sync, .textureNum = 1});
+    renderer->screen_probes.state = compute_storage;
+
     bind_wavefront(renderer, command_buffer, renderer->emissive_pipeline);
     renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){
         .workGroupNumX = (renderer->screen_probes.width + 7u) / 8u,
@@ -3310,6 +3324,14 @@ static void commit_probe_history(RENDERER *renderer, NriCommandBuffer *command_b
         .layout = NriLayout_SHADER_RESOURCE,
         .stages = NriStageBits_FRAGMENT_SHADER
     };
+
+    NriTextureBarrierDesc commit_inputs[] = {
+        {.texture = p->current_meta.texture, .before = p->current_meta.state, .after = compute_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = renderer->screen_probes.texture, .before = renderer->screen_probes.state, .after = compute_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR}
+    };
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = commit_inputs, .textureNum = 2});
+    p->current_meta.state = compute_storage;
+    renderer->screen_probes.state = compute_storage;
 
     NriTextureBarrierDesc to_write[] = {
         {.texture = p->history_meta.texture, .before = p->history_meta.state, .after = compute_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},

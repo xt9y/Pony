@@ -2180,8 +2180,6 @@ void CS_ReprojectScreenProbes(uint3 dispatch_id : SV_DispatchThreadID) {
         }
     }
 
-    float4 meta = ProbeHistoryMeta.Load(int3(pp, 0));
-    ProbeCurrentMeta[probe] = float4(meta.x * Radiance.temporal_params.y, meta.y, meta.z + 1.0f, meta.w);
 }
 
 [numthreads(8, 8, 1)]
