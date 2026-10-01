@@ -2423,6 +2423,55 @@ void CS_CommitScreenProbeHistory(uint3 dispatch_id : SV_DispatchThreadID) {
 // -----------------------------------------------------------------------------
 // World radiance-cache update and iterative multi-bounce.
 // -----------------------------------------------------------------------------
+uint WorldProbeFrameAge(WorldProbeState state) {
+    return (Pass.dispatch.x - state.state.x) & 0x00ffffffu;
+}
+
+uint WorldProbePriorityClass(WorldProbeState state, uint sweep_frames) {
+    if ((state.state.w & 1u) == 0u || state.state.y != Radiance.feature_flags.y) return 3u;
+    if ((state.state.w & 2u) != 0u) return 2u;
+    uint age_frames = WorldProbeFrameAge(state);
+    return age_frames >= 2u * sweep_frames ? 1u : 0u;
+}
+
+bool WorldProbeMoreUrgent(WorldProbeState candidate, uint candidate_index, WorldProbeState best, uint best_index, uint sweep_frames) {
+    uint candidate_class = WorldProbePriorityClass(candidate, sweep_frames);
+    uint best_class = WorldProbePriorityClass(best, sweep_frames);
+    if (candidate_class != best_class) return candidate_class > best_class;
+    if (candidate.statistics.y != best.statistics.y) return candidate.statistics.y > best.statistics.y;
+    if (candidate.statistics.x != best.statistics.x) return candidate.statistics.x < best.statistics.x;
+    uint candidate_age = WorldProbeFrameAge(candidate);
+    uint best_age = WorldProbeFrameAge(best);
+    if (candidate_age != best_age) return candidate_age > best_age;
+    return candidate_index < best_index;
+}
+
+[numthreads(64, 1, 1)]
+void CS_SelectWorldProbeUpdates(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint active_count = Radiance.cache_counts.y;
+    uint lane = dispatch_id.x;
+    if (!FeatureEnabled(RADIANCE_FEATURE_WORLD_CACHE) || active_count == 0u || lane >= 64u) return;
+
+    uint base = Pass.dispatch.x % active_count;
+    uint sweep_frames = max((active_count + 63u) / 64u, 1u);
+    uint best_index = INVALID_INDEX;
+    WorldProbeState best_state = (WorldProbeState)0;
+
+    for (uint logical_offset = lane; logical_offset < active_count; logical_offset += 64u) {
+        uint probe_index = (base + logical_offset) % active_count;
+        WorldProbeState state = WorldProbes[probe_index];
+        if (best_index == INVALID_INDEX || WorldProbeMoreUrgent(state, probe_index, best_state, best_index, sweep_frames)) {
+            best_index = probe_index;
+            best_state = state;
+        }
+    }
+
+    if (best_index == INVALID_INDEX) return;
+    uint slot;
+    InterlockedAdd(RayCounters[3], 1u, slot);
+    if (slot < Radiance.world_probe_config.y) RadianceUpdateList[slot] = best_index;
+}
+
 [numthreads(64, 1, 1)]
 void CS_UpdateWorldRadianceCache(uint3 dispatch_id : SV_DispatchThreadID) {
     uint update_index = dispatch_id.x;
@@ -2435,6 +2484,7 @@ void CS_UpdateWorldRadianceCache(uint3 dispatch_id : SV_DispatchThreadID) {
     uint new_bank = old_bank ^ 1u;
     bool established = (state.state.w & 1u) != 0u && state.state.y == Radiance.feature_flags.y;
     uint s = max(Radiance.world_probe_config.x, 1u);
+    float residual_sum = 0.0f;
     for (uint d = 0u; d < WorldProbeDirectionCount(); ++d) {
         uint2 texel = uint2(d % s, d / s);
         float3 direction = OctDecode((float2(texel) + 0.5f) / (float)s);
@@ -2455,9 +2505,12 @@ void CS_UpdateWorldRadianceCache(uint3 dispatch_id : SV_DispatchThreadID) {
         uint old_address = WorldProbeRadianceIndex(probe_index, texel, old_bank);
         uint new_address = WorldProbeRadianceIndex(probe_index, texel, new_bank);
         float3 old = WorldProbeRadiance[old_address].rgb;
+        residual_sum += length(sample - old) / (1.0f + length(sample));
         float blend = established ? saturate(Radiance.world_probe_params.y) : 1.0f;
         WorldProbeRadiance[new_address] = float4(lerp(old, sample, blend), 1.0f);
     }
+    float measured_residual = residual_sum / max((float)WorldProbeDirectionCount(), 1.0f);
+    state.statistics.y = established ? lerp(state.statistics.y, measured_residual, 0.25f) : measured_residual;
     state.statistics.x = established ? saturate(state.statistics.x + 0.1f) : 1.0f;
     state.statistics.z = established ? state.statistics.z + 1.0f : 1.0f;
     state.state.x = Pass.dispatch.x;

@@ -80,6 +80,7 @@ static void compile_shaders(void) {
         {"CS_ReprojectScreenProbes", "compute", "radiance_probe_temporal.cs.spv", NULL},
         {"CS_SpatialReuseScreenProbes", "compute", "radiance_probe_spatial.cs.spv", NULL},
         {"CS_CommitScreenProbeHistory", "compute", "radiance_probe_history.cs.spv", NULL},
+        {"CS_SelectWorldProbeUpdates", "compute", "radiance_world_select.cs.spv", NULL},
         {"CS_UpdateWorldRadianceCache", "compute", "radiance_world_cache.cs.spv", NULL},
         {"CS_InvalidateRadiance", "compute", "radiance_invalidate.cs.spv", NULL},
         {"CS_ReflectionTrace", "compute", "radiance_reflections.cs.spv", NULL}
