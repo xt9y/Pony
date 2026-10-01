@@ -49,7 +49,7 @@ static float point_triangle_distance_sq(VEC3 p, VEC3 a, VEC3 b, VEC3 c) {
     float d5 = vdot(ab, cp), d6 = vdot(ac, cp);
     if (d6 >= 0.0f && d5 <= d6) return vlen2(cp);
     float vb = d5 * d2 - d1 * d6;
-    if (vb <= 0.0f && d2 >= 0.0f && d6 >= 0.0f) {
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
         float w = d2 / (d2 - d6);
         return vlen2(vsub(p, vadd(a, vscale(ac, w))));
     }
