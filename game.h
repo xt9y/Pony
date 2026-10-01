@@ -443,6 +443,22 @@ typedef struct WORLD_PROBE_STATE {
     uint32_t state[4];
 } WORLD_PROBE_STATE;
 
+bool sdf_build_world_probes(
+    const GLOBAL_SDF_DATA *global_sdf,
+    const RADIANCE_SCENE_DATA *radiance_scene,
+    const GPU_OBJECT *objects,
+    uint32_t object_count,
+    WORLD_PROBE_STATE *out_probes,
+    uint32_t probe_capacity,
+    uint32_t *out_probe_count,
+    uint32_t *out_keys,
+    uint32_t key_capacity,
+    float spacing,
+    float radius,
+    float clearance,
+    float min_clearance
+);
+
 typedef struct RAY_BUDGET {
     uint32_t counts[4];
     float priority[4];
@@ -551,6 +567,18 @@ typedef struct CAMERA {
 #define RADIANCE_MAX_SCREEN_PROBE_DIRECTION_SIZE 8u
 #define RADIANCE_MAX_SCREEN_PROBE_RAYS 32u
 #define RADIANCE_MAX_GLOBAL_SDF_CLIPMAPS 8u
+#define WORLD_PROBE_CAPACITY 8192u
+#define WORLD_PROBE_HASH_CAPACITY 16384u
+#define WORLD_PROBE_DIRECTION_SIZE 4u
+#define WORLD_PROBE_DIRECTION_COUNT 16u
+#define WORLD_PROBE_BANK_COUNT 2u
+#define WORLD_PROBE_UPDATES_PER_FRAME 64u
+#define WORLD_PROBE_HASH_PROBE_LIMIT 8u
+#define WORLD_PROBE_SPACING 0.75f
+#define WORLD_PROBE_RADIUS 1.125f
+#define WORLD_PROBE_CLEARANCE 0.075f
+#define WORLD_PROBE_MIN_CLEARANCE 0.0375f
+#define WORLD_PROBE_BLEND 0.20f
 #define RADIANCE_INVALID_INDEX UINT32_MAX
 
 typedef struct HZB {
@@ -644,11 +672,16 @@ typedef struct RADIANCE_WAVEFRONT {
     NriDescriptor *flags_uav;
 
     NriAccessStage state;
+    NriAccessStage update_list_state;
     uint32_t ray_capacity;
     uint32_t probe_capacity;
 } RADIANCE_WAVEFRONT;
 
 typedef struct RADIANCE_WORLD_RESOURCES {
+    WORLD_PROBE_STATE *cpu_probes;
+    uint32_t *cpu_keys;
+    uint32_t *cpu_update_list;
+
     NriBuffer *probes;
     NriBuffer *radiance;
     NriBuffer *keys;
@@ -660,6 +693,13 @@ typedef struct RADIANCE_WORLD_RESOURCES {
     NriDescriptor *invalidation_queue_uav;
 
     NriAccessStage state;
+    uint32_t probe_count;
+    uint32_t probe_capacity;
+    uint32_t hash_capacity;
+    uint32_t direction_count;
+    uint32_t bank_count;
+    uint32_t update_count;
+    uint32_t update_cursor;
 } RADIANCE_WORLD_RESOURCES;
 
 typedef struct RENDER_TEXTURE {
@@ -761,9 +801,11 @@ typedef struct RENDERER {
     NriPipeline *wavefront_resolve_pipeline;
     NriPipeline *emissive_pipeline;
     NriPipeline *wavefront_history_pipeline;
+    NriPipeline *world_radiance_pipeline;
 
     uint32_t width;
     uint32_t height;
+    uint32_t radiance_revision;
     bool has_previous_frame;
     bool probe_history_valid;
 
