@@ -19,10 +19,11 @@
 - Direction map is exactly 4x4 = 16 directions; radiance uses exactly 2 banks.
 - Placement spacing is 0.75 world units; influence radius is 1.125; placement offset is 0.075; minimum accepted clearance is 0.0375.
 - Fixed update budget is 64 probes/frame = at most 1024 primary world-probe rays/frame.
-- Established texels blend 20% new / 80% old; first updates never blend undefined history.
+- Established texels blend 20% new / 80% old; first/invalidated updates never blend undefined or obsolete history.
 - Same-frame update order may not expose newly written bank data as previous-iteration input.
 - Zero active probes must keep valid descriptors and disable both `WORLD_CACHE` and `MULTIBOUNCE`.
-- Camera motion never rebuilds, clears, or re-keys world probes.
+- Camera motion never rebuilds, clears, invalidates, or re-keys world probes.
+- `Pass.dispatch.x` is the actual frame stamp; `Radiance.feature_flags.y` remains the scene/lighting revision. Do not conflate them.
 - No recursive arbitrary-depth path tracing and no renderer-wide BRDF rewrite.
 - Keep repository output clean: no temporary Stage-10 workflow/helper files remain after verification.
 
@@ -30,9 +31,9 @@
 
 - Negative world coordinates: CPU and shader placement-cell hashing must use identical two's-complement `uint32_t` semantics and still find probes across the 3x3x3 neighborhood.
 - Thin/adjacent surfaces: placement clearance and surface-side filtering must prevent a probe across a wall from becoming the preferred diffuse source.
-- Hash collisions at high occupancy: insertion and lookup are both limited to 8 slots; omitted candidates must not leave unreachable active probes.
-- Empty/tiny scenes: zero probes must remain a valid renderer state; tiny valid static geometry must not produce NaN positions/radii.
-- Invalidation while banks alternate: dirty/confidence updates must not overwrite the active-bank bit or make same-frame reads order-dependent.
+- Hash/update capacities: 8-slot insertion/lookup and a screen-probe count smaller than 64 must never make world probes unreachable or overrun `RadianceUpdateList`.
+- Screen-space secondary hits: they currently bypass `SurfaceReflectedRadiance`; Stage 10 must add world indirect there without replacing the existing screen direct term.
+- Invalidation/bank timing: lighting revision changes and dirty state must not corrupt the active-bank bit, and same-frame stable reads require a true per-frame `Pass.dispatch.x`.
 
 ---
 
@@ -47,7 +48,7 @@
 - Produces:
   - fixed constants `WORLD_PROBE_CAPACITY`, `WORLD_PROBE_HASH_CAPACITY`, `WORLD_PROBE_DIRECTION_SIZE`, `WORLD_PROBE_DIRECTION_COUNT`, `WORLD_PROBE_BANK_COUNT`, `WORLD_PROBE_UPDATES_PER_FRAME`, `WORLD_PROBE_HASH_PROBE_LIMIT`, `WORLD_PROBE_SPACING`, `WORLD_PROBE_RADIUS`, `WORLD_PROBE_CLEARANCE`, `WORLD_PROBE_MIN_CLEARANCE`, `WORLD_PROBE_BLEND`;
   - expanded `RADIANCE_WORLD_RESOURCES` with `cpu_probes`, `cpu_keys`, `cpu_update_list`, `probe_count`, `probe_capacity`, `hash_capacity`, `direction_count`, `bank_count`, `update_count`, `update_cursor`, and existing GPU handles/descriptors/state;
-  - `NriPipeline *world_radiance_pipeline` in `RENDERER`;
+  - `uint32_t radiance_revision` and `NriPipeline *world_radiance_pipeline` in `RENDERER`;
   - public builder signature:
 
 ```c
@@ -73,8 +74,6 @@ bool sdf_build_world_probes(
 Create `tests/stage10_world_cache.c` with `_Static_assert`s for the exact Stage-10 capacities and a compile-time reference to `sdf_build_world_probes`. Assert `WORLD_PROBE_STATE` remains 64 bytes and `RADIANCE_CONSTANTS` remains 256 bytes.
 
 - [ ] **Step 2: Run the test to verify RED**
-
-Run:
 
 ```bash
 clang -std=c11 -fsyntax-only -I. -I/tmp/SDL/include -I/tmp/NRI/Include -I/tmp/NRI/Include/Extensions tests/stage10_world_cache.c
@@ -109,13 +108,13 @@ git commit -m "s10 world cache interfaces"
 
 - [ ] **Step 1: Extend the test with synthetic placement cases**
 
-Add test helpers that build a minimal synthetic `GLOBAL_SDF_DATA` with a fine/medium clipmap, canonical static triangles and object states. Assertions:
+Build a minimal synthetic fine/medium `GLOBAL_SDF_DATA`, canonical triangles and object states. Assert:
 
 ```text
 static geometry => probe_count > 0 and <= 8192
 dynamic-only anchors => probe_count == 0
 same unchanged input built twice => byte-identical probe sequence and key table
-every occupied key slot => decoded index < probe_count and state.identity.x matches the slot's searched key
+every occupied key slot => decoded index < probe_count and the referenced probe's identity.x matches its placement-cell key
 every probe => finite xyz, radius == 1.125, anchor owner is STATIC
 placement distance from static geometry >= 0.0375
 negative-coordinate fixture => deterministic non-zero keys and reachable probes
@@ -124,31 +123,27 @@ collision fixture => no active probe exists unless reachable within 8 open-addre
 
 - [ ] **Step 2: Run the behavior test to verify RED**
 
-Run:
-
 ```bash
 clang -std=c11 -I. -I/tmp/SDL/include -I/tmp/NRI/Include -I/tmp/NRI/Include/Extensions tests/stage10_world_cache.c sdf.c -lm -o /tmp/stage10_world_cache_test && /tmp/stage10_world_cache_test
 ```
 
 Expected: FAIL because `sdf_build_world_probes` has no implementation.
 
-- [ ] **Step 3: Refactor only the reusable Stage-9 static-BVH helpers needed by placement**
+- [ ] **Step 3: Refactor only reusable Stage-9 static-BVH helpers needed by placement**
 
-Keep `SDF_BUILD` temporary to the build call. Add exact CPU equivalents of shader `Hash32`/`HashCombine` using `uint32_t` arithmetic and derive placement cells with `floorf(position / spacing)` before bit-preserving conversion to `uint32_t`.
+Keep `SDF_BUILD` temporary to the build call. Add exact CPU equivalents of shader `Hash32`/`HashCombine` using `uint32_t` overflow semantics. Derive each cell with `floorf(position / spacing)`, cast the signed `int32_t` bit pattern to `uint32_t`, then hash x/y/z exactly like the shader.
 
 - [ ] **Step 4: Implement `sdf_build_world_probes(...)`**
 
-Use only fine/medium clipmap samples with valid canonical surface IDs. Reconstruct candidate voxel positions from `GPU_GLOBAL_SDF_CLIPMAP`, reconstruct canonical world triangles through the owning `GPU_OBJECT.world`, compute closest point + geometric normal, test `+normal * 0.075` then `-normal * 0.075`, require nearest static clearance >= `0.0375`, deduplicate by 0.75-unit integer cell, choose greatest clearance then smaller surface ID, sort deterministically by cell, cap at 8192, and insert each surviving probe into the 16384 table with an 8-slot limit. Omit candidates that cannot be inserted.
+Use only fine/medium clipmap samples with valid canonical surface IDs. Reconstruct voxel positions from `GPU_GLOBAL_SDF_CLIPMAP`, reconstruct the canonical world triangle, compute closest point and winding normal, test `+normal * 0.075` then `-normal * 0.075`, require nearest-static clearance >= 0.0375, deduplicate by 0.75-unit cell, choose greatest clearance then smaller surface ID, sort deterministically by integer cell, cap at 8192, and insert each survivor into the 16384 table with an 8-slot limit. Omit candidates that cannot be inserted.
 
-Initialize `WORLD_PROBE_STATE` exactly as the spec defines: radius 1.125, anchor IDs/revision, confidence/age zero, active bank zero, no valid-published bit.
+Initialize each `WORLD_PROBE_STATE` with radius 1.125, anchor IDs/revision, confidence/age zero, active bank zero, and valid-published bit clear.
 
 - [ ] **Step 5: Run the placement test**
 
 Expected: PASS all placement/hash/determinism cases.
 
-- [ ] **Step 6: Run sanitizer build of the CPU test**
-
-Run:
+- [ ] **Step 6: Run sanitizer build**
 
 ```bash
 clang -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer -I. -I/tmp/SDL/include -I/tmp/NRI/Include -I/tmp/NRI/Include/Extensions tests/stage10_world_cache.c sdf.c -lm -o /tmp/stage10_world_cache_asan && /tmp/stage10_world_cache_asan
@@ -171,34 +166,44 @@ git commit -m "s10 place world probes"
 
 **Interfaces:**
 - Consumes: Task-2 probe/key arrays and Task-1 capacities.
-- Produces: real `WorldProbes`, two-bank `WorldProbeRadiance`, `WorldProbeKeys`, `InvalidationQueue`, constants/flags, and valid dummy behavior for zero probes.
+- Produces: real `WorldProbes`, two-bank `WorldProbeRadiance`, `WorldProbeKeys`, `InvalidationQueue`, world constants/revision, and valid dummy behavior for zero probes.
 
-- [ ] **Step 1: Add a renderer-contract regression check**
+- [ ] **Step 1: Add failing renderer-contract checks**
 
-Extend `tests/stage10_world_cache.c` with pure size/count assertions for:
+Assert pure Stage-10 sizes:
 
 ```text
 radiance values = 8192 * 16 * 2
 radiance bytes = values * sizeof(float[4])
 hash slots = 16384
-max updates = min(64, active_count)
+world update list capacity >= 64 independent of screen-probe count
 ```
 
-Add a small source-contract check in the Stage-10 CI command that fails until `create_world_radiance_resources` uses the Stage-10 constants instead of one-element allocations and until `update_radiance_constants` sets `cache_counts.y/z/w`, `world_probe_config`, `world_probe_params`, and gates both feature flags on `probe_count > 0`.
+Add source-contract assertions that fail until `create_world_radiance_resources` uses these capacities, `create_wavefront` allocates `update_list` for at least `WORLD_PROBE_UPDATES_PER_FRAME`, and `update_radiance_constants` populates `cache_counts.y/z/w`, `world_probe_config`, `world_probe_params`, and the two feature flags.
 
-- [ ] **Step 2: Run the regression check to verify RED**
+- [ ] **Step 2: Run the checks to verify RED**
 
-Expected: FAIL on the one-element placeholder resources/current zero world-cache constants.
+Expected: FAIL on one-element world buffers, screen-probe-sized update list, and disabled world constants.
 
-- [ ] **Step 3: Implement world-resource creation/destruction and scene rebuild**
+- [ ] **Step 3: Implement world-resource creation/destruction and scene build**
 
-`create_world_radiance_resources(RENDERER*)` allocates CPU arrays and GPU capacities from the exact constants. `destroy_world_radiance_resources` frees CPU/GPU ownership. Add `build_world_radiance_scene(RENDERER*)` that calls `sdf_build_world_probes` after Stage-9 global SDF creation, uploads initialized probes/keys, clears both radiance banks once at scene setup, sets `probe_count`, resets `update_cursor`, and leaves camera movement uninvolved.
+`create_world_radiance_resources(RENDERER*)` allocates CPU arrays and bounded GPU capacities. `destroy_world_radiance_resources` frees all CPU/GPU ownership. Add `build_world_radiance_scene(RENDERER*)`, called only after Stage-9 global SDF data exists, to call `sdf_build_world_probes`, upload initial probes/keys, initialize both radiance banks to zero once for the new scene, set `probe_count`, and reset `update_cursor`.
 
-For zero probes, retain valid minimal allocations/descriptors but set active count zero and both world-cache flags off.
+For zero probes, retain valid minimal descriptors but set active count zero and both world flags off. Camera update/resize paths must not call the world-probe builder.
 
-- [ ] **Step 4: Update descriptors/constants without changing space 6**
+- [ ] **Step 4: Make update-list capacity independent of render resolution**
 
-Reuse the existing six storage-buffer descriptors. Set:
+In `create_wavefront`, allocate `RadianceUpdateList` for `max(screen_probe_capacity, WORLD_PROBE_UPDATES_PER_FRAME)` entries while leaving screen-probe budgets/queues governed by their existing capacities.
+
+- [ ] **Step 5: Add stable scene/lighting revision calculation**
+
+Add `compute_radiance_revision(RENDERER*) -> uint32_t` using deterministic bitwise hashing over current analytic-light GPU data plus emissive-source/object revisions relevant to lighting. Keep the result non-zero and store it in `renderer->radiance_revision` / `Radiance.feature_flags.y`.
+
+If the revision changes after scene setup, invalidate world-probe published state without clearing the 4 MiB radiance buffer: mark CPU probe states dirty/unpublished, upload probe state, reset the update cursor, and let first refreshes write full samples. Do not rebuild positions/keys and do not treat camera motion as a revision.
+
+- [ ] **Step 6: Update descriptors/constants without changing space 6**
+
+Set exactly:
 
 ```text
 cache_counts.y = probe_count
@@ -206,22 +211,21 @@ cache_counts.z = 16384
 cache_counts.w = 8192
 world_probe_config = {4, 64, 2, 0}
 world_probe_params = {0.75, 0.20, 1.125, 0.075}
+feature_flags.y = non-zero radiance_revision
 ```
 
-Enable `WORLD_CACHE | MULTIBOUNCE` only when real resources are valid and `probe_count > 0`.
+Enable `WORLD_CACHE | MULTIBOUNCE` only when resources are valid and `probe_count > 0`.
 
-- [ ] **Step 5: Run C unit/contract tests and syntax compile**
-
-Run the Task-2 test plus:
+- [ ] **Step 7: Run CPU tests and C syntax compile**
 
 ```bash
 FLAGS='-I. -I/tmp/SDL/include -I/tmp/NRI/Include -I/tmp/NRI/Include/Extensions'
 for f in init.c glb.c gltf.c scene.c sdf.c gpu.c render.c main.c; do clang -std=c11 -fsyntax-only $FLAGS "$f" || exit 1; done
 ```
 
-Expected: PASS.
+Expected: PASS together with Task-2 tests.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add render.c tests/stage10_world_cache.c
@@ -232,34 +236,34 @@ git commit -m "s10 allocate world cache"
 
 **Files:**
 - Modify: `shader.hlsl`
-- Modify: `tests/stage10_world_cache.c` only if CPU reference values need extension
 
 **Interfaces:**
 - Consumes: Task-3 constants/resources and unchanged space-6 bindings.
-- Produces: latest/stable bank addressing, 3x3x3 lookup, surface-aware diffuse integration, corrected invalidation bits, and the completed `CS_UpdateWorldRadianceCache` bounce operator.
+- Produces: latest/stable bank addressing, 3x3x3 lookup, surface-aware diffuse integration, screen-hit world indirect, corrected invalidation bits, and the completed world-probe bounce operator.
 
-- [ ] **Step 1: Add the failing shader architecture assertions**
+- [ ] **Step 1: Add failing shader architecture assertions**
 
-The Stage-10 verification script must fail unless shader source contains all of these semantics:
+The Stage-10 verification script fails unless shader source expresses these semantics:
 
 ```text
-WorldProbeRadianceIndex(probe, texel, bank) uses fixed physical capacity cache_counts.w
-stable update reads previous bank when source.state.x == current frame
+WorldProbeRadianceIndex(probe, texel, bank) uses cache_counts.w as fixed bank stride
+stable world-update reads previous bank when source.state.x == Pass.dispatch.x
 normal renderer reads source.state.z
-lookup visits dx/dy/dz in [-1,1]
-surface lookup rejects dot(probe-position - hit-position, hit-normal) <= epsilon
-diffuse integration loops all 16 world directions with positive cosine weights
-invalidation sets dirty bit without assigning active bank
+lookup visits dx/dy/dz in [-1,1] and each cell uses <= 8 open-address probes
+surface lookup rejects dot(probe.position - surface.position, surface.normal) <= epsilon
+diffuse integration visits all 16 directions with positive cosine weights
+screen-trace hit keeps ReflectedDirectAtPixel and adds latest world indirect
 world update writes inactive bank then publishes state.z
+invalidation changes confidence/dirty flags but never overwrites state.z
 ```
 
 - [ ] **Step 2: Run architecture assertions to verify RED**
 
-Expected: FAIL because the current shader has single-bank exact-cell lookup/in-place update.
+Expected: FAIL because current shader is single-bank, exact-cell, in-place and screen hits contain only direct reflected radiance.
 
 - [ ] **Step 3: Replace single-bank helper semantics**
 
-Keep existing bindings. Implement exact helpers for:
+Implement:
 
 ```text
 WorldProbeRadianceIndex(probe_index, texel, bank)
@@ -269,25 +273,27 @@ SampleWorldProbeDirectional(probe_index, direction, stable_previous)
 IntegrateWorldProbeDiffuse(position, normal, stable_previous)
 ```
 
-The 3x3x3 search uses an 8-slot open-addressing lookup for each neighboring cell and selects the closest probe inside 1.125 units. Surface lookup also requires the probe to lie on the positive normal side.
+The 3x3x3 search performs the same 8-slot lookup as CPU insertion, validates valid-published state, revision, radius and key, and selects the closest usable probe. Surface lookup additionally requires the probe on the positive normal side.
 
-- [ ] **Step 4: Make surface indirect world-cache authoritative when enabled**
+- [ ] **Step 4: Make world indirect authoritative when world cache is enabled**
 
-Refactor the diffuse surface evaluator so cached direct can still be reused, but current world indirect is evaluated from `IntegrateWorldProbeDiffuse`. During `CS_UpdateWorldRadianceCache`, request the stable previous view; normal screen/offscreen shading requests the latest published view. Apply the existing diffuse material convention exactly once.
+Split diffuse evaluation so cached direct may be reused but indirect is freshly obtained from `IntegrateWorldProbeDiffuse`: stable previous view during world updates, latest published view during normal screen/offscreen shading. Apply receiver material diffuse response exactly once using the current renderer convention.
 
-- [ ] **Step 5: Complete the world-probe bounce operator**
+- [ ] **Step 5: Add latest world indirect to screen-space secondary hits**
 
-For each selected probe/direction: trace with screen tracing disabled; on miss use sky; on hit combine material emission + analytic diffuse direct + existing emissive-area NEE + stable previous world indirect. New probes write the traced sample directly; established probes write `lerp(old, sample, 0.20)` to the inactive bank. Publish bank/valid/revision/age only after all 16 directions are written.
+`CS_WavefrontScreenTrace` currently bypasses `SurfaceReflectedRadiance`. Preserve `ReflectedDirectAtPixel(hit_pixel)` and add only the latest world-cache indirect reflected term derived from the returned `SurfaceHit`; do not replace the existing screen direct term or add raw emissive again.
 
-Use deterministic per-probe/per-direction/frame seed for emissive NEE. Do not recursively launch another indirect bounce.
+- [ ] **Step 6: Complete the world-probe bounce operator**
 
-- [ ] **Step 6: Correct invalidation state semantics**
+For each selected probe/direction: trace with screen tracing disabled; miss => sky; hit => material emission + analytic diffuse direct + existing emissive-area NEE multiplied by the receiver's existing diffuse material factor + stable previous world indirect. New/dirty/revision-stale probes write the traced sample directly; established probes write `lerp(old, sample, 0.20)` to the inactive bank. Publish bank/valid/current revision/age only after all 16 directions are written.
 
-`CS_InvalidateRadiance` must reduce confidence and set `state.w` dirty bit while preserving `state.z` active bank.
+Use deterministic per-probe/per-direction/frame NEE seed. Never recursively launch another indirect bounce.
 
-- [ ] **Step 7: Compile all affected Slang entries**
+- [ ] **Step 7: Correct invalidation semantics**
 
-Run at minimum:
+`CS_InvalidateRadiance` reduces confidence and sets the dirty bit in `state.w` while preserving `state.z`. A revision-stale or dirty probe is not accepted as valid previous indirect until refreshed according to the above rules.
+
+- [ ] **Step 8: Compile affected Slang entries**
 
 ```bash
 for e in CS_ResetWavefront CS_WavefrontScreenTrace CS_WavefrontDynamicTrace CS_WavefrontGlobalTrace CS_WavefrontLocalTrace CS_ShadeRayHits CS_EmissiveGather CS_UpdateWorldRadianceCache CS_InvalidateRadiance PS_Present; do
@@ -298,92 +304,104 @@ done
 
 Expected: PASS.
 
-- [ ] **Step 8: Re-run architecture assertions**
+- [ ] **Step 9: Re-run shader architecture assertions**
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add shader.hlsl
 git commit -m "s10 propagate world radiance"
 ```
 
-### Task 5: Wire fixed round-robin scheduling, world update dispatch and barriers
+### Task 5: Wire fixed scheduling, frame stamp, world dispatch and barriers
 
 **Files:**
 - Modify: `render.c`
 - Modify: `shader.hlsl`
 
 **Interfaces:**
-- Consumes: existing `RADIANCE_WAVEFRONT.update_list`, `RayCounters[3]`, Task-3 CPU `cpu_update_list/update_cursor`, and Task-4 world-cache shader.
-- Produces: at most 64 selected world probes per frame, dispatch before screen-probe world-radiance consumption, and explicit storage visibility afterward.
+- Consumes: existing `RADIANCE_WAVEFRONT.update_list`, `RayCounters[3]`, Task-3 CPU update array/cursor and Task-4 world-cache shader.
+- Produces: true frame-stamped stable-bank reads, at most 64 selected probes/frame, dispatch before screen-probe world-radiance consumption, and explicit storage visibility afterward.
 
 - [ ] **Step 1: Add failing scheduling/order assertions**
 
-Verification must assert:
+Require:
 
 ```text
+Pass.dispatch[0] = gpu frame index, not radiance revision
 update_count = min(64, probe_count)
 indices are (update_cursor + i) % probe_count
-pass_constants.range[0] carries update_count
-CS_ResetWavefront initializes RayCounters[3] from Pass.range.x instead of zero
-CPU streams cpu_update_list into wavefront.update_list when update_count > 0
+Pass.range[0] carries update_count
+CS_ResetWavefront sets RayCounters[3] = Pass.range.x while resetting counters 0..2
+CPU streams the active cpu_update_list into existing wavefront.update_list
 world_radiance_pipeline is created from radiance_world_cache.cs.spv
-world update dispatch occurs after wavefront reset and before budget/generate/screen-probe shading
+world update dispatch is after reset and before budget/generate/screen-probe tracing
 storage barrier follows world update before screen-probe consumers
 update_cursor advances modulo probe_count
-zero probes dispatch zero world updates
+zero probes => zero update upload/dispatch
 ```
 
 - [ ] **Step 2: Run assertions to verify RED**
 
-Expected: FAIL because no world-cache pipeline is created/dispatched/scheduled.
+Expected: FAIL because `Pass.dispatch.x` currently carries revision, no world pipeline is created/dispatched, and reset zeros update count.
 
 - [ ] **Step 3: Implement `prepare_world_probe_updates(RENDERER*)`**
 
-Exact behavior: fill `cpu_update_list[0..update_count)` round-robin, set `pass_constants.range[0] = update_count`, retain/update cursor modulo active count, and set count/cursor to zero for zero probes.
+Fill `cpu_update_list[0..update_count)` round-robin and advance `update_cursor`. For zero probes set count/cursor zero. Do not set constant-buffer fields here; this helper owns selection only.
 
-- [ ] **Step 4: Extend `stream_dynamic_data`**
+- [ ] **Step 4: Integrate selection into `stream_dynamic_data` without losing it**
 
-Stream the active portion of `cpu_update_list` to existing `renderer->wavefront.update_list`; include COPY_DESTINATION -> STORAGE transition for that buffer when an upload occurs. Do not allocate a duplicate GPU update-list buffer.
+Immediately after `stream_dynamic_data` clears `pass_constants`, set:
+
+```text
+Pass.dispatch[0] = current gpu frame index
+Pass.range[0] = world_radiance.update_count
+```
+
+Call `prepare_world_probe_updates` before constructing upload descriptors, then stream the active update array into existing `renderer->wavefront.update_list`. Add COPY_DESTINATION -> STORAGE transition only when update_count > 0. Do not allocate a duplicate GPU update-list buffer.
 
 - [ ] **Step 5: Preserve update count through reset**
 
-Change `CS_ResetWavefront` so counters 0..2 are reset normally and `RayCounters[3] = Pass.range.x`. No new shader entry point is introduced.
+Change `CS_ResetWavefront` so counters 0..2 reset normally and `RayCounters[3] = Pass.range.x`. No new shader entry point.
 
 - [ ] **Step 6: Create and dispatch `world_radiance_pipeline`**
 
-Create it from existing `build/shaders/radiance_world_cache.cs.spv`. In the wavefront frame setup, dispatch reset, then if update_count > 0 dispatch `ceil(update_count / 64)` groups of `world_radiance_pipeline`, add explicit storage barriers for world probes/radiance/keys and relevant cache state, then continue the existing screen-probe budget/generate/trace chain.
+Create from existing `build/shaders/radiance_world_cache.cs.spv`. In the wavefront frame command sequence: transition required buffers to storage; dispatch reset; if update_count > 0 dispatch `ceil(update_count / 64)` world-cache groups; issue explicit storage barriers for `WorldProbes`, `WorldProbeRadiance`, and any shared surface-cache state written/read; then continue existing budget/generate/screen/dynamic/global/local/shade/temporal/spatial flow.
 
-- [ ] **Step 7: Run scheduling assertions, C syntax compile and all affected shader compiles**
+- [ ] **Step 7: Handle lighting revision invalidation before scheduling**
+
+After `update_scene_objects`/emissive refresh, recompute `radiance_revision`. If it changed, mark/upload world probe states dirty/unpublished and set `update_cursor = 0` before `prepare_world_probe_updates`. Do not touch positions/keys or clear radiance banks. Camera-only changes must not enter this branch.
+
+- [ ] **Step 8: Run scheduling assertions, C syntax compile and affected shader compiles**
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add render.c shader.hlsl
 git commit -m "s10 schedule world cache"
 ```
 
-### Task 6: Full Stage-10 verification, runtime handoff and cleanup
+### Task 6: Full Stage-10 verification and cleanup
 
 **Files:**
 - Verify: `game.h`, `sdf.c`, `render.c`, `shader.hlsl`, `build.c`, `tests/stage10_world_cache.c`
-- Remove: any temporary `.github/stage10-*` helpers/workflows created only to execute CI in this environment
+- Remove: any temporary `.github/stage10-*` execution helpers/workflows
 
 **Interfaces:**
 - Consumes: completed Tasks 1-5.
 - Produces: clean `radiance` branch ready for M2 visual/runtime validation.
 
-- [ ] **Step 1: Run the complete CPU behavior suite with sanitizers**
+- [ ] **Step 1: Run complete CPU behavior suite normally and with ASan/UBSan**
 
-Run both normal and ASan/UBSan commands from Task 2. Expected: PASS, zero sanitizer findings.
+Expected: all placement/hash/determinism/capacity/negative-coordinate tests pass; zero sanitizer findings.
 
-- [ ] **Step 2: Compile every normal shader job from `build.c`**
+- [ ] **Step 2: Compile every normal shader job in `build.c`**
 
-Use the same `slangc` flags as `build.c` for every listed shader entry. Expected: all SPIR-V compiles succeed.
+Use the exact `slangc` flags from `build.c`. Expected: every entry compiles to SPIR-V successfully, with exactly one `CS_UpdateWorldRadianceCache` job.
 
 - [ ] **Step 3: Syntax-compile every renderer C translation unit**
 
@@ -391,28 +409,28 @@ Use the Task-3 command. Expected: zero errors.
 
 - [ ] **Step 4: Run source architecture checks and `git diff --check`**
 
-Checks must cover every spec verification item that does not require a GPU: constants/capacities, static-only placement, deterministic build, hash reachability, bank semantics, update cap/order, invalidation bank preservation, zero-probe flags, no new world-cache entry point, and camera-independent lifecycle.
+Cover all non-GPU spec requirements: constants/capacities, static-only deterministic placement, hash reachability, negative coordinates, fixed two-bank addressing, update-list capacity >=64, frame stamp vs revision separation, screen-hit indirect integration, update cap/order, invalidation bank preservation, zero-probe flags and camera-independent lifecycle.
 
 Expected: PASS and `git diff --check` prints nothing.
 
 - [ ] **Step 5: Inspect final diff against the approved spec**
 
-Confirm `build.c` still has exactly one `CS_UpdateWorldRadianceCache` job and no Stage-10 debug/alternate implementations remain. Confirm no camera-update path calls the world-probe builder.
+Confirm no duplicate world-cache implementation, no new descriptor space, no camera path rebuilding placement, no recursive bounce call, and no unrelated renderer refactor.
 
 - [ ] **Step 6: Remove execution-only workflow/helper files**
 
-If GitHub Actions helper files were required by this harness, delete them after the verified production commit and verify that the cleanup commit changes only those helpers.
+If GitHub Actions helpers were required by this harness, delete them after the verified production commit and verify the cleanup commit changes only those files.
 
 - [ ] **Step 7: Keep the focused CPU regression test**
 
-`tests/stage10_world_cache.c` remains because it validates the deterministic placement/hash behavior rather than being execution junk.
+`tests/stage10_world_cache.c` remains because it protects deterministic placement/hash behavior; it is not execution junk.
 
-- [ ] **Step 8: Report the runtime validation command without claiming visual success**
+- [ ] **Step 8: Report runtime validation without claiming visual success**
 
-Use the user's normal M2 command, for example:
+Use the user's normal M2 run command, e.g.:
 
 ```bash
 c build run -- cornell_box.glb
 ```
 
-Runtime acceptance remains: no NRI/Vulkan validation failure, FPS recorded, and visible world GI should converge over frames from the emissive panel. Compile/tests do not by themselves prove final lighting quality.
+Runtime acceptance remains: no NRI/Vulkan validation failure, FPS recorded, and visible world GI should converge over frames from the emissive panel. Compile/tests alone do not prove final lighting quality.
