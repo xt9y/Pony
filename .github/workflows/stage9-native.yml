@@ -1,0 +1,182 @@
+name: stage9 native implementation
+
+on:
+  push:
+    branches: [radiance]
+
+permissions:
+  contents: write
+
+jobs:
+  stage9:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: radiance
+          fetch-depth: 20
+
+      - name: Prepare C headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/libsdl-org/SDL.git /tmp/SDL >/dev/null 2>&1
+          git clone --depth 1 https://github.com/NVIDIA-RTX/NRI.git /tmp/NRI >/dev/null 2>&1
+          echo 'FLAGS=-I. -I/tmp/SDL/include -I/tmp/NRI/Include -I/tmp/NRI/Include/Extensions' >> "$GITHUB_ENV"
+
+      - name: Task 1 RED - ownership absent
+        run: python3 .github/stage9_arch_test.py --red-task 1
+
+      - name: Task 1 GREEN - add ownership interfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/stage9_apply.py 1
+          python3 .github/stage9_arch_test.py --task 1
+          clang -std=c11 -fsyntax-only $FLAGS sdf.c
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add game.h
+          git commit -m 's9 global sdf interfaces'
+          git push origin HEAD:radiance
+
+      - name: Task 2 RED - builder missing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if clang -std=c11 $FLAGS .github/stage9_sdf_test.c sdf.c -lm -o /tmp/stage9_sdf_test >/tmp/stage9-red.log 2>&1; then
+            echo 'Task 2 RED unexpectedly linked'
+            cat /tmp/stage9-red.log
+            exit 1
+          fi
+          grep -Eq 'sdf_build_global_clipmaps|sdf_free_global_clipmaps|undefined' /tmp/stage9-red.log
+          echo 'RED task2 confirmed: global builder is declared but not implemented'
+
+      - name: Task 2 GREEN - build conservative clipmaps
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/stage9_apply.py 2
+          clang -std=c11 $FLAGS .github/stage9_sdf_test.c sdf.c -lm -o /tmp/stage9_sdf_test
+          /tmp/stage9_sdf_test
+          clang -std=c11 -fsyntax-only $FLAGS sdf.c
+          git diff --check
+          git add sdf.c
+          git commit -m 's9 build static global sdf'
+          git push origin HEAD:radiance
+
+      - name: Task 3 RED - GPU ownership missing
+        run: python3 .github/stage9_arch_test.py --red-task 3
+
+      - name: Task 3 GREEN - upload global SDF
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/stage9_apply.py 3
+          python3 .github/stage9_arch_test.py --task 3
+          for f in init.c glb.c gltf.c scene.c sdf.c gpu.c render.c main.c; do
+            echo "syntax $f"
+            clang -std=c11 -fsyntax-only $FLAGS "$f"
+          done
+          git diff --check
+          git add game.h render.c
+          git commit -m 's9 upload global sdf'
+          git push origin HEAD:radiance
+
+      - name: Task 4 RED - global trace inactive
+        run: python3 .github/stage9_arch_test.py --red-task 4
+
+      - name: Task 4 GREEN - exact global tracing
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/stage9_apply.py 4
+          python3 .github/stage9_arch_test.py
+          git diff --check
+
+      - name: Compile active shaders
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 -o /tmp/slang.tar.gz \
+            https://github.com/shader-slang/slang/releases/download/v2026.18.3/slang-2026.18.3-linux-x86_64-glibc-2.27.tar.gz
+          mkdir -p /tmp/slang
+          tar -xzf /tmp/slang.tar.gz -C /tmp/slang
+          SLANGC="$(find /tmp/slang -type f -name slangc | head -n1)"
+          test -n "$SLANGC"
+          chmod +x "$SLANGC"
+          export LD_LIBRARY_PATH="$(dirname "$SLANGC")/../lib:${LD_LIBRARY_PATH:-}"
+          compile() {
+            entry="$1"; stage="$2"; out="/tmp/${entry}.spv"
+            "$SLANGC" shader.hlsl -entry "$entry" -stage "$stage" -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "$out"
+            test -s "$out"
+          }
+          compile VS_GBuffer vertex
+          compile PS_GBufferFull fragment
+          compile CS_RadianceDirect compute
+          compile CS_ResetWavefront compute
+          compile CS_ClassifyRayBudgets compute
+          compile CS_GenerateProbeRays compute
+          compile CS_WavefrontScreenTrace compute
+          compile CS_WavefrontDynamicTrace compute
+          compile CS_WavefrontGlobalTrace compute
+          compile CS_WavefrontLocalTrace compute
+          compile CS_ShadeRayHits compute
+          compile CS_ReprojectScreenProbes compute
+          compile CS_SpatialReuseScreenProbes compute
+          compile CS_ResolveDirectionalProbes compute
+          compile CS_EmissiveGather compute
+          compile CS_CommitScreenProbeHistory compute
+          compile PS_Present fragment
+
+      - name: Task 4 C gate and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in init.c glb.c gltf.c scene.c sdf.c gpu.c render.c main.c; do
+            echo "syntax $f"
+            clang -std=c11 -fsyntax-only $FLAGS "$f"
+          done
+          python3 .github/stage9_arch_test.py
+          git diff --check
+          git add shader.hlsl render.c
+          git commit -m 's9 trace static global sdf'
+          git push origin HEAD:radiance
+          echo "STAGE9_PRODUCTION_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Task 5 full verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 $FLAGS .github/stage9_sdf_test.c sdf.c -lm -o /tmp/stage9_sdf_test
+          /tmp/stage9_sdf_test
+          python3 .github/stage9_arch_test.py
+          for f in init.c glb.c gltf.c scene.c sdf.c gpu.c render.c main.c; do
+            clang -std=c11 -fsyntax-only $FLAGS "$f"
+          done
+          git diff --check
+          grep -Fq 'static const uint32_t grid_dimensions[3] = {32u, 16u, 8u};' sdf.c
+          grep -Fq 'BRICK_RESOLUTION = 4' sdf.c
+          grep -Fq 'const float influence = 2.0f * brick_world;' sdf.c
+          grep -Fq 'out->cpu_bricks[index] = fmaxf(0.0f, distance - half_diagonal);' sdf.c
+          grep -Fq 'bool global_resolved = TraceGlobalSDF(ray, best);' shader.hlsl
+          grep -Fq 'if (!global_resolved) TraceAllLocalSDFs(ray, best);' shader.hlsl
+          echo 'Stage 9 full verification PASS'
+
+      - name: Cleanup verification scaffolding
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/stage9_arch_test.py .github/stage9_sdf_test.c .github/stage9_apply.py .github/workflows/stage9-native.yml
+          git add -A .github
+          git commit -m 'remove stage9 verification helpers'
+          git push origin HEAD:radiance
+          changed="$(git diff --name-only "$STAGE9_PRODUCTION_COMMIT" HEAD)"
+          printf '%s\n' "$changed"
+          test "$(printf '%s\n' "$changed" | grep -vc '^$')" -eq 4
+          printf '%s\n' "$changed" | grep -Fxq '.github/stage9_apply.py'
+          printf '%s\n' "$changed" | grep -Fxq '.github/stage9_arch_test.py'
+          printf '%s\n' "$changed" | grep -Fxq '.github/stage9_sdf_test.c'
+          printf '%s\n' "$changed" | grep -Fxq '.github/workflows/stage9-native.yml'
