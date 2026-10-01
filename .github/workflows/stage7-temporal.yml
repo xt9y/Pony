@@ -18,7 +18,9 @@ jobs:
           fetch-depth: 2
 
       - name: Apply chapter 7
-        run: python3 .github/stage7_apply.py
+        run: |
+          python3 .github/stage7_apply.py
+          python3 .github/stage7_fix.py
 
       - name: GREEN - architecture test
         run: |
