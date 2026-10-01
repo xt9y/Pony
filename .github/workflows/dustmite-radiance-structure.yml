@@ -6,7 +6,30 @@ on:
       - dustmite-radiance-structure
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
+  apply-context-fix:
+    if: github.event_name == 'push' && github.event.head_commit.message == 'run gpu context fix'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: apply context ownership repair
+        run: |
+          python3 tools/fix_gpu_context_split.py
+          git diff --check
+      - name: publish repaired source
+        run: |
+          git config user.name xt9y
+          git config user.email felix@xt9y.de
+          git add gpu.c
+          git commit -m "fix gpu frame context ownership"
+          git push origin HEAD:dustmite-radiance-structure
+
   structure:
     runs-on: ubuntu-latest
     timeout-minutes: 5
