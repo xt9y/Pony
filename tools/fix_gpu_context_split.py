@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
+# One-shot migration repair for the GPU ownership split.
 path = Path("gpu.c")
 source = path.read_text(encoding="utf-8")
 
