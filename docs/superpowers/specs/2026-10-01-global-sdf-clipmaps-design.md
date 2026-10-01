@@ -175,7 +175,9 @@ No sign is computed. Stage 9 remains an unsigned distance field because the curr
 - voxel count
 - enabled/valid state
 
-The existing one-element global fallback buffers are removed from `RADIANCE_SCENE_FALLBACKS`. Fallbacks remain only for future resources that are still inactive.
+The existing one-element global fallback buffers are removed from `RADIANCE_SCENE_FALLBACKS`.
+
+`GLOBAL_SDF_DATA` always owns valid bound descriptors. If the scene contains static geometry, those descriptors point at the real Stage 9 buffers. If the scene contains no static geometry, `GLOBAL_SDF_DATA` creates one zero clip descriptor, one `UINT32_MAX` page-table entry, one zero distance value, and one `UINT32_MAX` surface-ID value solely to satisfy NRI descriptor binding; `clip_count` remains zero and `RADIANCE_FEATURE_GLOBAL_SDF` remains disabled. The shader never consumes the dummy data because the count/feature gate is authoritative.
 
 Creation sequence in `renderer_set_scene()` becomes:
 
@@ -187,8 +189,6 @@ Creation sequence in `renderer_set_scene()` becomes:
 6. update radiance constants and descriptors
 
 Destruction releases all CPU arrays, descriptors, and GPU buffers and zeros the owner.
-
-If the scene contains no static triangles, Stage 9 creates no real global resources, sets clip count to zero, and leaves `RADIANCE_FEATURE_GLOBAL_SDF` disabled. Descriptor validity is maintained with the existing minimal fallback mechanism or a dedicated single zero resource only if NRI requires a bound descriptor.
 
 ## Feature flags and constants
 
@@ -215,8 +215,8 @@ The global SDF is only an acceleration structure. A coarse voxel hit is never ac
 1. sphere-trace the hierarchical global field
 2. obtain the nearest canonical triangle ID from the sampled voxel
 3. when `distance <= epsilon`, intersect the ray against that exact `SceneTriangle`
-4. search a small neighboring voxel set when the sampled triangle does not intersect the ray
-5. accept only a real ray/triangle intersection within the local SDF hit window
+4. if that triangle misses, inspect the 3 x 3 x 3 neighboring voxels in the sampled clip level, deduplicate their valid surface IDs, and test those exact triangles
+5. accept only a real ray/triangle intersection within `t +/- max(3 * epsilon, 2 * voxel_size)` and before the current best hit distance
 6. build the final `SurfaceHit` with exact world position, geometric normal, object/material/primitive identity, and object revision
 7. otherwise continue tracing rather than shading the approximate voxel
 
@@ -253,7 +253,7 @@ screen -> dynamic -> global static -> static local fallback -> shade
 
 `CS_WavefrontGlobalTrace` becomes an active pipeline immediately after the dynamic pass.
 
-The static local pass remains, but only unresolved rays should perform exhaustive static-local tracing. A global hit is preserved as the current best hit and does not need another static-model search.
+A successful exact global hit sets a dedicated per-ray resolved bit in `RayFlags`. `CS_WavefrontLocalTrace` checks that bit and skips exhaustive static-local tracing for resolved rays. If global tracing fails to produce an exact hit, the bit remains clear and the existing static-local fallback runs normally. This makes the global SDF a real acceleration stage rather than extra work before the old exhaustive path.
 
 Dynamic models remain excluded from `TraceAllLocalSDFs()` whenever the Stage 8 dynamic-grid feature is enabled.
 
@@ -262,6 +262,8 @@ The unified non-wavefront query follows the same logical hierarchy:
 ```text
 screen (optional) -> dynamic -> global static -> static local fallback
 ```
+
+For unified queries, static local fallback runs only when `TraceGlobalSDF()` did not resolve an exact hit.
 
 This keeps shadow/emissive visibility queries and probe queries consistent.
 
@@ -313,7 +315,8 @@ The implementation must include structural/regression checks for these invariant
 - zero-static scenes produce `clip_count == 0` and disable `RADIANCE_FEATURE_GLOBAL_SDF`
 - valid static scenes produce exactly 3 levels
 - wavefront ordering is `screen -> dynamic -> global -> local fallback -> shade`
-- unified tracing follows dynamic/global/local ordering
+- a resolved global hit skips exhaustive static-local tracing
+- unified tracing follows dynamic/global/local-fallback ordering
 - global hits undergo exact triangle refinement before becoming final `SurfaceHit`s
 - active Slang entry points compile, including `CS_WavefrontGlobalTrace`
 - all C translation units syntax-compile
@@ -356,7 +359,7 @@ The key visual check is that enabling Stage 9 does not reintroduce striped/line 
 
 - preserve the existing global resource ABI
 - make `TraceGlobalSDF()` refine approximate global hits against exact triangles
-- preserve a global hit through local fallback without retracing all static models
+- mark resolved global rays so local fallback does not retrace the static scene
 - keep unified trace ordering consistent with the active wavefront chain
 
 ### `build.c`
@@ -366,4 +369,4 @@ The key visual check is that enabling Stage 9 does not reintroduce striped/line 
 
 ## Completion criteria
 
-Stage 9 is complete when static scene geometry has a real uploaded three-level global SDF, the wavefront global trace is active between dynamic and local fallback, accepted global hits use exact canonical triangle geometry, dynamic objects are excluded, the static local-SDF path is only a fallback for unresolved rays, all compile/regression checks pass, and no temporary implementation/test files remain in the repository.
+Stage 9 is complete when static scene geometry has a real uploaded three-level global SDF, the wavefront global trace is active between dynamic and local fallback, accepted global hits use exact canonical triangle geometry, dynamic objects are excluded, resolved global hits skip the static local-SDF path, unresolved rays retain the local fallback, all compile/regression checks pass, and no temporary implementation/test files remain in the repository.
