@@ -3,9 +3,11 @@ from pathlib import Path
 
 GPU = Path("gpu.c")
 BAKE = Path("bake.c")
+INTERNAL = Path("render_internal.h")
 
 source = GPU.read_text(encoding="utf-8")
 bake = BAKE.read_text(encoding="utf-8")
+internal = INTERNAL.read_text(encoding="utf-8")
 
 start_marker = "static NriTexture *create_lightmap_texture"
 end_marker = "static bool dispatch_one"
@@ -17,6 +19,19 @@ if start < 0 or end < 0 or end <= start:
 
 block = source[start:end].rstrip() + "\n\n"
 source = source[:start] + source[end:]
+
+old = "static void probe_wavefront_scratch_destroy(RENDERER *r)"
+new = "void probe_wavefront_scratch_destroy(RENDERER *r)"
+if old not in block:
+    raise SystemExit("probe scratch cleanup was not inside bake region")
+block = block.replace(old, new, 1)
+
+prototype = "void probe_wavefront_scratch_destroy(RENDERER *renderer);\n"
+if prototype not in internal:
+    marker = "void renderer_gpu_resources_deinit(RENDERER *renderer);\n"
+    if marker not in internal:
+        raise SystemExit("could not locate internal lifecycle declarations")
+    internal = internal.replace(marker, marker + prototype, 1)
 
 insert_marker = "typedef enum BAKE_PHASE"
 insert = bake.find(insert_marker)
@@ -60,3 +75,4 @@ bake = bake[:insert] + support + block + bake[insert:]
 
 GPU.write_text(source, encoding="utf-8")
 BAKE.write_text(bake, encoding="utf-8")
+INTERNAL.write_text(internal, encoding="utf-8")
