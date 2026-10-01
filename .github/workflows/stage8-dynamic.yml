@@ -1,0 +1,20 @@
+name: stage8 dynamic grid
+
+on:
+  push:
+    branches: [radiance]
+
+permissions:
+  contents: write
+
+jobs:
+  stage8:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: radiance
+          fetch-depth: 2
+      - name: RED - dynamic grid not active yet
+        run: python3 .github/stage8_dynamic_test.py
