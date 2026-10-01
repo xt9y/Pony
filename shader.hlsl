@@ -2042,7 +2042,7 @@ uint WorldProbeKey(float3 position) {
     return WorldProbeCellKey(int3(floor(position / cell_size)));
 }
 
-uint FindWorldProbeInternal(float3 position, float3 normal, bool surface_filter) {
+uint FindWorldProbeInternal(float3 position, float3 normal, bool surface_filter, bool stable_previous) {
     uint count = Radiance.cache_counts.y;
     if (!FeatureEnabled(RADIANCE_FEATURE_WORLD_CACHE) || count == 0u) return INVALID_INDEX;
     uint table_capacity = max(Radiance.cache_counts.z, 1u);
@@ -2064,6 +2064,7 @@ uint FindWorldProbeInternal(float3 position, float3 normal, bool surface_filter)
                     if (index >= count) continue;
                     WorldProbeState state = WorldProbes[index];
                     if (state.identity.x != key || (state.state.w & 1u) == 0u || state.state.y != Radiance.feature_flags.y) continue;
+                    if (stable_previous && state.state.x == Pass.dispatch.x && state.statistics.z <= 1.0f) continue;
                     if (surface_filter && dot(state.position_radius.xyz - position, normal) <= 1.0e-4f) continue;
                     float d = distance(state.position_radius.xyz, position);
                     if (d > state.position_radius.w || d >= best_distance) continue;
@@ -2077,11 +2078,11 @@ uint FindWorldProbeInternal(float3 position, float3 normal, bool surface_filter)
 }
 
 uint FindWorldProbe(float3 position) {
-    return FindWorldProbeInternal(position, 0.0f, false);
+    return FindWorldProbeInternal(position, 0.0f, false, false);
 }
 
-uint FindWorldProbeForSurface(float3 position, float3 normal) {
-    return FindWorldProbeInternal(position, normalize(normal), true);
+uint FindWorldProbeForSurface(float3 position, float3 normal, bool stable_previous) {
+    return FindWorldProbeInternal(position, normalize(normal), true, stable_previous);
 }
 
 uint WorldProbeReadBank(WorldProbeState state, bool stable_previous) {
@@ -2094,6 +2095,7 @@ float3 SampleWorldProbeDirectional(uint probe_index, float3 direction, bool stab
     if (probe_index == INVALID_INDEX || probe_index >= Radiance.cache_counts.y) return 0.0f;
     WorldProbeState state = WorldProbes[probe_index];
     if ((state.state.w & 1u) == 0u || state.state.y != Radiance.feature_flags.y) return 0.0f;
+    if (stable_previous && state.state.x == Pass.dispatch.x && state.statistics.z <= 1.0f) return 0.0f;
     uint s = max(Radiance.world_probe_config.x, 1u);
     float2 uv = OctEncode(direction);
     uint2 texel = min((uint2)floor(uv * (float)s), uint2(s - 1u, s - 1u));
@@ -2101,7 +2103,7 @@ float3 SampleWorldProbeDirectional(uint probe_index, float3 direction, bool stab
 }
 
 float3 IntegrateWorldProbeDiffuse(float3 position, float3 normal, bool stable_previous) {
-    uint probe = FindWorldProbeForSurface(position, normal);
+    uint probe = FindWorldProbeForSurface(position, normal, stable_previous);
     if (probe == INVALID_INDEX) return 0.0f;
     WorldProbeState state = WorldProbes[probe];
     uint bank = WorldProbeReadBank(state, stable_previous);
