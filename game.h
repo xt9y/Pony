@@ -680,7 +680,6 @@ typedef struct RADIANCE_WAVEFRONT {
 typedef struct RADIANCE_WORLD_RESOURCES {
     WORLD_PROBE_STATE *cpu_probes;
     uint32_t *cpu_keys;
-    uint32_t *cpu_update_list;
 
     NriBuffer *probes;
     NriBuffer *radiance;
@@ -698,8 +697,6 @@ typedef struct RADIANCE_WORLD_RESOURCES {
     uint32_t hash_capacity;
     uint32_t direction_count;
     uint32_t bank_count;
-    uint32_t update_count;
-    uint32_t update_cursor;
 } RADIANCE_WORLD_RESOURCES;
 
 typedef struct RENDER_TEXTURE {
@@ -801,6 +798,7 @@ typedef struct RENDERER {
     NriPipeline *wavefront_resolve_pipeline;
     NriPipeline *emissive_pipeline;
     NriPipeline *wavefront_history_pipeline;
+    NriPipeline *world_radiance_select_pipeline;
     NriPipeline *world_radiance_pipeline;
 
     uint32_t width;

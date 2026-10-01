@@ -2142,7 +2142,7 @@ void CS_ResetWavefront(uint3 dispatch_id : SV_DispatchThreadID) {
     RayCounters[0] = 0u;
     RayCounters[1] = 0u;
     RayCounters[2] = 0u;
-    RayCounters[3] = Pass.range.x;
+    RayCounters[3] = 0u;
     RayDispatchArgs[0] = 0u;
     RayDispatchArgs[1] = 1u;
     RayDispatchArgs[2] = 1u;

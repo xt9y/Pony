@@ -487,7 +487,6 @@ static void destroy_world_radiance_resources(RENDERER *renderer) {
     RADIANCE_WORLD_RESOURCES *w = &renderer->world_radiance;
     free(w->cpu_probes);
     free(w->cpu_keys);
-    free(w->cpu_update_list);
     destroy_storage_uav(renderer, &w->probes, &w->probes_uav);
     destroy_storage_uav(renderer, &w->radiance, &w->radiance_uav);
     destroy_storage_uav(renderer, &w->keys, &w->keys_uav);
@@ -504,8 +503,7 @@ static bool create_world_radiance_resources(RENDERER *renderer) {
     w->bank_count = WORLD_PROBE_BANK_COUNT;
     w->cpu_probes = calloc(WORLD_PROBE_CAPACITY, sizeof(*w->cpu_probes));
     w->cpu_keys = calloc(WORLD_PROBE_HASH_CAPACITY, sizeof(*w->cpu_keys));
-    w->cpu_update_list = calloc(WORLD_PROBE_UPDATES_PER_FRAME, sizeof(*w->cpu_update_list));
-    if (!w->cpu_probes || !w->cpu_keys || !w->cpu_update_list ||
+    if (!w->cpu_probes || !w->cpu_keys ||
         !create_storage_uav(renderer, (uint64_t)WORLD_PROBE_CAPACITY * sizeof(WORLD_PROBE_STATE), sizeof(WORLD_PROBE_STATE), 0, &w->probes, &w->probes_uav) ||
         !create_storage_uav(renderer, (uint64_t)WORLD_PROBE_CAPACITY * WORLD_PROBE_DIRECTION_COUNT * WORLD_PROBE_BANK_COUNT * 4u * sizeof(float), 4u * sizeof(float), 0, &w->radiance, &w->radiance_uav) ||
         !create_storage_uav(renderer, (uint64_t)WORLD_PROBE_HASH_CAPACITY * sizeof(uint32_t), sizeof(uint32_t), 0, &w->keys, &w->keys_uav) ||
@@ -541,7 +539,6 @@ static void refresh_radiance_revision(RENDERER *renderer) {
     if (revision == renderer->radiance_revision) return;
     renderer->radiance_revision = revision;
     renderer->radiance_constants.feature_flags[1] = revision;
-    renderer->world_radiance.update_cursor = 0u;
 }
 
 static bool build_world_radiance_scene(RENDERER *renderer) {
@@ -554,8 +551,6 @@ static bool build_world_radiance_scene(RENDERER *renderer) {
                                 w->cpu_probes, WORLD_PROBE_CAPACITY, &w->probe_count, w->cpu_keys, WORLD_PROBE_HASH_CAPACITY,
                                 WORLD_PROBE_SPACING, WORLD_PROBE_RADIUS, WORLD_PROBE_CLEARANCE, WORLD_PROBE_MIN_CLEARANCE))
         return false;
-    w->update_cursor = 0u;
-    w->update_count = 0u;
     renderer->radiance_revision = compute_radiance_revision(renderer);
     const NriAccessStage storage = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER};
     const uint64_t radiance_values = (uint64_t)WORLD_PROBE_CAPACITY * WORLD_PROBE_DIRECTION_COUNT * WORLD_PROBE_BANK_COUNT;
@@ -1385,22 +1380,6 @@ static bool refresh_emissive_sampling(RENDERER *renderer) {
     scene->emissive_triangles_state = read;
     return true;
 }
-
-static void prepare_world_probe_updates(RENDERER *renderer) {
-    RADIANCE_WORLD_RESOURCES *world = &renderer->world_radiance;
-    world->update_count = world->probe_count < WORLD_PROBE_UPDATES_PER_FRAME ? world->probe_count : WORLD_PROBE_UPDATES_PER_FRAME;
-    if (!world->probe_count) {
-        world->update_cursor = 0u;
-        world->update_count = 0u;
-        renderer->pass_constants.range[0] = 0u;
-        return;
-    }
-    for (uint32_t i = 0u; i < world->update_count; ++i)
-        world->cpu_update_list[i] = (world->update_cursor + i) % world->probe_count;
-    renderer->pass_constants.range[0] = world->update_count;
-    world->update_cursor = (world->update_cursor + world->update_count) % world->probe_count;
-}
-
 
 static void destroy_screen_trace(RENDERER *renderer) {
     if (renderer->screen_trace.uav) renderer->gpu->core.DestroyDescriptor(renderer->screen_trace.uav);
@@ -2665,6 +2644,7 @@ static bool create_pipelines(RENDERER *renderer) {
            create_compute_pipeline(renderer, "build/shaders/radiance_probe_resolve.cs.spv", renderer->wavefront_layout, &renderer->wavefront_resolve_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_emissive.cs.spv", renderer->wavefront_layout, &renderer->emissive_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_probe_history.cs.spv", renderer->wavefront_layout, &renderer->wavefront_history_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_world_select.cs.spv", renderer->wavefront_layout, &renderer->world_radiance_select_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_world_cache.cs.spv", renderer->wavefront_layout, &renderer->world_radiance_pipeline);
 }
 
@@ -2965,7 +2945,6 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
     renderer->pass_constants.dimensions[0] = renderer->screen_probes.width;
     renderer->pass_constants.dimensions[1] = renderer->screen_probes.height;
     renderer->pass_constants.flags[0] = renderer->probe_history_valid ? 1u : 0u;
-    prepare_world_probe_updates(renderer);
 
     NriStreamerCopyBatch batch = renderer->gpu->streamer_api.BeginStreamerCopyBatch(renderer->gpu->streamer);
     if (!batch) return false;
@@ -2980,9 +2959,8 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
     const uint32_t index_upload_count = renderer->dynamic_grid.index_count ? renderer->dynamic_grid.index_count : 1u;
     const NriDataSize grid_cell_data = {.data = renderer->dynamic_grid.cpu_cells, .size = (uint64_t)cell_upload_count * sizeof(GPU_DYNAMIC_GRID_CELL)};
     const NriDataSize grid_index_data = {.data = renderer->dynamic_grid.cpu_indices, .size = (uint64_t)index_upload_count * sizeof(uint32_t)};
-    const NriDataSize world_update_data = {.data = renderer->world_radiance.cpu_update_list, .size = (uint64_t)renderer->world_radiance.update_count * sizeof(uint32_t)};
 
-    NriStreamBufferDataDesc uploads[9];
+    NriStreamBufferDataDesc uploads[8];
     uint32_t upload_count = 0u;
     uploads[upload_count++] = (NriStreamBufferDataDesc){.dataChunks = &object_data, .dataChunkNum = 1, .placementAlignment = 16, .copyBatch = batch, .dstBuffer = renderer->object_buffer};
     uploads[upload_count++] = (NriStreamBufferDataDesc){.dataChunks = &light_data, .dataChunkNum = 1, .placementAlignment = 16, .copyBatch = batch, .dstBuffer = renderer->light_buffer};
@@ -2995,10 +2973,6 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
         uploads[upload_count++] = (NriStreamBufferDataDesc){.dataChunks = &grid_cell_data, .dataChunkNum = 1, .placementAlignment = 16, .copyBatch = batch, .dstBuffer = renderer->dynamic_grid.cells};
         uploads[upload_count++] = (NriStreamBufferDataDesc){.dataChunks = &grid_index_data, .dataChunkNum = 1, .placementAlignment = 16, .copyBatch = batch, .dstBuffer = renderer->dynamic_grid.indices};
     }
-    const bool upload_world_updates = renderer->world_radiance.update_count > 0u;
-    if (upload_world_updates)
-        uploads[upload_count++] = (NriStreamBufferDataDesc){.dataChunks = &world_update_data, .dataChunkNum = 1, .placementAlignment = 16, .copyBatch = batch, .dstBuffer = renderer->wavefront.update_list};
-
     for (uint32_t i = 0u; i < upload_count; ++i) {
         const NriBufferOffset streamed = renderer->gpu->streamer_api.StreamBufferData(renderer->gpu->streamer, &uploads[i]);
         if (!streamed.buffer) return false;
@@ -3011,7 +2985,7 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
     const NriAccessStage pass_read = {.access = NriAccessBits_CONSTANT_BUFFER, .stages = NriStageBits_COMPUTE_SHADER};
     const NriAccessStage radiance_read = {.access = NriAccessBits_CONSTANT_BUFFER, .stages = NriStageBits_COMPUTE_SHADER | NriStageBits_FRAGMENT_SHADER};
 
-    NriBufferBarrierDesc before[9];
+    NriBufferBarrierDesc before[8];
     uint32_t barrier_count = 0u;
     before[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->object_buffer, .before = renderer->object_state, .after = copy};
     before[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->light_buffer, .before = renderer->light_state, .after = copy};
@@ -3023,11 +2997,10 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
         before[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->dynamic_grid.cells, .before = renderer->dynamic_grid.state, .after = copy};
         before[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->dynamic_grid.indices, .before = renderer->dynamic_grid.state, .after = copy};
     }
-    if (upload_world_updates) before[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->wavefront.update_list, .before = renderer->wavefront.update_list_state, .after = copy};
     renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.buffers = before, .bufferNum = barrier_count});
     renderer->gpu->streamer_api.CmdCopyStreamedData(command_buffer, renderer->gpu->streamer, batch);
 
-    NriBufferBarrierDesc after[9];
+    NriBufferBarrierDesc after[8];
     barrier_count = 0u;
     after[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->object_buffer, .before = copy, .after = object_read};
     after[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->light_buffer, .before = copy, .after = compute_read};
@@ -3039,7 +3012,6 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
         after[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->dynamic_grid.cells, .before = copy, .after = compute_read};
         after[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->dynamic_grid.indices, .before = copy, .after = compute_read};
     }
-    if (upload_world_updates) after[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->wavefront.update_list, .before = copy, .after = (NriAccessStage){.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER}};
     renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.buffers = after, .bufferNum = barrier_count});
 
     renderer->object_state = object_read;
@@ -3052,7 +3024,6 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
         renderer->dynamic_grid.state = compute_read;
         renderer->dynamic_grid.dirty = false;
     }
-    if (upload_world_updates) renderer->wavefront.update_list_state = (NriAccessStage){.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER};
     return true;
 }
 
@@ -3525,10 +3496,13 @@ static void build_wavefront_screen_probes(RENDERER *renderer, NriCommandBuffer *
     renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){.workGroupNumX = 1, .workGroupNumY = 1, .workGroupNumZ = 1});
     barrier_wavefront_buffers(renderer, command_buffer, storage);
 
-    RADIANCE_WORLD_RESOURCES *world = &renderer->world_radiance;
-    if (world->update_count && (renderer->radiance_constants.feature_flags[0] & RADIANCE_FEATURE_WORLD_CACHE)) {
+    if (renderer->radiance_constants.feature_flags[0] & RADIANCE_FEATURE_WORLD_CACHE) {
+        bind_wavefront(renderer, command_buffer, renderer->world_radiance_select_pipeline);
+        renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){.workGroupNumX = 1, .workGroupNumY = 1, .workGroupNumZ = 1});
+        barrier_wavefront_buffers(renderer, command_buffer, storage);
+
         bind_wavefront(renderer, command_buffer, renderer->world_radiance_pipeline);
-        renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){.workGroupNumX = (world->update_count + 63u) / 64u, .workGroupNumY = 1, .workGroupNumZ = 1});
+        renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){.workGroupNumX = 1, .workGroupNumY = 1, .workGroupNumZ = 1});
         barrier_world_radiance(renderer, command_buffer);
     }
 
@@ -4022,6 +3996,7 @@ void renderer_deinit(RENDERER *renderer) {
             renderer->wavefront_resolve_pipeline,
             renderer->emissive_pipeline,
             renderer->wavefront_history_pipeline,
+            renderer->world_radiance_select_pipeline,
             renderer->world_radiance_pipeline
         };
 
