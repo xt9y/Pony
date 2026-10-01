@@ -65,6 +65,8 @@
 #define MAX_GLOBAL_SDF_CLIPMAPS 8u
 #define MAX_CACHE_PROBES 8u
 #define MAX_DYNAMIC_GRID_STEPS 256u
+#define RAY_FLAG_DYNAMIC_HIT 0x80000000u
+#define RAY_FLAG_GLOBAL_RESOLVED 0x40000000u
 
 struct GPUObject {
     row_major float4x4 world;
@@ -1108,7 +1110,7 @@ bool TraceLocalSDFModel(TraceRay ray, uint model_index, float current_best, out 
     float limit = min(min(t_max, ray.direction_tmax.w), current_best);
     float3 extent = model.bounds_max.xyz - model.bounds_min.xyz;
     float cell_size = max(extent.x, max(extent.y, extent.z)) / max((float)model.meta.y, 1.0f);
-    float epsilon = max(cell_size * 0.65f, Radiance.global_sdf_params.z);
+    float epsilon = max(cell_size * 0.65f, 1.0e-4f);
     uint max_steps = max(Radiance.trace_limits.z, 1u);
     [loop]
     for (uint step = 0u; step < max_steps && t <= limit; ++step) {
@@ -1305,14 +1307,55 @@ float SampleGlobalSDF(float3 p, out uint surface_id, out float voxel_size) {
     return max(Radiance.global_sdf_params.y, 0.25f);
 }
 
-float3 GlobalSDFNormal(float3 p, float voxel_size) {
-    float e = max(voxel_size, 1.0e-3f);
-    uint ignored;
-    float vs;
-    float dx = SampleGlobalSDF(p + float3(e, 0.0f, 0.0f), ignored, vs) - SampleGlobalSDF(p - float3(e, 0.0f, 0.0f), ignored, vs);
-    float dy = SampleGlobalSDF(p + float3(0.0f, e, 0.0f), ignored, vs) - SampleGlobalSDF(p - float3(0.0f, e, 0.0f), ignored, vs);
-    float dz = SampleGlobalSDF(p + float3(0.0f, 0.0f, e), ignored, vs) - SampleGlobalSDF(p - float3(0.0f, 0.0f, e), ignored, vs);
-    return normalize(float3(dx, dy, dz));
+bool RefineGlobalSDFSurface(
+    TraceRay ray,
+    float3 position,
+    float sdf_t,
+    float epsilon,
+    float voxel_size,
+    float limit,
+    out SurfaceHit hit
+) {
+    hit = MakeSurfaceHit(TRACE_MISS, limit);
+    float window = max(max(epsilon * 3.0f, voxel_size * 2.0f), 1.0e-3f);
+    float min_t = max(ray.origin_tmin.w, sdf_t - window);
+    float max_t = min(limit, sdf_t + window);
+    if (max_t < min_t) return false;
+
+    bool found = false;
+    float best_t = max_t;
+    float3 best_normal = 0.0f;
+    uint best_surface = INVALID_INDEX;
+    float step_size = max(voxel_size, 1.0e-4f);
+    [loop]
+    for (int z = -1; z <= 1; ++z) {
+        [loop]
+        for (int y = -1; y <= 1; ++y) {
+            [loop]
+            for (int x = -1; x <= 1; ++x) {
+                float3 sample_position = position + float3((float)x, (float)y, (float)z) * step_size;
+                uint surface_id;
+                float sampled_voxel_size;
+                SampleGlobalSDF(sample_position, surface_id, sampled_voxel_size);
+                if (surface_id == INVALID_INDEX) continue;
+                float candidate_t;
+                float3 candidate_normal;
+                if (IntersectSceneTriangle(ray, surface_id, min_t, best_t, candidate_t, candidate_normal)) {
+                    found = true;
+                    best_t = candidate_t;
+                    best_normal = candidate_normal;
+                    best_surface = surface_id;
+                }
+            }
+        }
+    }
+    if (!found || best_surface == INVALID_INDEX) return false;
+    float3 world_position = ray.origin_tmin.xyz + ray.direction_tmax.xyz * best_t;
+    hit = SurfaceFromTriangle(best_surface, world_position, best_normal, best_t, TRACE_GLOBAL_SDF);
+    GPUSceneTriangle tri = SceneTriangles[best_surface];
+    uint object_index = tri.meta.x;
+    hit.meta.y = object_index < Radiance.scene_counts.x ? SceneObjects[object_index].meta.x : Radiance.feature_flags.y;
+    return hit.identity.z != INVALID_INDEX;
 }
 
 bool TraceGlobalSDF(TraceRay ray, inout SurfaceHit best_hit) {
@@ -1329,12 +1372,19 @@ bool TraceGlobalSDF(TraceRay ray, inout SurfaceHit best_hit) {
         float d = SampleGlobalSDF(p, surface_id, voxel_size);
         float epsilon = max(voxel_size * epsilon_scale, 1.0e-3f);
         if (d <= epsilon) {
-            float3 normal = GlobalSDFNormal(p, voxel_size);
-            SurfaceHit hit = SurfaceFromTriangle(surface_id, p, normal, t, TRACE_GLOBAL_SDF);
-            if (hit.identity.z == INVALID_INDEX) return false;
-            best_hit = hit;
-            return true;
-         }
+            float near_limit = ray.origin_tmin.w + epsilon * 1.5f;
+            if (t <= near_limit) {
+                t += max(epsilon * 1.5f, 1.0e-4f);
+                continue;
+            }
+            SurfaceHit refined;
+            if (RefineGlobalSDFSurface(ray, p, t, epsilon, voxel_size, limit, refined)) {
+                best_hit = refined;
+                return true;
+            }
+            t += max(epsilon * 0.5f, 1.0e-4f);
+            continue;
+        }
         t += max(d, epsilon * 0.25f);
     }
     return false;
@@ -1350,8 +1400,8 @@ SurfaceHit TraceUnifiedRay(TraceRay ray, bool allow_screen) {
         if (screen.identity.w == TRACE_SCREEN) best = screen;
     }
     TraceDynamicGrid(ray, best);
-    TraceAllLocalSDFs(ray, best);
-    TraceGlobalSDF(ray, best);
+    bool global_resolved = TraceGlobalSDF(ray, best);
+    if (!global_resolved) TraceAllLocalSDFs(ray, best);
     return best;
 }
 
@@ -2106,7 +2156,7 @@ void CS_WavefrontDynamicTrace(uint3 dispatch_id : SV_DispatchThreadID) {
     if (TraceDynamicGrid(ray, hit)) {
         uint original = ray.destination;
         RaySurfaceHits[original] = hit;
-        RayFlags[original] |= 0x80000000u;
+        RayFlags[original] |= RAY_FLAG_DYNAMIC_HIT;
     }
 }
 
@@ -2116,8 +2166,8 @@ void CS_WavefrontLocalTrace(uint3 dispatch_id : SV_DispatchThreadID) {
     if (index >= RayCounters[1]) return;
     TraceRay ray = RayQueueB[index];
     uint original = ray.destination;
-    SurfaceHit hit = (RayFlags[original] & 0x80000000u) != 0u ? RaySurfaceHits[original] : MakeSurfaceHit(TRACE_MISS, ray.direction_tmax.w);
-    TraceAllLocalSDFs(ray, hit);
+    SurfaceHit hit = (RayFlags[original] & RAY_FLAG_DYNAMIC_HIT) != 0u ? RaySurfaceHits[original] : MakeSurfaceHit(TRACE_MISS, ray.direction_tmax.w);
+    if ((RayFlags[original] & RAY_FLAG_GLOBAL_RESOLVED) == 0u) TraceAllLocalSDFs(ray, hit);
     RaySurfaceHits[original] = hit;
 }
 
@@ -2127,9 +2177,10 @@ void CS_WavefrontGlobalTrace(uint3 dispatch_id : SV_DispatchThreadID) {
     if (index >= RayCounters[1]) return;
     TraceRay ray = RayQueueB[index];
     uint original = ray.destination;
-    SurfaceHit hit = RaySurfaceHits[original];
-    if (hit.position_distance.w <= 0.0f) hit = MakeSurfaceHit(TRACE_MISS, ray.direction_tmax.w);
-    TraceGlobalSDF(ray, hit);
+    SurfaceHit hit = (RayFlags[original] & RAY_FLAG_DYNAMIC_HIT) != 0u
+        ? RaySurfaceHits[original]
+        : MakeSurfaceHit(TRACE_MISS, ray.direction_tmax.w);
+    if (TraceGlobalSDF(ray, hit)) RayFlags[original] |= RAY_FLAG_GLOBAL_RESOLVED;
     RaySurfaceHits[original] = hit;
 }
 

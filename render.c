@@ -2563,6 +2563,7 @@ static bool create_pipelines(RENDERER *renderer) {
            create_compute_pipeline(renderer, "build/shaders/radiance_generate.cs.spv", renderer->wavefront_layout, &renderer->wavefront_generate_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_screen.cs.spv", renderer->wavefront_layout, &renderer->wavefront_screen_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_dynamic.cs.spv", renderer->wavefront_layout, &renderer->wavefront_dynamic_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_global.cs.spv", renderer->wavefront_layout, &renderer->wavefront_global_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_local.cs.spv", renderer->wavefront_layout, &renderer->wavefront_local_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_shade.cs.spv", renderer->wavefront_layout, &renderer->wavefront_shade_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_probe_temporal.cs.spv", renderer->wavefront_layout, &renderer->wavefront_temporal_pipeline) &&
@@ -3435,6 +3436,12 @@ static void build_wavefront_screen_probes(RENDERER *renderer, NriCommandBuffer *
         barrier_wavefront_buffers(renderer, command_buffer, storage);
     }
 
+    if (renderer->radiance_constants.feature_flags[0] & RADIANCE_FEATURE_GLOBAL_SDF) {
+        bind_wavefront(renderer, command_buffer, renderer->wavefront_global_pipeline);
+        renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){.workGroupNumX = ray_groups, .workGroupNumY = 1, .workGroupNumZ = 1});
+        barrier_wavefront_buffers(renderer, command_buffer, storage);
+    }
+
     bind_wavefront(renderer, command_buffer, renderer->wavefront_local_pipeline);
     renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){.workGroupNumX = ray_groups, .workGroupNumY = 1, .workGroupNumZ = 1});
     barrier_wavefront_buffers(renderer, command_buffer, storage);
@@ -3884,6 +3891,7 @@ void renderer_deinit(RENDERER *renderer) {
             renderer->wavefront_generate_pipeline,
             renderer->wavefront_screen_pipeline,
             renderer->wavefront_dynamic_pipeline,
+            renderer->wavefront_global_pipeline,
             renderer->wavefront_local_pipeline,
             renderer->wavefront_shade_pipeline,
             renderer->wavefront_temporal_pipeline,
