@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 
+# One-shot guarded migration: move Dustmite bake GPU algorithms out of gpu.c.
 GPU = Path("gpu.c")
 BAKE = Path("bake.c")
 INTERNAL = Path("render_internal.h")
