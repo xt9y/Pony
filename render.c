@@ -14,6 +14,9 @@
 #define FRAME_CONSTANTS_BUFFER_SIZE 256u
 #define FAR_PLANE 10000.0f
 #define NEAR_PLANE 0.05f
+#define DYNAMIC_GRID_MAX_DIM 16u
+#define DYNAMIC_GRID_MIN_DIM 4u
+#define DYNAMIC_GRID_INDEX_BUDGET 1048576u
 
 typedef struct FRAME_CONSTANTS {
     MAT4 view_projection;
@@ -888,15 +891,11 @@ static void destroy_radiance_scene_fallbacks(RENDERER *renderer) {
 
     RADIANCE_SCENE_FALLBACKS *fallbacks = &renderer->radiance_fallbacks;
 
-    if (fallbacks->dynamic_grid_cells_srv) renderer->gpu->core.DestroyDescriptor(fallbacks->dynamic_grid_cells_srv);
-    if (fallbacks->dynamic_grid_indices_srv) renderer->gpu->core.DestroyDescriptor(fallbacks->dynamic_grid_indices_srv);
     if (fallbacks->global_sdf_clipmaps_srv) renderer->gpu->core.DestroyDescriptor(fallbacks->global_sdf_clipmaps_srv);
     if (fallbacks->global_sdf_page_table_srv) renderer->gpu->core.DestroyDescriptor(fallbacks->global_sdf_page_table_srv);
     if (fallbacks->global_sdf_bricks_srv) renderer->gpu->core.DestroyDescriptor(fallbacks->global_sdf_bricks_srv);
     if (fallbacks->global_sdf_surface_ids_srv) renderer->gpu->core.DestroyDescriptor(fallbacks->global_sdf_surface_ids_srv);
 
-    if (fallbacks->dynamic_grid_cells) gpu_destroy_buffer(renderer->gpu, fallbacks->dynamic_grid_cells);
-    if (fallbacks->dynamic_grid_indices) gpu_destroy_buffer(renderer->gpu, fallbacks->dynamic_grid_indices);
     if (fallbacks->global_sdf_clipmaps) gpu_destroy_buffer(renderer->gpu, fallbacks->global_sdf_clipmaps);
     if (fallbacks->global_sdf_page_table) gpu_destroy_buffer(renderer->gpu, fallbacks->global_sdf_page_table);
     if (fallbacks->global_sdf_bricks) gpu_destroy_buffer(renderer->gpu, fallbacks->global_sdf_bricks);
@@ -931,9 +930,7 @@ static bool create_radiance_scene_fallbacks(RENDERER *renderer) {
 
     RADIANCE_SCENE_FALLBACKS *fallbacks = &renderer->radiance_fallbacks;
 
-    if (!create_radiance_fallback_buffer(renderer, sizeof(GPU_DYNAMIC_GRID_CELL), &fallbacks->dynamic_grid_cells, &fallbacks->dynamic_grid_cells_srv) ||
-        !create_radiance_fallback_buffer(renderer, sizeof(uint32_t), &fallbacks->dynamic_grid_indices, &fallbacks->dynamic_grid_indices_srv) ||
-        !create_radiance_fallback_buffer(renderer, sizeof(GPU_GLOBAL_SDF_CLIPMAP), &fallbacks->global_sdf_clipmaps, &fallbacks->global_sdf_clipmaps_srv) ||
+    if (!create_radiance_fallback_buffer(renderer, sizeof(GPU_GLOBAL_SDF_CLIPMAP), &fallbacks->global_sdf_clipmaps, &fallbacks->global_sdf_clipmaps_srv) ||
         !create_radiance_fallback_buffer(renderer, sizeof(uint32_t), &fallbacks->global_sdf_page_table, &fallbacks->global_sdf_page_table_srv) ||
         !create_radiance_fallback_buffer(renderer, sizeof(float), &fallbacks->global_sdf_bricks, &fallbacks->global_sdf_bricks_srv) ||
         !create_radiance_fallback_buffer(renderer, sizeof(uint32_t), &fallbacks->global_sdf_surface_ids, &fallbacks->global_sdf_surface_ids_srv)) {
@@ -946,6 +943,284 @@ static bool create_radiance_scene_fallbacks(RENDERER *renderer) {
         .stages = NriStageBits_COMPUTE_SHADER
     };
 
+    return true;
+}
+
+static void destroy_dynamic_grid(RENDERER *renderer) {
+    if (!renderer || !renderer->gpu) return;
+    RADIANCE_DYNAMIC_GRID *grid = &renderer->dynamic_grid;
+    if (grid->cells_srv) renderer->gpu->core.DestroyDescriptor(grid->cells_srv);
+    if (grid->indices_srv) renderer->gpu->core.DestroyDescriptor(grid->indices_srv);
+    if (grid->cells) gpu_destroy_buffer(renderer->gpu, grid->cells);
+    if (grid->indices) gpu_destroy_buffer(renderer->gpu, grid->indices);
+    free(grid->cpu_cells);
+    free(grid->cpu_indices);
+    memset(grid, 0, sizeof(*grid));
+}
+
+static bool create_dynamic_grid(RENDERER *renderer) {
+    destroy_dynamic_grid(renderer);
+    RADIANCE_DYNAMIC_GRID *grid = &renderer->dynamic_grid;
+    const uint32_t model_capacity = renderer->sdf.model_count ? renderer->sdf.model_count : 1u;
+    uint32_t dim = DYNAMIC_GRID_MAX_DIM;
+    while (dim > DYNAMIC_GRID_MIN_DIM && (uint64_t)dim * dim * dim * model_capacity > DYNAMIC_GRID_INDEX_BUDGET)
+        dim >>= 1u;
+
+    const uint64_t cell_capacity = (uint64_t)dim * dim * dim;
+    const uint64_t index_capacity = cell_capacity * model_capacity;
+    if (!cell_capacity || cell_capacity > UINT32_MAX || !index_capacity || index_capacity > UINT32_MAX) return false;
+
+    grid->dimension_limit = dim;
+    grid->cell_capacity = (uint32_t)cell_capacity;
+    grid->index_capacity = (uint32_t)index_capacity;
+    grid->cpu_cells = calloc(grid->cell_capacity, sizeof(*grid->cpu_cells));
+    grid->cpu_indices = calloc(grid->index_capacity, sizeof(*grid->cpu_indices));
+    if (!grid->cpu_cells || !grid->cpu_indices) {
+        destroy_dynamic_grid(renderer);
+        return false;
+    }
+
+    const NriBufferDesc cells_desc = {
+        .size = (uint64_t)grid->cell_capacity * sizeof(GPU_DYNAMIC_GRID_CELL),
+        .structureStride = sizeof(GPU_DYNAMIC_GRID_CELL),
+        .usage = NriBufferUsageBits_SHADER_RESOURCE
+    };
+    const NriBufferDesc indices_desc = {
+        .size = (uint64_t)grid->index_capacity * sizeof(uint32_t),
+        .structureStride = sizeof(uint32_t),
+        .usage = NriBufferUsageBits_SHADER_RESOURCE
+    };
+    if (!gpu_create_buffer(renderer->gpu, &cells_desc, NriMemoryLocation_DEVICE, &grid->cells) ||
+        !gpu_create_buffer(renderer->gpu, &indices_desc, NriMemoryLocation_DEVICE, &grid->indices) ||
+        !create_buffer_view(renderer, grid->cells, NriBufferView_STRUCTURED_BUFFER, cells_desc.size, sizeof(GPU_DYNAMIC_GRID_CELL), &grid->cells_srv) ||
+        !create_buffer_view(renderer, grid->indices, NriBufferView_STRUCTURED_BUFFER, indices_desc.size, sizeof(uint32_t), &grid->indices_srv)) {
+        destroy_dynamic_grid(renderer);
+        return false;
+    }
+
+    grid->dirty = true;
+    return true;
+}
+
+static uint64_t dynamic_grid_signature(const RENDERER *renderer) {
+    uint64_t hash = 1469598103934665603ull;
+    uint32_t dynamic_count = 0u;
+    for (uint32_t i = 0; i < renderer->gpu_object_count; ++i) {
+        const GPU_OBJECT *object = &renderer->cpu_objects[i];
+        if (object->state != (uint32_t)DYNAMIC) continue;
+        uint64_t token = ((uint64_t)(i + 1u) << 32u) ^ (uint64_t)object->revision;
+        hash ^= token;
+        hash *= 1099511628211ull;
+        ++dynamic_count;
+    }
+    hash ^= dynamic_count;
+    hash *= 1099511628211ull;
+    return hash;
+}
+
+static void dynamic_model_world_bounds(const RENDERER *renderer, uint32_t model_index, VEC3 *out_min, VEC3 *out_max) {
+    const GPU_SDF_MODEL *model = &renderer->sdf.cpu_models[model_index];
+    const MAT4 world = renderer->cpu_objects[model_index].world;
+    VEC3 minimum = v3(INFINITY, INFINITY, INFINITY);
+    VEC3 maximum = v3(-INFINITY, -INFINITY, -INFINITY);
+    for (uint32_t corner = 0u; corner < 8u; ++corner) {
+        const VEC3 local = v3(
+            (corner & 1u) ? model->bounds_max[0] : model->bounds_min[0],
+            (corner & 2u) ? model->bounds_max[1] : model->bounds_min[1],
+            (corner & 4u) ? model->bounds_max[2] : model->bounds_min[2]
+        );
+        const VEC3 p = mat4_point(world, local);
+        minimum.x = fminf(minimum.x, p.x);
+        minimum.y = fminf(minimum.y, p.y);
+        minimum.z = fminf(minimum.z, p.z);
+        maximum.x = fmaxf(maximum.x, p.x);
+        maximum.y = fmaxf(maximum.y, p.y);
+        maximum.z = fmaxf(maximum.z, p.z);
+    }
+    *out_min = minimum;
+    *out_max = maximum;
+}
+
+static uint32_t dynamic_grid_coord(float value, float origin, float cell_size, uint32_t dim) {
+    int32_t coordinate = (int32_t)floorf((value - origin) / cell_size);
+    if (coordinate < 0) coordinate = 0;
+    if ((uint32_t)coordinate >= dim) coordinate = (int32_t)dim - 1;
+    return (uint32_t)coordinate;
+}
+
+static bool rebuild_dynamic_grid(RENDERER *renderer) {
+    RADIANCE_DYNAMIC_GRID *grid = &renderer->dynamic_grid;
+    if (!grid->cpu_cells || !grid->cpu_indices || !grid->cells || !grid->indices || renderer->sdf.model_count != renderer->gpu_object_count) return false;
+
+    typedef struct DYNAMIC_MODEL_BOUNDS {
+        uint32_t model_index;
+        VEC3 min;
+        VEC3 max;
+    } DYNAMIC_MODEL_BOUNDS;
+
+    uint32_t dynamic_count = 0u;
+    for (uint32_t i = 0; i < renderer->gpu_object_count; ++i)
+        if (renderer->cpu_objects[i].state == (uint32_t)DYNAMIC) ++dynamic_count;
+
+    memset(grid->cpu_cells, 0, (size_t)grid->cell_capacity * sizeof(*grid->cpu_cells));
+    grid->cpu_indices[0] = 0u;
+    grid->dimensions[0] = grid->dimensions[1] = grid->dimensions[2] = 0u;
+    grid->cell_count = 0u;
+    grid->index_count = 0u;
+    grid->model_count = dynamic_count;
+    grid->origin[0] = grid->origin[1] = grid->origin[2] = 0.0f;
+    grid->cell_size = 0.0f;
+    grid->signature = dynamic_grid_signature(renderer);
+    grid->dirty = true;
+    if (!dynamic_count) return true;
+
+    DYNAMIC_MODEL_BOUNDS *bounds = calloc(dynamic_count, sizeof(*bounds));
+    if (!bounds) return false;
+
+    VEC3 scene_min = v3(INFINITY, INFINITY, INFINITY);
+    VEC3 scene_max = v3(-INFINITY, -INFINITY, -INFINITY);
+    uint32_t dynamic_index = 0u;
+    for (uint32_t model_index = 0; model_index < renderer->gpu_object_count; ++model_index) {
+        if (renderer->cpu_objects[model_index].state != (uint32_t)DYNAMIC) continue;
+        DYNAMIC_MODEL_BOUNDS *entry = &bounds[dynamic_index++];
+        entry->model_index = model_index;
+        dynamic_model_world_bounds(renderer, model_index, &entry->min, &entry->max);
+        scene_min.x = fminf(scene_min.x, entry->min.x);
+        scene_min.y = fminf(scene_min.y, entry->min.y);
+        scene_min.z = fminf(scene_min.z, entry->min.z);
+        scene_max.x = fmaxf(scene_max.x, entry->max.x);
+        scene_max.y = fmaxf(scene_max.y, entry->max.y);
+        scene_max.z = fmaxf(scene_max.z, entry->max.z);
+    }
+
+    const VEC3 extent = v3(scene_max.x - scene_min.x, scene_max.y - scene_min.y, scene_max.z - scene_min.z);
+    const float longest = fmaxf(extent.x, fmaxf(extent.y, extent.z));
+    const uint32_t interior_dim = grid->dimension_limit > 2u ? grid->dimension_limit - 2u : grid->dimension_limit;
+    const float cell_size = fmaxf(longest / fmaxf((float)interior_dim, 1.0f), 0.25f);
+    grid->cell_size = cell_size;
+    grid->origin[0] = scene_min.x - cell_size;
+    grid->origin[1] = scene_min.y - cell_size;
+    grid->origin[2] = scene_min.z - cell_size;
+
+    const float padded_max[3] = {scene_max.x + cell_size, scene_max.y + cell_size, scene_max.z + cell_size};
+    for (uint32_t axis = 0u; axis < 3u; ++axis) {
+        uint32_t dim = (uint32_t)ceilf((padded_max[axis] - grid->origin[axis]) / cell_size);
+        if (!dim) dim = 1u;
+        if (dim > grid->dimension_limit) dim = grid->dimension_limit;
+        grid->dimensions[axis] = dim;
+    }
+
+    const uint64_t cell_count64 = (uint64_t)grid->dimensions[0] * grid->dimensions[1] * grid->dimensions[2];
+    if (!cell_count64 || cell_count64 > grid->cell_capacity) {
+        free(bounds);
+        return false;
+    }
+    grid->cell_count = (uint32_t)cell_count64;
+
+    uint32_t *counts = calloc(grid->cell_count, sizeof(*counts));
+    uint32_t *cursor = calloc(grid->cell_count, sizeof(*cursor));
+    if (!counts || !cursor) {
+        free(counts);
+        free(cursor);
+        free(bounds);
+        return false;
+    }
+
+    uint64_t total_indices = 0u;
+    const uint32_t dim_x = grid->dimensions[0];
+    const uint32_t dim_y = grid->dimensions[1];
+    const uint32_t dim_z = grid->dimensions[2];
+    for (uint32_t i = 0u; i < dynamic_count; ++i) {
+        const DYNAMIC_MODEL_BOUNDS *entry = &bounds[i];
+        const uint32_t min_x = dynamic_grid_coord(entry->min.x, grid->origin[0], cell_size, dim_x);
+        const uint32_t min_y = dynamic_grid_coord(entry->min.y, grid->origin[1], cell_size, dim_y);
+        const uint32_t min_z = dynamic_grid_coord(entry->min.z, grid->origin[2], cell_size, dim_z);
+        const uint32_t max_x = dynamic_grid_coord(entry->max.x, grid->origin[0], cell_size, dim_x);
+        const uint32_t max_y = dynamic_grid_coord(entry->max.y, grid->origin[1], cell_size, dim_y);
+        const uint32_t max_z = dynamic_grid_coord(entry->max.z, grid->origin[2], cell_size, dim_z);
+        for (uint32_t z = min_z; z <= max_z; ++z)
+            for (uint32_t y = min_y; y <= max_y; ++y)
+                for (uint32_t x = min_x; x <= max_x; ++x) {
+                    const uint32_t flat = x + dim_x * (y + dim_y * z);
+                    ++counts[flat];
+                    ++total_indices;
+                }
+    }
+
+    if (total_indices > grid->index_capacity) {
+        free(counts);
+        free(cursor);
+        free(bounds);
+        return false;
+    }
+    grid->index_count = (uint32_t)total_indices;
+
+    uint32_t offset = 0u;
+    for (uint32_t z = 0u; z < dim_z; ++z) {
+        for (uint32_t y = 0u; y < dim_y; ++y) {
+            for (uint32_t x = 0u; x < dim_x; ++x) {
+                const uint32_t flat = x + dim_x * (y + dim_y * z);
+                GPU_DYNAMIC_GRID_CELL *cell = &grid->cpu_cells[flat];
+                cell->range_flags[0] = offset;
+                cell->range_flags[1] = counts[flat];
+                cursor[flat] = offset;
+                offset += counts[flat];
+                cell->bounds_min[0] = grid->origin[0] + (float)x * cell_size;
+                cell->bounds_min[1] = grid->origin[1] + (float)y * cell_size;
+                cell->bounds_min[2] = grid->origin[2] + (float)z * cell_size;
+                cell->bounds_max[0] = cell->bounds_min[0] + cell_size;
+                cell->bounds_max[1] = cell->bounds_min[1] + cell_size;
+                cell->bounds_max[2] = cell->bounds_min[2] + cell_size;
+            }
+        }
+    }
+
+    for (uint32_t i = 0u; i < dynamic_count; ++i) {
+        const DYNAMIC_MODEL_BOUNDS *entry = &bounds[i];
+        const uint32_t min_x = dynamic_grid_coord(entry->min.x, grid->origin[0], cell_size, dim_x);
+        const uint32_t min_y = dynamic_grid_coord(entry->min.y, grid->origin[1], cell_size, dim_y);
+        const uint32_t min_z = dynamic_grid_coord(entry->min.z, grid->origin[2], cell_size, dim_z);
+        const uint32_t max_x = dynamic_grid_coord(entry->max.x, grid->origin[0], cell_size, dim_x);
+        const uint32_t max_y = dynamic_grid_coord(entry->max.y, grid->origin[1], cell_size, dim_y);
+        const uint32_t max_z = dynamic_grid_coord(entry->max.z, grid->origin[2], cell_size, dim_z);
+        for (uint32_t z = min_z; z <= max_z; ++z)
+            for (uint32_t y = min_y; y <= max_y; ++y)
+                for (uint32_t x = min_x; x <= max_x; ++x) {
+                    const uint32_t flat = x + dim_x * (y + dim_y * z);
+                    grid->cpu_indices[cursor[flat]++] = entry->model_index;
+                }
+    }
+
+    free(counts);
+    free(cursor);
+    free(bounds);
+    return true;
+}
+
+static void apply_dynamic_grid_constants(RENDERER *renderer, RADIANCE_CONSTANTS *constants) {
+    const RADIANCE_DYNAMIC_GRID *grid = &renderer->dynamic_grid;
+    constants->sdf_counts[1] = grid->cell_count;
+    constants->dynamic_grid[0] = grid->dimensions[0];
+    constants->dynamic_grid[1] = grid->dimensions[1];
+    constants->dynamic_grid[2] = grid->dimensions[2];
+    constants->dynamic_grid[3] = grid->index_count;
+    constants->dynamic_grid_origin_cell[0] = grid->origin[0];
+    constants->dynamic_grid_origin_cell[1] = grid->origin[1];
+    constants->dynamic_grid_origin_cell[2] = grid->origin[2];
+    constants->dynamic_grid_origin_cell[3] = grid->cell_size;
+    constants->feature_flags[0] &= ~RADIANCE_FEATURE_DYNAMIC_GRID;
+    if (grid->model_count && grid->cell_count && grid->index_count)
+        constants->feature_flags[0] |= RADIANCE_FEATURE_DYNAMIC_GRID;
+}
+
+static bool refresh_dynamic_grid(RENDERER *renderer) {
+    RADIANCE_DYNAMIC_GRID *grid = &renderer->dynamic_grid;
+    if (!grid->cells || !grid->indices) return false;
+    const uint64_t signature = dynamic_grid_signature(renderer);
+    if (signature == grid->signature) return true;
+    if (!rebuild_dynamic_grid(renderer)) return false;
+    apply_dynamic_grid_constants(renderer, &renderer->radiance_constants);
+    renderer->probe_history_valid = false;
     return true;
 }
 
@@ -1447,6 +1722,7 @@ static bool create_sdf_scene(RENDERER *renderer, SCENE *scene) {
 
 static void destroy_scene_resources(RENDERER *renderer) {
     destroy_radiance_scene_data(renderer);
+    destroy_dynamic_grid(renderer);
     destroy_sdf_scene(renderer);
 
     if (renderer->object_srv) renderer->gpu->core.DestroyDescriptor(renderer->object_srv);
@@ -1672,8 +1948,7 @@ static bool create_scene_resources(RENDERER *renderer, SCENE *scene) {
     free(vertices);
     free(materials);
 
-    if (!ok || !create_sdf_scene(renderer, scene) || !create_radiance_scene_gpu_resources(renderer) || !update_radiance_constants(renderer) ||
-        !update_radiance_scene_descriptors(renderer)) {
+    if (!ok || !create_sdf_scene(renderer, scene) || !create_radiance_scene_gpu_resources(renderer)) {
         destroy_scene_resources(renderer);
 
         return false;
@@ -1755,7 +2030,7 @@ static bool update_radiance_constants(RENDERER *renderer) {
     constants.scene_counts[2] = renderer->radiance_scene.triangle_count;
     constants.scene_counts[3] = renderer->radiance_scene.emissive_triangle_count;
     constants.sdf_counts[0] = renderer->sdf.model_count;
-    constants.sdf_counts[1] = 0u;
+    constants.sdf_counts[1] = renderer->dynamic_grid.cell_count;
     constants.sdf_counts[2] = 0u;
     constants.sdf_counts[3] = renderer->light_count;
     constants.cache_counts[0] = renderer->radiance_surface_cache.capacity;
@@ -1780,6 +2055,7 @@ static bool update_radiance_constants(RENDERER *renderer) {
     constants.temporal_params[3] = 0.90f;
     constants.feature_flags[0] = RADIANCE_FEATURE_SURFACE_CACHE | RADIANCE_FEATURE_TEMPORAL_PROBES | RADIANCE_FEATURE_SPATIAL_PROBES;
     if (renderer->radiance_scene.emissive_triangle_count) constants.feature_flags[0] |= RADIANCE_FEATURE_EMISSIVE;
+    apply_dynamic_grid_constants(renderer, &constants);
     constants.feature_flags[1] = 1u;
     constants.feature_flags[2] = renderer->wavefront.ray_capacity;
     constants.feature_flags[3] = 0u;
@@ -2259,6 +2535,7 @@ static bool create_pipelines(RENDERER *renderer) {
            create_compute_pipeline(renderer, "build/shaders/radiance_budget.cs.spv", renderer->wavefront_layout, &renderer->wavefront_budget_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_generate.cs.spv", renderer->wavefront_layout, &renderer->wavefront_generate_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_screen.cs.spv", renderer->wavefront_layout, &renderer->wavefront_screen_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_dynamic.cs.spv", renderer->wavefront_layout, &renderer->wavefront_dynamic_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_local.cs.spv", renderer->wavefront_layout, &renderer->wavefront_local_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_shade.cs.spv", renderer->wavefront_layout, &renderer->wavefront_shade_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_probe_temporal.cs.spv", renderer->wavefront_layout, &renderer->wavefront_temporal_pipeline) &&
@@ -2394,7 +2671,7 @@ static bool update_wavefront_trace_descriptors(RENDERER *renderer) {
 static bool update_radiance_scene_descriptors(RENDERER *renderer) {
     if (!renderer || !renderer->wavefront_scene_set || !renderer->radiance_constants_srv || !renderer->pass_constants_srv || !renderer->object_srv || !renderer->material_srv ||
         !renderer->radiance_scene.triangles_srv || !renderer->radiance_scene.emissive_triangles_srv || !renderer->sdf.models_srv || !renderer->sdf.voxels_srv ||
-        !renderer->sdf.surface_ids_srv || !renderer->radiance_fallbacks.dynamic_grid_cells_srv || !renderer->radiance_fallbacks.dynamic_grid_indices_srv ||
+        !renderer->sdf.surface_ids_srv || !renderer->dynamic_grid.cells_srv || !renderer->dynamic_grid.indices_srv ||
         !renderer->radiance_fallbacks.global_sdf_clipmaps_srv || !renderer->radiance_fallbacks.global_sdf_page_table_srv || !renderer->radiance_fallbacks.global_sdf_bricks_srv ||
         !renderer->radiance_fallbacks.global_sdf_surface_ids_srv || !renderer->light_srv || !renderer->material_id.srv || !renderer->primitive_id.srv)
         return false;
@@ -2405,8 +2682,8 @@ static bool update_radiance_scene_descriptors(RENDERER *renderer) {
         renderer->radiance_scene.emissive_triangles_srv, renderer->sdf.models_srv, renderer->sdf.voxels_srv
     };
     const NriDescriptor *future_scene[] = {
-        renderer->sdf.surface_ids_srv, renderer->radiance_fallbacks.dynamic_grid_cells_srv,
-        renderer->radiance_fallbacks.dynamic_grid_indices_srv, renderer->radiance_fallbacks.global_sdf_clipmaps_srv,
+        renderer->sdf.surface_ids_srv, renderer->dynamic_grid.cells_srv,
+        renderer->dynamic_grid.indices_srv, renderer->radiance_fallbacks.global_sdf_clipmaps_srv,
         renderer->radiance_fallbacks.global_sdf_page_table_srv, renderer->radiance_fallbacks.global_sdf_bricks_srv,
         renderer->radiance_fallbacks.global_sdf_surface_ids_srv
     };
@@ -2567,175 +2844,84 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
     renderer->pass_constants.flags[0] = renderer->probe_history_valid ? 1u : 0u;
 
     NriStreamerCopyBatch batch = renderer->gpu->streamer_api.BeginStreamerCopyBatch(renderer->gpu->streamer);
-
     if (!batch) return false;
 
-    const NriDataSize object_data = {
-        .data = renderer->cpu_objects,
-        .size = (uint64_t)renderer->gpu_object_count * sizeof(GPU_OBJECT)
-    };
+    const NriDataSize object_data = {.data = renderer->cpu_objects, .size = (uint64_t)renderer->gpu_object_count * sizeof(GPU_OBJECT)};
+    const NriDataSize light_data = {.data = renderer->cpu_lights, .size = (uint64_t)renderer->light_count * sizeof(GPU_LIGHT)};
+    const NriDataSize sdf_data = {.data = renderer->sdf.cpu_models, .size = (uint64_t)renderer->sdf.model_count * sizeof(GPU_SDF_MODEL)};
+    const NriDataSize frame_data = {.data = frame, .size = sizeof(*frame)};
+    const NriDataSize pass_data = {.data = &renderer->pass_constants, .size = sizeof(renderer->pass_constants)};
+    const NriDataSize radiance_data = {.data = &renderer->radiance_constants, .size = sizeof(renderer->radiance_constants)};
+    const uint32_t cell_upload_count = renderer->dynamic_grid.cell_count ? renderer->dynamic_grid.cell_count : 1u;
+    const uint32_t index_upload_count = renderer->dynamic_grid.index_count ? renderer->dynamic_grid.index_count : 1u;
+    const NriDataSize grid_cell_data = {.data = renderer->dynamic_grid.cpu_cells, .size = (uint64_t)cell_upload_count * sizeof(GPU_DYNAMIC_GRID_CELL)};
+    const NriDataSize grid_index_data = {.data = renderer->dynamic_grid.cpu_indices, .size = (uint64_t)index_upload_count * sizeof(uint32_t)};
 
-    const NriDataSize light_data = {
-        .data = renderer->cpu_lights,
-        .size = (uint64_t)renderer->light_count * sizeof(GPU_LIGHT)
-    };
+    NriStreamBufferDataDesc uploads[8];
+    uint32_t upload_count = 0u;
+    uploads[upload_count++] = (NriStreamBufferDataDesc){.dataChunks = &object_data, .dataChunkNum = 1, .placementAlignment = 16, .copyBatch = batch, .dstBuffer = renderer->object_buffer};
+    uploads[upload_count++] = (NriStreamBufferDataDesc){.dataChunks = &light_data, .dataChunkNum = 1, .placementAlignment = 16, .copyBatch = batch, .dstBuffer = renderer->light_buffer};
+    uploads[upload_count++] = (NriStreamBufferDataDesc){.dataChunks = &sdf_data, .dataChunkNum = 1, .placementAlignment = 16, .copyBatch = batch, .dstBuffer = renderer->sdf.models};
+    uploads[upload_count++] = (NriStreamBufferDataDesc){.dataChunks = &frame_data, .dataChunkNum = 1, .placementAlignment = 16, .copyBatch = batch, .dstBuffer = renderer->frame_buffer};
+    uploads[upload_count++] = (NriStreamBufferDataDesc){.dataChunks = &pass_data, .dataChunkNum = 1, .placementAlignment = 16, .copyBatch = batch, .dstBuffer = renderer->pass_constants_buffer};
+    uploads[upload_count++] = (NriStreamBufferDataDesc){.dataChunks = &radiance_data, .dataChunkNum = 1, .placementAlignment = 16, .copyBatch = batch, .dstBuffer = renderer->radiance_constants_buffer};
+    const bool upload_grid = renderer->dynamic_grid.dirty;
+    if (upload_grid) {
+        uploads[upload_count++] = (NriStreamBufferDataDesc){.dataChunks = &grid_cell_data, .dataChunkNum = 1, .placementAlignment = 16, .copyBatch = batch, .dstBuffer = renderer->dynamic_grid.cells};
+        uploads[upload_count++] = (NriStreamBufferDataDesc){.dataChunks = &grid_index_data, .dataChunkNum = 1, .placementAlignment = 16, .copyBatch = batch, .dstBuffer = renderer->dynamic_grid.indices};
+    }
 
-    const NriDataSize sdf_data = {
-        .data = renderer->sdf.cpu_models,
-        .size = (uint64_t)renderer->sdf.model_count * sizeof(GPU_SDF_MODEL)
-    };
-
-    const NriDataSize frame_data = {
-        .data = frame,
-        .size = sizeof(*frame)
-    };
-
-    const NriDataSize pass_data = {
-        .data = &renderer->pass_constants,
-        .size = sizeof(renderer->pass_constants)
-    };
-
-    const NriStreamBufferDataDesc uploads[] = {
-        {
-            .dataChunks = &object_data,
-            .dataChunkNum = 1,
-            .placementAlignment = 16,
-            .copyBatch = batch,
-            .dstBuffer = renderer->object_buffer
-        },
-        {
-            .dataChunks = &light_data,
-            .dataChunkNum = 1,
-            .placementAlignment = 16,
-            .copyBatch = batch,
-            .dstBuffer = renderer->light_buffer
-        },
-        {
-            .dataChunks = &sdf_data,
-            .dataChunkNum = 1,
-            .placementAlignment = 16,
-            .copyBatch = batch,
-            .dstBuffer = renderer->sdf.models
-        },
-        {
-            .dataChunks = &frame_data,
-            .dataChunkNum = 1,
-            .placementAlignment = 16,
-            .copyBatch = batch,
-            .dstBuffer = renderer->frame_buffer
-        },
-        {
-            .dataChunks = &pass_data,
-            .dataChunkNum = 1,
-            .placementAlignment = 16,
-            .copyBatch = batch,
-            .dstBuffer = renderer->pass_constants_buffer
-        }
-    };
-
-    for (uint32_t i = 0; i < 5; ++i) {
+    for (uint32_t i = 0u; i < upload_count; ++i) {
         const NriBufferOffset streamed = renderer->gpu->streamer_api.StreamBufferData(renderer->gpu->streamer, &uploads[i]);
-
         if (!streamed.buffer) return false;
     }
 
-    const NriAccessStage copy = {
-        .access = NriAccessBits_COPY_DESTINATION,
-        .stages = NriStageBits_COPY
-    };
+    const NriAccessStage copy = {.access = NriAccessBits_COPY_DESTINATION, .stages = NriStageBits_COPY};
+    const NriAccessStage object_read = {.access = NriAccessBits_SHADER_RESOURCE, .stages = NriStageBits_VERTEX_SHADER | NriStageBits_COMPUTE_SHADER};
+    const NriAccessStage compute_read = {.access = NriAccessBits_SHADER_RESOURCE, .stages = NriStageBits_COMPUTE_SHADER};
+    const NriAccessStage frame_read = {.access = NriAccessBits_CONSTANT_BUFFER, .stages = NriStageBits_VERTEX_SHADER | NriStageBits_COMPUTE_SHADER};
+    const NriAccessStage pass_read = {.access = NriAccessBits_CONSTANT_BUFFER, .stages = NriStageBits_COMPUTE_SHADER};
+    const NriAccessStage radiance_read = {.access = NriAccessBits_CONSTANT_BUFFER, .stages = NriStageBits_COMPUTE_SHADER | NriStageBits_FRAGMENT_SHADER};
 
-    const NriBufferBarrierDesc before[] = {
-        {
-            .buffer = renderer->object_buffer,
-            .before = renderer->object_state,
-            .after = copy
-        },
-        {
-            .buffer = renderer->light_buffer,
-            .before = renderer->light_state,
-            .after = copy
-        },
-        {
-            .buffer = renderer->sdf.models,
-            .before = renderer->sdf.models_state,
-            .after = copy
-        },
-        {
-            .buffer = renderer->frame_buffer,
-            .before = renderer->frame_state,
-            .after = copy
-        },
-        {
-            .buffer = renderer->pass_constants_buffer,
-            .before = renderer->pass_constants_state,
-            .after = copy
-        }
-    };
-
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .buffers = before,
-        .bufferNum = 5
-    });
+    NriBufferBarrierDesc before[8];
+    uint32_t barrier_count = 0u;
+    before[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->object_buffer, .before = renderer->object_state, .after = copy};
+    before[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->light_buffer, .before = renderer->light_state, .after = copy};
+    before[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->sdf.models, .before = renderer->sdf.models_state, .after = copy};
+    before[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->frame_buffer, .before = renderer->frame_state, .after = copy};
+    before[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->pass_constants_buffer, .before = renderer->pass_constants_state, .after = copy};
+    before[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->radiance_constants_buffer, .before = renderer->radiance_constants_state, .after = copy};
+    if (upload_grid) {
+        before[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->dynamic_grid.cells, .before = renderer->dynamic_grid.state, .after = copy};
+        before[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->dynamic_grid.indices, .before = renderer->dynamic_grid.state, .after = copy};
+    }
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.buffers = before, .bufferNum = barrier_count});
     renderer->gpu->streamer_api.CmdCopyStreamedData(command_buffer, renderer->gpu->streamer, batch);
 
-    const NriAccessStage object_read = {
-        .access = NriAccessBits_SHADER_RESOURCE,
-        .stages = NriStageBits_VERTEX_SHADER | NriStageBits_COMPUTE_SHADER
-    };
+    NriBufferBarrierDesc after[8];
+    barrier_count = 0u;
+    after[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->object_buffer, .before = copy, .after = object_read};
+    after[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->light_buffer, .before = copy, .after = compute_read};
+    after[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->sdf.models, .before = copy, .after = compute_read};
+    after[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->frame_buffer, .before = copy, .after = frame_read};
+    after[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->pass_constants_buffer, .before = copy, .after = pass_read};
+    after[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->radiance_constants_buffer, .before = copy, .after = radiance_read};
+    if (upload_grid) {
+        after[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->dynamic_grid.cells, .before = copy, .after = compute_read};
+        after[barrier_count++] = (NriBufferBarrierDesc){.buffer = renderer->dynamic_grid.indices, .before = copy, .after = compute_read};
+    }
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.buffers = after, .bufferNum = barrier_count});
 
-    const NriAccessStage compute_read = {
-        .access = NriAccessBits_SHADER_RESOURCE,
-        .stages = NriStageBits_COMPUTE_SHADER
-    };
-
-    const NriAccessStage frame_read = {
-        .access = NriAccessBits_CONSTANT_BUFFER,
-        .stages = NriStageBits_VERTEX_SHADER | NriStageBits_COMPUTE_SHADER
-    };
-
-    const NriAccessStage pass_read = {
-        .access = NriAccessBits_CONSTANT_BUFFER,
-        .stages = NriStageBits_COMPUTE_SHADER
-    };
-
-    const NriBufferBarrierDesc after[] = {
-        {
-            .buffer = renderer->object_buffer,
-            .before = copy,
-            .after = object_read
-        },
-        {
-            .buffer = renderer->light_buffer,
-            .before = copy,
-            .after = compute_read
-        },
-        {
-            .buffer = renderer->sdf.models,
-            .before = copy,
-            .after = compute_read
-        },
-        {
-            .buffer = renderer->frame_buffer,
-            .before = copy,
-            .after = frame_read
-        },
-        {
-            .buffer = renderer->pass_constants_buffer,
-            .before = copy,
-            .after = pass_read
-        }
-    };
-
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .buffers = after,
-        .bufferNum = 5
-    });
     renderer->object_state = object_read;
     renderer->light_state = compute_read;
     renderer->sdf.models_state = compute_read;
     renderer->frame_state = frame_read;
     renderer->pass_constants_state = pass_read;
-
+    renderer->radiance_constants_state = radiance_read;
+    if (upload_grid) {
+        renderer->dynamic_grid.state = compute_read;
+        renderer->dynamic_grid.dirty = false;
+    }
     return true;
 }
 
@@ -3216,6 +3402,12 @@ static void build_wavefront_screen_probes(RENDERER *renderer, NriCommandBuffer *
     renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){.workGroupNumX = ray_groups, .workGroupNumY = 1, .workGroupNumZ = 1});
     barrier_wavefront_buffers(renderer, command_buffer, storage);
 
+    if (renderer->radiance_constants.feature_flags[0] & RADIANCE_FEATURE_DYNAMIC_GRID) {
+        bind_wavefront(renderer, command_buffer, renderer->wavefront_dynamic_pipeline);
+        renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){.workGroupNumX = ray_groups, .workGroupNumY = 1, .workGroupNumZ = 1});
+        barrier_wavefront_buffers(renderer, command_buffer, storage);
+    }
+
     bind_wavefront(renderer, command_buffer, renderer->wavefront_local_pipeline);
     renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){.workGroupNumX = ray_groups, .workGroupNumY = 1, .workGroupNumZ = 1});
     barrier_wavefront_buffers(renderer, command_buffer, storage);
@@ -3664,6 +3856,7 @@ void renderer_deinit(RENDERER *renderer) {
             renderer->wavefront_budget_pipeline,
             renderer->wavefront_generate_pipeline,
             renderer->wavefront_screen_pipeline,
+            renderer->wavefront_dynamic_pipeline,
             renderer->wavefront_local_pipeline,
             renderer->wavefront_shade_pipeline,
             renderer->wavefront_temporal_pipeline,
@@ -3720,6 +3913,11 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
 
     if (!create_scene_resources(renderer, scene)) return false;
     renderer->scene = scene;
+    if (!create_dynamic_grid(renderer) || !rebuild_dynamic_grid(renderer) || !update_radiance_constants(renderer)) {
+        renderer->scene = NULL;
+        destroy_scene_resources(renderer);
+        return false;
+    }
 
     for (uint32_t i = 0; i < scene->object_count; ++i) {
         OBJECT *object = &scene->objects[i];
@@ -3839,7 +4037,7 @@ void renderer_event(RENDERER *renderer, const SDL_Event *event) {
 bool renderer_frame(RENDERER *renderer) {
     if (!renderer || !renderer->gpu || !renderer->gpu->device || !renderer->scene) return false;
 
-    if (!update_scene_objects(renderer) || !refresh_emissive_sampling(renderer)) return false;
+    if (!update_scene_objects(renderer) || !refresh_dynamic_grid(renderer) || !refresh_emissive_sampling(renderer)) return false;
     update_orbit_camera(renderer);
 
     NriCommandBuffer *command_buffer = NULL;

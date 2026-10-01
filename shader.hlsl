@@ -1172,19 +1172,56 @@ bool DynamicGridCellAt(float3 world_position, out uint3 cell) {
 
 bool TraceDynamicGrid(TraceRay ray, inout SurfaceHit best_hit) {
     if (!FeatureEnabled(RADIANCE_FEATURE_DYNAMIC_GRID) || Radiance.sdf_counts.y == 0u) return false;
+    uint3 dim = Radiance.dynamic_grid.xyz;
     float cell_size = Radiance.dynamic_grid_origin_cell.w;
-    uint max_steps = min(max(Radiance.trace_limits.w, 1u), MAX_DYNAMIC_GRID_STEPS);
-    float t = ray.origin_tmin.w;
+    if (any(dim == 0u) || cell_size <= 0.0f) return false;
+
+    float3 grid_min = Radiance.dynamic_grid_origin_cell.xyz;
+    float3 grid_max = grid_min + float3(dim) * cell_size;
+    float t_enter, t_exit;
+    if (!IntersectAABB(ray.origin_tmin.xyz, ray.direction_tmax.xyz, grid_min, grid_max, t_enter, t_exit)) return false;
+
+    float t = max(max(t_enter, ray.origin_tmin.w), 0.0f);
+    float limit = min(min(t_exit, ray.direction_tmax.w), best_hit.position_distance.w);
+    if (t > limit) return false;
+
+    float sample_t = min(t + max(cell_size * 1.0e-5f, 1.0e-5f), limit);
+    float3 position = ray.origin_tmin.xyz + ray.direction_tmax.xyz * sample_t;
+    int3 cell = int3(floor((position - grid_min) / cell_size));
+    cell = clamp(cell, int3(0, 0, 0), int3(dim) - int3(1, 1, 1));
+
+    int3 step_dir = int3(
+        ray.direction_tmax.x >= 0.0f ? 1 : -1,
+        ray.direction_tmax.y >= 0.0f ? 1 : -1,
+        ray.direction_tmax.z >= 0.0f ? 1 : -1
+    );
+    float3 cell_min = grid_min + float3(cell) * cell_size;
+    float3 boundary = float3(
+        step_dir.x > 0 ? cell_min.x + cell_size : cell_min.x,
+        step_dir.y > 0 ? cell_min.y + cell_size : cell_min.y,
+        step_dir.z > 0 ? cell_min.z + cell_size : cell_min.z
+    );
+    float3 t_axis = float3(1.0e30f, 1.0e30f, 1.0e30f);
+    float3 t_delta = float3(1.0e30f, 1.0e30f, 1.0e30f);
+    if (abs(ray.direction_tmax.x) > 1.0e-8f) {
+        t_axis.x = (boundary.x - ray.origin_tmin.x) / ray.direction_tmax.x;
+        t_delta.x = cell_size / abs(ray.direction_tmax.x);
+    }
+    if (abs(ray.direction_tmax.y) > 1.0e-8f) {
+        t_axis.y = (boundary.y - ray.origin_tmin.y) / ray.direction_tmax.y;
+        t_delta.y = cell_size / abs(ray.direction_tmax.y);
+    }
+    if (abs(ray.direction_tmax.z) > 1.0e-8f) {
+        t_axis.z = (boundary.z - ray.origin_tmin.z) / ray.direction_tmax.z;
+        t_delta.z = cell_size / abs(ray.direction_tmax.z);
+    }
+
     bool found = false;
+    uint max_steps = min(max(Radiance.trace_limits.w, 1u), MAX_DYNAMIC_GRID_STEPS);
     [loop]
-    for (uint step = 0u; step < max_steps && t < best_hit.position_distance.w; ++step) {
-        float3 p = ray.origin_tmin.xyz + ray.direction_tmax.xyz * t;
-        uint3 cell;
-        if (!DynamicGridCellAt(p, cell)) {
-            t += max(cell_size, 0.25f);
-            continue;
-        }
-        uint flat = Flatten3D(cell, Radiance.dynamic_grid.xyz);
+    for (uint step = 0u; step < max_steps; ++step) {
+        uint3 ucell = uint3(cell);
+        uint flat = Flatten3D(ucell, dim);
         if (flat >= Radiance.sdf_counts.y) break;
         GPUDynamicGridCell grid_cell = DynamicGridCells[flat];
         uint offset = grid_cell.range_flags.x;
@@ -1199,7 +1236,24 @@ bool TraceDynamicGrid(TraceRay ray, inout SurfaceHit best_hit) {
                 found = true;
             }
         }
-        t += max(cell_size, 0.25f);
+
+        float next_t = min(t_axis.x, min(t_axis.y, t_axis.z));
+        if (found && best_hit.position_distance.w <= next_t) break;
+        if (next_t > limit) break;
+
+        if (t_axis.x <= t_axis.y && t_axis.x <= t_axis.z) {
+            cell.x += step_dir.x;
+            if (cell.x < 0 || cell.x >= (int)dim.x) break;
+            t_axis.x += t_delta.x;
+        } else if (t_axis.y <= t_axis.z) {
+            cell.y += step_dir.y;
+            if (cell.y < 0 || cell.y >= (int)dim.y) break;
+            t_axis.y += t_delta.y;
+        } else {
+            cell.z += step_dir.z;
+            if (cell.z < 0 || cell.z >= (int)dim.z) break;
+            t_axis.z += t_delta.z;
+        }
     }
     return found;
 }

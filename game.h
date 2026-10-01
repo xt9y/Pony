@@ -339,15 +339,11 @@ typedef struct RADIANCE_SCENE_DATA {
 
 
 typedef struct RADIANCE_SCENE_FALLBACKS {
-    NriBuffer *dynamic_grid_cells;
-    NriBuffer *dynamic_grid_indices;
     NriBuffer *global_sdf_clipmaps;
     NriBuffer *global_sdf_page_table;
     NriBuffer *global_sdf_bricks;
     NriBuffer *global_sdf_surface_ids;
 
-    NriDescriptor *dynamic_grid_cells_srv;
-    NriDescriptor *dynamic_grid_indices_srv;
     NriDescriptor *global_sdf_clipmaps_srv;
     NriDescriptor *global_sdf_page_table_srv;
     NriDescriptor *global_sdf_bricks_srv;
@@ -361,6 +357,30 @@ typedef struct GPU_DYNAMIC_GRID_CELL {
     float bounds_min[4];
     float bounds_max[4];
 } GPU_DYNAMIC_GRID_CELL;
+
+typedef struct RADIANCE_DYNAMIC_GRID {
+    GPU_DYNAMIC_GRID_CELL *cpu_cells;
+    uint32_t *cpu_indices;
+
+    NriBuffer *cells;
+    NriBuffer *indices;
+    NriDescriptor *cells_srv;
+    NriDescriptor *indices_srv;
+    NriAccessStage state;
+
+    uint32_t dimensions[3];
+    uint32_t cell_count;
+    uint32_t index_count;
+    uint32_t model_count;
+    uint32_t cell_capacity;
+    uint32_t index_capacity;
+    uint32_t dimension_limit;
+
+    float origin[3];
+    float cell_size;
+    uint64_t signature;
+    bool dirty;
+} RADIANCE_DYNAMIC_GRID;
 
 typedef struct GPU_GLOBAL_SDF_CLIPMAP {
     float center_extent[4];
@@ -683,6 +703,7 @@ typedef struct RENDERER {
     SDF_GPU_SCENE sdf;
     SURFACE_CACHE radiance_surface_cache;
     RADIANCE_SCENE_DATA radiance_scene;
+    RADIANCE_DYNAMIC_GRID dynamic_grid;
     RADIANCE_SCENE_FALLBACKS radiance_fallbacks;
 
     NriDescriptorPool *descriptor_pool;
@@ -710,6 +731,7 @@ typedef struct RENDERER {
     NriPipeline *wavefront_budget_pipeline;
     NriPipeline *wavefront_generate_pipeline;
     NriPipeline *wavefront_screen_pipeline;
+    NriPipeline *wavefront_dynamic_pipeline;
     NriPipeline *wavefront_local_pipeline;
     NriPipeline *wavefront_shade_pipeline;
     NriPipeline *wavefront_temporal_pipeline;
