@@ -6,30 +6,7 @@ on:
       - dustmite-radiance-structure
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  apply-gpu-split:
-    if: github.event_name == 'push' && github.event.head_commit.message == 'run gpu ownership transform'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: apply deterministic ownership transform
-        run: |
-          python3 tools/apply_gpu_split.py
-          git diff --check
-      - name: publish transformed source
-        run: |
-          git config user.name xt9y
-          git config user.email felix@xt9y.de
-          git add gpu.h gpu.c render.c render_internal.h main.c bake.c
-          git commit -m "separate gpu infrastructure"
-          git push origin HEAD:dustmite-radiance-structure
-
   structure:
     runs-on: ubuntu-latest
     timeout-minutes: 5
