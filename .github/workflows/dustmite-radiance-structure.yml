@@ -22,17 +22,19 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: install C headers
+      - name: install platform headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl3-dev libsdl3-image-dev libvulkan-dev
-      - name: fetch locked NRI headers
+          sudo apt-get install -y libvulkan-dev
+      - name: fetch dependency headers
         run: |
-          git clone --filter=blob:none https://github.com/NVIDIA-RTX/NRI.git /tmp/NRI
+          git clone --depth=1 https://github.com/libsdl-org/SDL.git /tmp/SDL
+          git clone --depth=1 https://github.com/libsdl-org/SDL_image.git /tmp/SDL_image
+          git clone https://github.com/NVIDIA-RTX/NRI.git /tmp/NRI
           git -C /tmp/NRI checkout d0c578e613d6efa32893e597b0c24b2f34b9064a
       - name: syntax-check C translation units
         run: |
-          CFLAGS="$(pkg-config --cflags sdl3 SDL3_image) -I/tmp/NRI/Include -I."
+          CFLAGS="-I/tmp/SDL/include -I/tmp/SDL_image/include -I/tmp/NRI/Include -I."
           for file in main.c init.c glb.c gltf.c bvh.c lmap.c gpu.c render.c bake.c cache.c beam.c; do
             echo "checking $file"
             cc -std=c11 -Wall -Wextra -Wpedantic -fsyntax-only $CFLAGS "$file"
