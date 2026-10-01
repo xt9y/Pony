@@ -730,7 +730,7 @@ static bool track_descriptor(RENDERER *r, NriDescriptor *descriptor) {
     if (r->gpu->active_frame) {
         FRAME_CONTEXT *frame = r->gpu->active_frame;
 
-        return track_descriptor_array(r, &frame->gpu->temporary_descriptors, &frame->gpu->temporary_descriptor_num, &frame->gpu->temporary_descriptor_cap, descriptor);
+        return track_descriptor_array(r, &frame->temporary_descriptors, &frame->temporary_descriptor_num, &frame->temporary_descriptor_cap, descriptor);
     }
 
     return track_descriptor_array(r, &r->gpu->temporary_descriptors, &r->gpu->temporary_descriptor_num, &r->gpu->temporary_descriptor_cap, descriptor);
@@ -740,7 +740,7 @@ static bool track_buffer(RENDERER *r, NriBuffer *buffer) {
     if (r->gpu->active_frame) {
         FRAME_CONTEXT *frame = r->gpu->active_frame;
 
-        return track_buffer_array(r, &frame->gpu->temporary_buffers, &frame->gpu->temporary_buffer_num, &frame->gpu->temporary_buffer_cap, buffer);
+        return track_buffer_array(r, &frame->temporary_buffers, &frame->temporary_buffer_num, &frame->temporary_buffer_cap, buffer);
     }
 
     return track_buffer_array(r, &r->gpu->temporary_buffers, &r->gpu->temporary_buffer_num, &r->gpu->temporary_buffer_cap, buffer);
@@ -760,16 +760,16 @@ static void clear_temporary(RENDERER *r) {
 static void clear_frame_temporary(RENDERER *r, FRAME_CONTEXT *frame) {
     if (!frame) return;
 
-    for (uint32_t i = 0; i < frame->gpu->temporary_descriptor_num; ++i)
-        r->gpu->core.DestroyDescriptor(frame->gpu->temporary_descriptors[i]);
+    for (uint32_t i = 0; i < frame->temporary_descriptor_num; ++i)
+        r->gpu->core.DestroyDescriptor(frame->temporary_descriptors[i]);
 
-    for (uint32_t i = 0; i < frame->gpu->temporary_buffer_num; ++i)
-        r->gpu->core.DestroyBuffer(frame->gpu->temporary_buffers[i]);
-    frame->gpu->temporary_descriptor_num = 0;
-    frame->gpu->temporary_buffer_num = 0;
+    for (uint32_t i = 0; i < frame->temporary_buffer_num; ++i)
+        r->gpu->core.DestroyBuffer(frame->temporary_buffers[i]);
+    frame->temporary_descriptor_num = 0;
+    frame->temporary_buffer_num = 0;
     frame->uniform_offset = 0u;
 
-    if (frame->gpu->descriptor_pool) r->gpu->core.ResetDescriptorPool(frame->gpu->descriptor_pool);
+    if (frame->descriptor_pool) r->gpu->core.ResetDescriptorPool(frame->descriptor_pool);
 }
 
 static bool create_uniform_ring(RENDERER *r, FRAME_CONTEXT *context) {
@@ -792,7 +792,7 @@ static bool create_work_contexts(RENDERER *r) {
     for (uint32_t i = 0; i < WORK_QUEUE_DEPTH; ++i) {
         FRAME_CONTEXT *work = &r->gpu->work_contexts[i];
 
-        if (!create_descriptor_pool_object(r, &work->gpu->descriptor_pool) || !create_uniform_ring(r, work) ||
+        if (!create_descriptor_pool_object(r, &work->descriptor_pool) || !create_uniform_ring(r, work) ||
             r->gpu->core.CreateCommandAllocator(r->gpu->work_queue, &work->allocator) != NriResult_SUCCESS ||
             r->gpu->core.CreateCommandBuffer(work->allocator, &work->command_buffer) != NriResult_SUCCESS)
             return false;
@@ -821,12 +821,12 @@ static void destroy_work_contexts(RENDERER *r) {
 
             if (work->allocator) r->gpu->core.DestroyCommandAllocator(work->allocator);
 
-            if (work->gpu->descriptor_pool) r->gpu->core.DestroyDescriptorPool(work->gpu->descriptor_pool);
+            if (work->descriptor_pool) r->gpu->core.DestroyDescriptorPool(work->descriptor_pool);
 
             if (work->uniform_buffer) r->gpu->core.DestroyBuffer(work->uniform_buffer);
 
-            free(work->gpu->temporary_descriptors);
-            free(work->gpu->temporary_buffers);
+            free(work->temporary_descriptors);
+            free(work->temporary_buffers);
         }
 
         free(r->gpu->work_contexts);
@@ -852,7 +852,7 @@ static bool begin_work_commands(RENDERER *r, NriCommandAllocator **allocator, Nr
     r->gpu->active_work = work;
     r->gpu->active_frame = work;
 
-    if (r->gpu->core.BeginCommandBuffer(work->command_buffer, work->gpu->descriptor_pool) != NriResult_SUCCESS) {
+    if (r->gpu->core.BeginCommandBuffer(work->command_buffer, work->descriptor_pool) != NriResult_SUCCESS) {
         r->gpu->active_work = NULL;
         r->gpu->active_frame = NULL;
 
@@ -936,7 +936,7 @@ static bool create_frame_contexts(RENDERER *r) {
     for (uint32_t i = 0; i < FRAME_QUEUE_DEPTH; ++i) {
         FRAME_CONTEXT *frame = &r->gpu->frame_contexts[i];
 
-        if (!create_descriptor_pool_object(r, &frame->gpu->descriptor_pool) || !create_uniform_ring(r, frame) ||
+        if (!create_descriptor_pool_object(r, &frame->descriptor_pool) || !create_uniform_ring(r, frame) ||
             r->gpu->core.CreateCommandAllocator(r->gpu->graphics_queue, &frame->allocator) != NriResult_SUCCESS ||
             r->gpu->core.CreateCommandBuffer(frame->allocator, &frame->command_buffer) != NriResult_SUCCESS)
             return false;
@@ -955,11 +955,11 @@ static void destroy_frame_contexts(RENDERER *r) {
 
             if (frame->allocator) r->gpu->core.DestroyCommandAllocator(frame->allocator);
 
-            if (frame->gpu->descriptor_pool) r->gpu->core.DestroyDescriptorPool(frame->gpu->descriptor_pool);
+            if (frame->descriptor_pool) r->gpu->core.DestroyDescriptorPool(frame->descriptor_pool);
 
             if (frame->uniform_buffer) r->gpu->core.DestroyBuffer(frame->uniform_buffer);
-            free(frame->gpu->temporary_descriptors);
-            free(frame->gpu->temporary_buffers);
+            free(frame->temporary_descriptors);
+            free(frame->temporary_buffers);
         }
 
         free(r->gpu->frame_contexts);
@@ -985,7 +985,7 @@ static bool begin_frame_commands(RENDERER *r, FRAME_CONTEXT **out_frame, NriComm
     r->current_graphics_layout = r->current_compute_layout = NULL;
     r->gpu->active_frame = frame;
 
-    if (r->gpu->core.BeginCommandBuffer(frame->command_buffer, frame->gpu->descriptor_pool) != NriResult_SUCCESS) {
+    if (r->gpu->core.BeginCommandBuffer(frame->command_buffer, frame->descriptor_pool) != NriResult_SUCCESS) {
         r->gpu->active_frame = NULL;
 
         return false;
