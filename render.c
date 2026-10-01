@@ -1765,7 +1765,7 @@ static bool update_radiance_constants(RENDERER *renderer) {
     constants.probe_config[0] = SCREEN_PROBE_TILE_SIZE;
     constants.probe_config[1] = SCREEN_PROBE_DIRECTION_SIZE;
     constants.probe_config[2] = SCREEN_PROBE_DIRECTION_COUNT;
-    constants.probe_config[3] = 0u;
+    constants.probe_config[3] = 1u;
     constants.trace_params[0] = 200.0f;
     constants.trace_params[1] = 0.005f;
     constants.trace_params[2] = 0.05f;
@@ -1774,7 +1774,11 @@ static bool update_radiance_constants(RENDERER *renderer) {
     constants.trace_limits[1] = 5u;
     constants.trace_limits[2] = 96u;
     constants.trace_limits[3] = 128u;
-    constants.feature_flags[0] = RADIANCE_FEATURE_SURFACE_CACHE;
+    constants.temporal_params[0] = 0.85f;
+    constants.temporal_params[1] = 0.95f;
+    constants.temporal_params[2] = 0.02f;
+    constants.temporal_params[3] = 0.90f;
+    constants.feature_flags[0] = RADIANCE_FEATURE_SURFACE_CACHE | RADIANCE_FEATURE_TEMPORAL_PROBES | RADIANCE_FEATURE_SPATIAL_PROBES;
     if (renderer->radiance_scene.emissive_triangle_count) constants.feature_flags[0] |= RADIANCE_FEATURE_EMISSIVE;
     constants.feature_flags[1] = 1u;
     constants.feature_flags[2] = renderer->wavefront.ray_capacity;
@@ -1971,7 +1975,7 @@ static bool create_pipeline_layouts(RENDERER *renderer) {
 
     const NriDescriptorRangeDesc wavefront_probe_ranges[] = {
         {.baseRegisterIndex = 0, .descriptorNum = 5, .descriptorType = NriDescriptorType_TEXTURE, .shaderStages = NriStageBits_COMPUTE_SHADER},
-        {.baseRegisterIndex = 5, .descriptorNum = 3, .descriptorType = NriDescriptorType_STORAGE_TEXTURE, .shaderStages = NriStageBits_COMPUTE_SHADER}
+        {.baseRegisterIndex = 5, .descriptorNum = 8, .descriptorType = NriDescriptorType_STORAGE_TEXTURE, .shaderStages = NriStageBits_COMPUTE_SHADER}
     };
     const NriDescriptorSetDesc wavefront_probe_set = {
         .registerSpace = 7, .ranges = wavefront_probe_ranges, .rangeNum = 2
@@ -2257,8 +2261,11 @@ static bool create_pipelines(RENDERER *renderer) {
            create_compute_pipeline(renderer, "build/shaders/radiance_screen.cs.spv", renderer->wavefront_layout, &renderer->wavefront_screen_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_local.cs.spv", renderer->wavefront_layout, &renderer->wavefront_local_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_shade.cs.spv", renderer->wavefront_layout, &renderer->wavefront_shade_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_probe_temporal.cs.spv", renderer->wavefront_layout, &renderer->wavefront_temporal_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_probe_spatial.cs.spv", renderer->wavefront_layout, &renderer->wavefront_spatial_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_probe_resolve.cs.spv", renderer->wavefront_layout, &renderer->wavefront_resolve_pipeline) &&
-           create_compute_pipeline(renderer, "build/shaders/radiance_emissive.cs.spv", renderer->wavefront_layout, &renderer->emissive_pipeline);
+           create_compute_pipeline(renderer, "build/shaders/radiance_emissive.cs.spv", renderer->wavefront_layout, &renderer->emissive_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_probe_history.cs.spv", renderer->wavefront_layout, &renderer->wavefront_history_pipeline);
 }
 
 static void update_gbuffer_descriptors(RENDERER *renderer) {
@@ -2434,23 +2441,28 @@ static bool update_wavefront_descriptors(RENDERER *renderer) {
         p->history_radiance.srv, p->history_meta.srv, p->previous_irradiance.srv,
         p->history_depth.srv, p->history_normal.srv
     };
-    const NriDescriptor *current[] = {p->current_radiance.uav, p->current_meta.uav, renderer->screen_probes.uav};
+    const NriDescriptor *current[] = {
+        p->current_radiance.uav, p->current_meta.uav, renderer->screen_probes.uav,
+        p->history_radiance.uav, p->history_meta.uav, p->previous_irradiance.uav,
+        p->history_depth.uav, p->history_normal.uav
+    };
     for (uint32_t i = 0; i < 9; ++i) if (!queues[i]) return false;
     for (uint32_t i = 0; i < 6; ++i) if (!cache[i]) return false;
     for (uint32_t i = 0; i < 5; ++i) if (!history[i]) return false;
-    for (uint32_t i = 0; i < 3; ++i) if (!current[i]) return false;
+    for (uint32_t i = 0; i < 8; ++i) if (!current[i]) return false;
 
     const NriUpdateDescriptorRangeDesc updates[] = {
         {.descriptorSet = renderer->wavefront_queue_set, .rangeIndex = 0, .descriptors = queues, .descriptorNum = 9},
         {.descriptorSet = renderer->wavefront_cache_set, .rangeIndex = 0, .descriptors = cache, .descriptorNum = 6},
         {.descriptorSet = renderer->wavefront_probe_set, .rangeIndex = 0, .descriptors = history, .descriptorNum = 5},
-        {.descriptorSet = renderer->wavefront_probe_set, .rangeIndex = 1, .descriptors = current, .descriptorNum = 3}
+        {.descriptorSet = renderer->wavefront_probe_set, .rangeIndex = 1, .descriptors = current, .descriptorNum = 8}
     };
     renderer->gpu->core.UpdateDescriptorRanges(updates, 4);
     return true;
 }
 
 static bool create_size_dependent_resources(RENDERER *renderer, uint32_t width, uint32_t height) {
+    renderer->probe_history_valid = false;
     destroy_compute_texture(renderer, &renderer->direct_radiance);
     destroy_compute_texture(renderer, &renderer->screen_probes);
     destroy_radiance_probes(renderer);
@@ -2552,6 +2564,7 @@ static bool stream_dynamic_data(RENDERER *renderer, NriCommandBuffer *command_bu
     renderer->pass_constants.dispatch[0] = renderer->radiance_constants.feature_flags[1];
     renderer->pass_constants.dimensions[0] = renderer->screen_probes.width;
     renderer->pass_constants.dimensions[1] = renderer->screen_probes.height;
+    renderer->pass_constants.flags[0] = renderer->probe_history_valid ? 1u : 0u;
 
     NriStreamerCopyBatch batch = renderer->gpu->streamer_api.BeginStreamerCopyBatch(renderer->gpu->streamer);
 
@@ -3219,6 +3232,46 @@ static void build_wavefront_screen_probes(RENDERER *renderer, NriCommandBuffer *
     };
     renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = &probe_sync, .textureNum = 1});
 
+    bind_wavefront(renderer, command_buffer, renderer->wavefront_temporal_pipeline);
+    renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){
+        .workGroupNumX = (renderer->screen_probes.width + 7u) / 8u,
+        .workGroupNumY = (renderer->screen_probes.height + 7u) / 8u,
+        .workGroupNumZ = 1
+    });
+
+    const NriTextureBarrierDesc temporal_sync = {
+        .texture = p->current_radiance.texture,
+        .before = compute_storage,
+        .after = compute_storage,
+        .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR
+    };
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = &temporal_sync, .textureNum = 1});
+
+    const NriTextureBarrierDesc spatial_write = {
+        .texture = p->history_radiance.texture,
+        .before = p->history_radiance.state,
+        .after = compute_storage,
+        .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR
+    };
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = &spatial_write, .textureNum = 1});
+    p->history_radiance.state = compute_storage;
+
+    bind_wavefront(renderer, command_buffer, renderer->wavefront_spatial_pipeline);
+    renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){
+        .workGroupNumX = (renderer->screen_probes.width + 7u) / 8u,
+        .workGroupNumY = (renderer->screen_probes.height + 7u) / 8u,
+        .workGroupNumZ = 1
+    });
+
+    const NriTextureBarrierDesc spatial_read = {
+        .texture = p->history_radiance.texture,
+        .before = compute_storage,
+        .after = history_read,
+        .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR
+    };
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = &spatial_read, .textureNum = 1});
+    p->history_radiance.state = history_read;
+
     bind_wavefront(renderer, command_buffer, renderer->wavefront_resolve_pipeline);
     renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){
         .workGroupNumX = (renderer->screen_probes.width + 7u) / 8u,
@@ -3230,28 +3283,66 @@ static void build_wavefront_screen_probes(RENDERER *renderer, NriCommandBuffer *
 static void build_emissive_gather(RENDERER *renderer, NriCommandBuffer *command_buffer) {
     const bool enabled = renderer->radiance_scene.emissive_triangle_count &&
                          (renderer->radiance_constants.feature_flags[0] & RADIANCE_FEATURE_EMISSIVE);
-    if (enabled) {
-        bind_wavefront(renderer, command_buffer, renderer->emissive_pipeline);
-        renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){
-            .workGroupNumX = (renderer->screen_probes.width + 7u) / 8u,
-            .workGroupNumY = (renderer->screen_probes.height + 7u) / 8u,
-            .workGroupNumZ = 1
-        });
-    }
+    if (!enabled) return;
 
-    const NriAccessLayoutStage read = {
+    bind_wavefront(renderer, command_buffer, renderer->emissive_pipeline);
+    renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){
+        .workGroupNumX = (renderer->screen_probes.width + 7u) / 8u,
+        .workGroupNumY = (renderer->screen_probes.height + 7u) / 8u,
+        .workGroupNumZ = 1
+    });
+}
+
+static void commit_probe_history(RENDERER *renderer, NriCommandBuffer *command_buffer) {
+    RADIANCE_PROBES *p = &renderer->probes;
+    const NriAccessLayoutStage compute_storage = {
+        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
+        .layout = NriLayout_SHADER_RESOURCE_STORAGE,
+        .stages = NriStageBits_COMPUTE_SHADER
+    };
+    const NriAccessLayoutStage history_read = {
+        .access = NriAccessBits_SHADER_RESOURCE,
+        .layout = NriLayout_SHADER_RESOURCE,
+        .stages = NriStageBits_COMPUTE_SHADER
+    };
+    const NriAccessLayoutStage present_read = {
         .access = NriAccessBits_SHADER_RESOURCE,
         .layout = NriLayout_SHADER_RESOURCE,
         .stages = NriStageBits_FRAGMENT_SHADER
     };
-    const NriTextureBarrierDesc to_read = {
-        .texture = renderer->screen_probes.texture,
-        .before = renderer->screen_probes.state,
-        .after = read,
-        .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR
+
+    NriTextureBarrierDesc to_write[] = {
+        {.texture = p->history_meta.texture, .before = p->history_meta.state, .after = compute_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = p->previous_irradiance.texture, .before = p->previous_irradiance.state, .after = compute_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = p->history_depth.texture, .before = p->history_depth.state, .after = compute_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = p->history_normal.texture, .before = p->history_normal.state, .after = compute_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR}
     };
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = &to_read, .textureNum = 1});
-    renderer->screen_probes.state = read;
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = to_write, .textureNum = 4});
+    p->history_meta.state = compute_storage;
+    p->previous_irradiance.state = compute_storage;
+    p->history_depth.state = compute_storage;
+    p->history_normal.state = compute_storage;
+
+    bind_wavefront(renderer, command_buffer, renderer->wavefront_history_pipeline);
+    renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){
+        .workGroupNumX = (renderer->screen_probes.width + 7u) / 8u,
+        .workGroupNumY = (renderer->screen_probes.height + 7u) / 8u,
+        .workGroupNumZ = 1
+    });
+
+    NriTextureBarrierDesc history_ready[] = {
+        {.texture = p->history_meta.texture, .before = compute_storage, .after = history_read, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = p->previous_irradiance.texture, .before = compute_storage, .after = history_read, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = p->history_depth.texture, .before = compute_storage, .after = history_read, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = p->history_normal.texture, .before = compute_storage, .after = history_read, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = renderer->screen_probes.texture, .before = renderer->screen_probes.state, .after = present_read, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR}
+    };
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = history_ready, .textureNum = 5});
+    p->history_meta.state = history_read;
+    p->previous_irradiance.state = history_read;
+    p->history_depth.state = history_read;
+    p->history_normal.state = history_read;
+    renderer->screen_probes.state = present_read;
 }
 
 static void set_fullscreen_view(RENDERER *renderer, NriCommandBuffer *command_buffer) {
@@ -3553,8 +3644,11 @@ void renderer_deinit(RENDERER *renderer) {
             renderer->wavefront_screen_pipeline,
             renderer->wavefront_local_pipeline,
             renderer->wavefront_shade_pipeline,
+            renderer->wavefront_temporal_pipeline,
+            renderer->wavefront_spatial_pipeline,
             renderer->wavefront_resolve_pipeline,
-            renderer->emissive_pipeline
+            renderer->emissive_pipeline,
+            renderer->wavefront_history_pipeline
         };
 
         for (uint32_t i = 0; i < sizeof(pipelines) / sizeof(pipelines[0]); ++i) {
@@ -3628,6 +3722,7 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
     renderer->previous_camera = renderer->camera;
     renderer->previous_view_projection = mat4_identity();
     renderer->has_previous_frame = false;
+    renderer->probe_history_valid = false;
 
     if (!clear_radiance_surface_cache(renderer)) return false;
     update_gbuffer_descriptors(renderer);
@@ -3756,6 +3851,7 @@ bool renderer_frame(RENDERER *renderer) {
     build_direct_radiance(renderer, command_buffer);
     build_wavefront_screen_probes(renderer, command_buffer);
     build_emissive_gather(renderer, command_buffer);
+    commit_probe_history(renderer, command_buffer);
     record_present_pass(renderer, command_buffer, swapchain_index);
 
     const bool frame_finished = gpu_end_frame(renderer->gpu, command_buffer, swapchain_index);
@@ -3767,6 +3863,7 @@ bool renderer_frame(RENDERER *renderer) {
     renderer->previous_camera = renderer->camera;
     renderer->previous_view_projection = view_projection;
     renderer->has_previous_frame = true;
+    renderer->probe_history_valid = true;
     renderer->frame_index = renderer->gpu->frame_index;
 
     return true;

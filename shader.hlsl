@@ -341,6 +341,11 @@ struct DrawConstants { uint object_index; };
 [[vk::binding(5, 7)]] RWTexture2D<float4> ProbeCurrentRadiance : register(u0, space7);
 [[vk::binding(6, 7)]] RWTexture2D<float4> ProbeCurrentMeta : register(u1, space7);
 [[vk::binding(7, 7)]] RWTexture2D<float4> ProbeIrradiance : register(u2, space7);
+[[vk::binding(8, 7)]] RWTexture2D<float4> ProbeHistoryRadianceOut : register(u3, space7);
+[[vk::binding(9, 7)]] RWTexture2D<float4> ProbeHistoryMetaOut : register(u4, space7);
+[[vk::binding(10, 7)]] RWTexture2D<float4> ProbePreviousIrradianceOut : register(u5, space7);
+[[vk::binding(11, 7)]] RWTexture2D<float> ProbeHistoryDepthOut : register(u6, space7);
+[[vk::binding(12, 7)]] RWTexture2D<float4> ProbeHistoryNormalOut : register(u7, space7);
 
 // -----------------------------------------------------------------------------
 // Space 8: reflections.
@@ -1881,6 +1886,13 @@ TraceRay BuildFutureProbeRay(uint2 probe, uint ray_index, uint destination) {
     return MakeTraceRay(state.position_depth.xyz + state.normal_confidence.xyz * bias, direction, bias, Radiance.trace_params.x, TRACE_RAY_DIFFUSE, destination, pixel, state.history.w);
 }
 
+float3 ResolvedProbeRadiance(uint2 probe, uint2 texel) {
+    uint2 coord = ProbeAtlasCoord(probe, texel);
+    if (FeatureEnabled(RADIANCE_FEATURE_SPATIAL_PROBES))
+        return ProbeHistoryRadiance.Load(int3(coord, 0)).rgb;
+    return ProbeCurrentRadiance[coord].rgb;
+}
+
 float3 IntegrateProbeIrradiance(uint2 probe, float3 normal) {
     uint size = ProbeDirectionSize();
     float3 sum = 0.0f;
@@ -1890,7 +1902,7 @@ float3 IntegrateProbeIrradiance(uint2 probe, float3 normal) {
             uint2 texel = uint2(x, y);
             float3 direction = ProbeDirection(texel);
             float weight = saturate(dot(normal, direction));
-            sum += ProbeCurrentRadiance[ProbeAtlasCoord(probe, texel)].rgb * weight;
+            sum += ResolvedProbeRadiance(probe, texel) * weight;
             weight_sum += weight;
         }
     }
@@ -2113,7 +2125,7 @@ void CS_ResolveDirectionalProbes(uint3 dispatch_id : SV_DispatchThreadID) {
     }
     float3 irradiance = IntegrateProbeIrradiance(probe, state.normal_confidence.xyz);
     float variance = 0.0f;
-    if (FeatureEnabled(RADIANCE_FEATURE_TEMPORAL_PROBES)) {
+    if (FeatureEnabled(RADIANCE_FEATURE_TEMPORAL_PROBES) && Pass.flags.x != 0u) {
         float previous_luma = dot(ProbePreviousIrradiance.Load(int3(probe, 0)).rgb, float3(0.2126f, 0.7152f, 0.0722f));
         float current_luma = dot(irradiance, float3(0.2126f, 0.7152f, 0.0722f));
         variance = abs(current_luma - previous_luma);
@@ -2129,21 +2141,33 @@ void CS_ResolveDirectionalProbes(uint3 dispatch_id : SV_DispatchThreadID) {
 void CS_ReprojectScreenProbes(uint3 dispatch_id : SV_DispatchThreadID) {
     uint2 probe = dispatch_id.xy;
     if (probe.x >= Pass.dimensions.x || probe.y >= Pass.dimensions.y) return;
-    if (!FeatureEnabled(RADIANCE_FEATURE_TEMPORAL_PROBES)) return;
+    if (!FeatureEnabled(RADIANCE_FEATURE_TEMPORAL_PROBES) || Pass.flags.x == 0u) return;
+
     uint2 pixel = ProbeRepresentativePixel(probe);
     float depth = TraceDepth.Load(int3(pixel, 0));
     if (depth <= 0.0f) return;
+
     float2 velocity = VelocityTexture.Load(int3(pixel, 0));
     float2 previous_pixel = float2(pixel) - velocity * TraceFrame.resolution.xy;
-    float2 previous_probe_f = previous_pixel / (float)ProbeTileSize();
-    int2 previous_probe = int2(round(previous_probe_f));
+    int2 previous_probe = int2(floor(previous_pixel / (float)ProbeTileSize()));
     if (any(previous_probe < int2(0, 0)) || previous_probe.x >= (int)Pass.dimensions.x || previous_probe.y >= (int)Pass.dimensions.y) return;
+
     uint2 pp = uint2(previous_probe);
     float previous_depth = ProbeHistoryDepth.Load(int3(pp, 0));
-    float3 previous_normal = normalize(ProbeHistoryNormal.Load(int3(pp, 0)).xyz);
+    if (previous_depth <= 0.0f) return;
+
+    float3 previous_normal = ProbeHistoryNormal.Load(int3(pp, 0)).xyz;
+    float previous_normal_length = dot(previous_normal, previous_normal);
+    if (previous_normal_length <= 1.0e-8f) return;
+    previous_normal *= rsqrt(previous_normal_length);
+
     float3 current_normal = normalize(TraceNormalRoughness.Load(int3(pixel, 0)).xyz);
-    float depth_tolerance = max(Radiance.temporal_params.z, 1.0e-3f);
-    if (abs(previous_depth - depth) > depth_tolerance || dot(previous_normal, current_normal) < Radiance.temporal_params.w) return;
+    float previous_linear_depth = LinearizeDepth(previous_depth);
+    float current_linear_depth = LinearizeDepth(depth);
+    float relative_depth_error = abs(previous_linear_depth - current_linear_depth) / max(current_linear_depth, 1.0e-3f);
+    float depth_tolerance = max(Radiance.temporal_params.z, 1.0e-4f);
+    if (relative_depth_error > depth_tolerance || dot(previous_normal, current_normal) < Radiance.temporal_params.w) return;
+
     float history_weight = saturate(Radiance.temporal_params.x);
     uint size = ProbeDirectionSize();
     for (uint y = 0u; y < size; ++y) {
@@ -2155,6 +2179,7 @@ void CS_ReprojectScreenProbes(uint3 dispatch_id : SV_DispatchThreadID) {
             ProbeCurrentRadiance[dst] = float4(lerp(current, history, history_weight), 1.0f);
         }
     }
+
     float4 meta = ProbeHistoryMeta.Load(int3(pp, 0));
     ProbeCurrentMeta[probe] = float4(meta.x * Radiance.temporal_params.y, meta.y, meta.z + 1.0f, meta.w);
 }
@@ -2163,33 +2188,67 @@ void CS_ReprojectScreenProbes(uint3 dispatch_id : SV_DispatchThreadID) {
 void CS_SpatialReuseScreenProbes(uint3 dispatch_id : SV_DispatchThreadID) {
     uint2 probe = dispatch_id.xy;
     if (probe.x >= Pass.dimensions.x || probe.y >= Pass.dimensions.y) return;
-    if (!FeatureEnabled(RADIANCE_FEATURE_SPATIAL_PROBES)) return;
-    uint radius = min(Radiance.probe_config.w, 2u);
-    ScreenProbeState center;
-    if (!PlaceScreenProbe(probe, center)) return;
+
     uint size = ProbeDirectionSize();
+    ScreenProbeState center;
+    bool valid_center = PlaceScreenProbe(probe, center);
+    uint radius = min(Radiance.probe_config.w, 2u);
+
     for (uint y = 0u; y < size; ++y) {
         for (uint x = 0u; x < size; ++x) {
             uint2 texel = uint2(x, y);
-            float3 sum = ProbeCurrentRadiance[ProbeAtlasCoord(probe, texel)].rgb;
+            uint2 destination = ProbeAtlasCoord(probe, texel);
+
+            if (!valid_center) {
+                ProbeHistoryRadianceOut[destination] = 0.0f;
+                continue;
+            }
+
+            float3 sum = ProbeCurrentRadiance[destination].rgb;
             float weight_sum = 1.0f;
-            for (int oy = -(int)radius; oy <= (int)radius; ++oy) {
-                for (int ox = -(int)radius; ox <= (int)radius; ++ox) {
-                    if (ox == 0 && oy == 0) continue;
-                    int2 np = int2(probe) + int2(ox, oy);
-                    if (np.x < 0 || np.y < 0 || np.x >= (int)Pass.dimensions.x || np.y >= (int)Pass.dimensions.y) continue;
-                    ScreenProbeState neighbor;
-                    if (!PlaceScreenProbe(uint2(np), neighbor)) continue;
-                    float normal_weight = saturate(dot(center.normal_confidence.xyz, neighbor.normal_confidence.xyz));
-                    float distance_weight = rcp(1.0f + length(center.position_depth.xyz - neighbor.position_depth.xyz));
-                    float weight = normal_weight * distance_weight;
-                    sum += ProbeCurrentRadiance[ProbeAtlasCoord(uint2(np), texel)].rgb * weight;
-                    weight_sum += weight;
+
+            if (FeatureEnabled(RADIANCE_FEATURE_SPATIAL_PROBES)) {
+                for (int oy = -(int)radius; oy <= (int)radius; ++oy) {
+                    for (int ox = -(int)radius; ox <= (int)radius; ++ox) {
+                        if (ox == 0 && oy == 0) continue;
+                        int2 np = int2(probe) + int2(ox, oy);
+                        if (np.x < 0 || np.y < 0 || np.x >= (int)Pass.dimensions.x || np.y >= (int)Pass.dimensions.y) continue;
+
+                        ScreenProbeState neighbor;
+                        if (!PlaceScreenProbe(uint2(np), neighbor)) continue;
+                        float normal_weight = saturate(dot(center.normal_confidence.xyz, neighbor.normal_confidence.xyz));
+                        if (normal_weight <= 0.35f) continue;
+                        float distance_weight = rcp(1.0f + length(center.position_depth.xyz - neighbor.position_depth.xyz));
+                        float weight = normal_weight * normal_weight * distance_weight;
+                        sum += ProbeCurrentRadiance[ProbeAtlasCoord(uint2(np), texel)].rgb * weight;
+                        weight_sum += weight;
+                    }
                 }
             }
-            ProbeCurrentRadiance[ProbeAtlasCoord(probe, texel)] = float4(sum / max(weight_sum, 1.0e-6f), 1.0f);
+
+            ProbeHistoryRadianceOut[ProbeAtlasCoord(probe, texel)] = float4(sum / max(weight_sum, 1.0e-6f), 1.0f);
         }
     }
+}
+
+[numthreads(8, 8, 1)]
+void CS_CommitScreenProbeHistory(uint3 dispatch_id : SV_DispatchThreadID) {
+    uint2 probe = dispatch_id.xy;
+    if (probe.x >= Pass.dimensions.x || probe.y >= Pass.dimensions.y) return;
+
+    ScreenProbeState state;
+    if (!PlaceScreenProbe(probe, state)) {
+        ProbeHistoryMetaOut[probe] = 0.0f;
+        ProbePreviousIrradianceOut[probe] = 0.0f;
+        ProbeHistoryDepthOut[probe] = 0.0f;
+        ProbeHistoryNormalOut[probe] = 0.0f;
+        return;
+    }
+
+    ProbeHistoryMetaOut[probe] = ProbeCurrentMeta[probe];
+    ProbePreviousIrradianceOut[probe] = ProbeIrradiance[probe];
+    ProbeHistoryDepthOut[probe] = state.position_depth.w;
+    ProbeHistoryNormalOut[probe] = float4(state.normal_confidence.xyz, 1.0f);
 }
 
 // -----------------------------------------------------------------------------

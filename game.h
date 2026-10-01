@@ -712,12 +712,16 @@ typedef struct RENDERER {
     NriPipeline *wavefront_screen_pipeline;
     NriPipeline *wavefront_local_pipeline;
     NriPipeline *wavefront_shade_pipeline;
+    NriPipeline *wavefront_temporal_pipeline;
+    NriPipeline *wavefront_spatial_pipeline;
     NriPipeline *wavefront_resolve_pipeline;
     NriPipeline *emissive_pipeline;
+    NriPipeline *wavefront_history_pipeline;
 
     uint32_t width;
     uint32_t height;
     bool has_previous_frame;
+    bool probe_history_valid;
 
     NriAccessStage object_state;
     NriAccessStage light_state;
