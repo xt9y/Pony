@@ -886,63 +886,86 @@ static bool create_radiance_scene_gpu_resources(RENDERER *renderer) {
 }
 
 
-static void destroy_radiance_scene_fallbacks(RENDERER *renderer) {
-    if (!renderer || !renderer->gpu) return;
-
-    RADIANCE_SCENE_FALLBACKS *fallbacks = &renderer->radiance_fallbacks;
-
-    if (fallbacks->global_sdf_clipmaps_srv) renderer->gpu->core.DestroyDescriptor(fallbacks->global_sdf_clipmaps_srv);
-    if (fallbacks->global_sdf_page_table_srv) renderer->gpu->core.DestroyDescriptor(fallbacks->global_sdf_page_table_srv);
-    if (fallbacks->global_sdf_bricks_srv) renderer->gpu->core.DestroyDescriptor(fallbacks->global_sdf_bricks_srv);
-    if (fallbacks->global_sdf_surface_ids_srv) renderer->gpu->core.DestroyDescriptor(fallbacks->global_sdf_surface_ids_srv);
-
-    if (fallbacks->global_sdf_clipmaps) gpu_destroy_buffer(renderer->gpu, fallbacks->global_sdf_clipmaps);
-    if (fallbacks->global_sdf_page_table) gpu_destroy_buffer(renderer->gpu, fallbacks->global_sdf_page_table);
-    if (fallbacks->global_sdf_bricks) gpu_destroy_buffer(renderer->gpu, fallbacks->global_sdf_bricks);
-    if (fallbacks->global_sdf_surface_ids) gpu_destroy_buffer(renderer->gpu, fallbacks->global_sdf_surface_ids);
-
-    memset(fallbacks, 0, sizeof(*fallbacks));
+static void destroy_global_sdf_resources(RENDERER *renderer) {
+    if (!renderer) return;
+    GLOBAL_SDF_DATA *global = &renderer->global_sdf;
+    if (renderer->gpu) {
+        if (global->clipmaps_srv) renderer->gpu->core.DestroyDescriptor(global->clipmaps_srv);
+        if (global->page_table_srv) renderer->gpu->core.DestroyDescriptor(global->page_table_srv);
+        if (global->bricks_srv) renderer->gpu->core.DestroyDescriptor(global->bricks_srv);
+        if (global->surface_ids_srv) renderer->gpu->core.DestroyDescriptor(global->surface_ids_srv);
+        if (global->clipmaps) gpu_destroy_buffer(renderer->gpu, global->clipmaps);
+        if (global->page_table) gpu_destroy_buffer(renderer->gpu, global->page_table);
+        if (global->bricks) gpu_destroy_buffer(renderer->gpu, global->bricks);
+        if (global->surface_ids) gpu_destroy_buffer(renderer->gpu, global->surface_ids);
+    }
+    sdf_free_global_clipmaps(global);
 }
 
-static bool create_radiance_fallback_buffer(RENDERER *renderer, uint32_t stride, NriBuffer **buffer, NriDescriptor **srv) {
-    if (!stride || stride > sizeof(GPU_GLOBAL_SDF_CLIPMAP)) return false;
+static bool create_global_sdf_resources(RENDERER *renderer) {
+    if (!renderer || !renderer->scene || !renderer->cpu_objects) return false;
+    destroy_global_sdf_resources(renderer);
+    GLOBAL_SDF_DATA *global = &renderer->global_sdf;
+    if (!sdf_build_global_clipmaps(renderer->scene, &renderer->radiance_scene, renderer->cpu_objects, renderer->gpu_object_count, global))
+        return false;
 
-    const NriBufferDesc desc = {
-        .size = stride,
-        .structureStride = stride,
+    const GPU_GLOBAL_SDF_CLIPMAP zero_clip = {0};
+    const uint32_t invalid = UINT32_MAX;
+    const float zero_distance = 0.0f;
+    const uint32_t clip_count = global->valid ? global->clip_count : 1u;
+    const uint32_t page_count = global->valid ? global->page_table_count : 1u;
+    const uint32_t voxel_count = global->valid ? global->voxel_count : 1u;
+    const GPU_GLOBAL_SDF_CLIPMAP *clips = global->valid ? global->cpu_clipmaps : &zero_clip;
+    const uint32_t *pages = global->valid ? global->cpu_page_table : &invalid;
+    const float *bricks = global->valid ? global->cpu_bricks : &zero_distance;
+    const uint32_t *surface_ids = global->valid ? global->cpu_surface_ids : &invalid;
+
+    const NriBufferDesc clip_desc = {
+        .size = (uint64_t)clip_count * sizeof(GPU_GLOBAL_SDF_CLIPMAP),
+        .structureStride = sizeof(GPU_GLOBAL_SDF_CLIPMAP),
+        .usage = NriBufferUsageBits_SHADER_RESOURCE
+    };
+    const NriBufferDesc page_desc = {
+        .size = (uint64_t)page_count * sizeof(uint32_t),
+        .structureStride = sizeof(uint32_t),
+        .usage = NriBufferUsageBits_SHADER_RESOURCE
+    };
+    const NriBufferDesc brick_desc = {
+        .size = (uint64_t)voxel_count * sizeof(float),
+        .structureStride = sizeof(float),
+        .usage = NriBufferUsageBits_SHADER_RESOURCE
+    };
+    const NriBufferDesc surface_desc = {
+        .size = (uint64_t)voxel_count * sizeof(uint32_t),
+        .structureStride = sizeof(uint32_t),
         .usage = NriBufferUsageBits_SHADER_RESOURCE
     };
 
-    if (!gpu_create_buffer(renderer->gpu, &desc, NriMemoryLocation_DEVICE, buffer)) return false;
-    if (!create_buffer_view(renderer, *buffer, NriBufferView_STRUCTURED_BUFFER, desc.size, stride, srv)) return false;
+    if (!gpu_create_buffer(renderer->gpu, &clip_desc, NriMemoryLocation_DEVICE, &global->clipmaps) ||
+        !gpu_create_buffer(renderer->gpu, &page_desc, NriMemoryLocation_DEVICE, &global->page_table) ||
+        !gpu_create_buffer(renderer->gpu, &brick_desc, NriMemoryLocation_DEVICE, &global->bricks) ||
+        !gpu_create_buffer(renderer->gpu, &surface_desc, NriMemoryLocation_DEVICE, &global->surface_ids) ||
+        !create_buffer_view(renderer, global->clipmaps, NriBufferView_STRUCTURED_BUFFER, clip_desc.size, sizeof(GPU_GLOBAL_SDF_CLIPMAP), &global->clipmaps_srv) ||
+        !create_buffer_view(renderer, global->page_table, NriBufferView_STRUCTURED_BUFFER, page_desc.size, sizeof(uint32_t), &global->page_table_srv) ||
+        !create_buffer_view(renderer, global->bricks, NriBufferView_STRUCTURED_BUFFER, brick_desc.size, sizeof(float), &global->bricks_srv) ||
+        !create_buffer_view(renderer, global->surface_ids, NriBufferView_STRUCTURED_BUFFER, surface_desc.size, sizeof(uint32_t), &global->surface_ids_srv)) {
+        destroy_global_sdf_resources(renderer);
+        return false;
+    }
 
-    const uint8_t zero[sizeof(GPU_GLOBAL_SDF_CLIPMAP)] = {0};
     const NriAccessStage read = {
         .access = NriAccessBits_SHADER_RESOURCE,
         .stages = NriStageBits_COMPUTE_SHADER
     };
-
-    return gpu_upload_buffer(renderer->gpu, *buffer, zero, read);
-}
-
-static bool create_radiance_scene_fallbacks(RENDERER *renderer) {
-    destroy_radiance_scene_fallbacks(renderer);
-
-    RADIANCE_SCENE_FALLBACKS *fallbacks = &renderer->radiance_fallbacks;
-
-    if (!create_radiance_fallback_buffer(renderer, sizeof(GPU_GLOBAL_SDF_CLIPMAP), &fallbacks->global_sdf_clipmaps, &fallbacks->global_sdf_clipmaps_srv) ||
-        !create_radiance_fallback_buffer(renderer, sizeof(uint32_t), &fallbacks->global_sdf_page_table, &fallbacks->global_sdf_page_table_srv) ||
-        !create_radiance_fallback_buffer(renderer, sizeof(float), &fallbacks->global_sdf_bricks, &fallbacks->global_sdf_bricks_srv) ||
-        !create_radiance_fallback_buffer(renderer, sizeof(uint32_t), &fallbacks->global_sdf_surface_ids, &fallbacks->global_sdf_surface_ids_srv)) {
-        destroy_radiance_scene_fallbacks(renderer);
+    if (!gpu_upload_buffer(renderer->gpu, global->clipmaps, clips, read) ||
+        !gpu_upload_buffer(renderer->gpu, global->page_table, pages, read) ||
+        !gpu_upload_buffer(renderer->gpu, global->bricks, bricks, read) ||
+        !gpu_upload_buffer(renderer->gpu, global->surface_ids, surface_ids, read)) {
+        destroy_global_sdf_resources(renderer);
         return false;
     }
-
-    fallbacks->state = (NriAccessStage){
-        .access = NriAccessBits_SHADER_RESOURCE,
-        .stages = NriStageBits_COMPUTE_SHADER
-    };
-
+    global->state = read;
+    SDL_Log("Global SDF: %u clips, %u physical bricks, %u voxels", global->clip_count, global->physical_brick_count, global->voxel_count);
     return true;
 }
 
@@ -1721,6 +1744,7 @@ static bool create_sdf_scene(RENDERER *renderer, SCENE *scene) {
 }
 
 static void destroy_scene_resources(RENDERER *renderer) {
+    destroy_global_sdf_resources(renderer);
     destroy_radiance_scene_data(renderer);
     destroy_dynamic_grid(renderer);
     destroy_sdf_scene(renderer);
@@ -2031,7 +2055,7 @@ static bool update_radiance_constants(RENDERER *renderer) {
     constants.scene_counts[3] = renderer->radiance_scene.emissive_triangle_count;
     constants.sdf_counts[0] = renderer->sdf.model_count;
     constants.sdf_counts[1] = renderer->dynamic_grid.cell_count;
-    constants.sdf_counts[2] = 0u;
+    constants.sdf_counts[2] = renderer->global_sdf.valid ? renderer->global_sdf.clip_count : 0u;
     constants.sdf_counts[3] = renderer->light_count;
     constants.cache_counts[0] = renderer->radiance_surface_cache.capacity;
     constants.cache_counts[1] = 0u;
@@ -2056,11 +2080,14 @@ static bool update_radiance_constants(RENDERER *renderer) {
     constants.feature_flags[0] = RADIANCE_FEATURE_SURFACE_CACHE | RADIANCE_FEATURE_TEMPORAL_PROBES | RADIANCE_FEATURE_SPATIAL_PROBES;
     if (renderer->radiance_scene.emissive_triangle_count) constants.feature_flags[0] |= RADIANCE_FEATURE_EMISSIVE;
     apply_dynamic_grid_constants(renderer, &constants);
+    constants.feature_flags[0] &= ~RADIANCE_FEATURE_GLOBAL_SDF;
+    if (renderer->global_sdf.valid && renderer->global_sdf.clip_count) constants.feature_flags[0] |= RADIANCE_FEATURE_GLOBAL_SDF;
     constants.feature_flags[1] = 1u;
     constants.feature_flags[2] = renderer->wavefront.ray_capacity;
     constants.feature_flags[3] = 0u;
     constants.reserved[0] = RADIANCE_DEBUG_FINAL_GI;
-    constants.global_sdf_params[2] = 1.0e-4f;
+    constants.global_sdf_params[1] = renderer->global_sdf.valid ? renderer->global_sdf.coarsest_voxel_size : 0.25f;
+    constants.global_sdf_params[2] = 0.65f;
 
     renderer->radiance_constants = constants;
 
@@ -2672,8 +2699,8 @@ static bool update_radiance_scene_descriptors(RENDERER *renderer) {
     if (!renderer || !renderer->wavefront_scene_set || !renderer->radiance_constants_srv || !renderer->pass_constants_srv || !renderer->object_srv || !renderer->material_srv ||
         !renderer->radiance_scene.triangles_srv || !renderer->radiance_scene.emissive_triangles_srv || !renderer->sdf.models_srv || !renderer->sdf.voxels_srv ||
         !renderer->sdf.surface_ids_srv || !renderer->dynamic_grid.cells_srv || !renderer->dynamic_grid.indices_srv ||
-        !renderer->radiance_fallbacks.global_sdf_clipmaps_srv || !renderer->radiance_fallbacks.global_sdf_page_table_srv || !renderer->radiance_fallbacks.global_sdf_bricks_srv ||
-        !renderer->radiance_fallbacks.global_sdf_surface_ids_srv || !renderer->light_srv || !renderer->material_id.srv || !renderer->primitive_id.srv)
+        !renderer->global_sdf.clipmaps_srv || !renderer->global_sdf.page_table_srv || !renderer->global_sdf.bricks_srv ||
+        !renderer->global_sdf.surface_ids_srv || !renderer->light_srv || !renderer->material_id.srv || !renderer->primitive_id.srv)
         return false;
 
     const NriDescriptor *constants[] = {renderer->radiance_constants_srv, renderer->pass_constants_srv};
@@ -2683,9 +2710,9 @@ static bool update_radiance_scene_descriptors(RENDERER *renderer) {
     };
     const NriDescriptor *future_scene[] = {
         renderer->sdf.surface_ids_srv, renderer->dynamic_grid.cells_srv,
-        renderer->dynamic_grid.indices_srv, renderer->radiance_fallbacks.global_sdf_clipmaps_srv,
-        renderer->radiance_fallbacks.global_sdf_page_table_srv, renderer->radiance_fallbacks.global_sdf_bricks_srv,
-        renderer->radiance_fallbacks.global_sdf_surface_ids_srv
+        renderer->dynamic_grid.indices_srv, renderer->global_sdf.clipmaps_srv,
+        renderer->global_sdf.page_table_srv, renderer->global_sdf.bricks_srv,
+        renderer->global_sdf.surface_ids_srv
     };
     const NriDescriptor *lights[] = {renderer->light_srv};
     const NriDescriptor *identity[] = {renderer->material_id.srv, renderer->primitive_id.srv};
@@ -3830,7 +3857,7 @@ bool renderer_init(RENDERER *renderer, GPU *gpu) {
     renderer->previous_view_projection = mat4_identity();
 
     if (!create_pipeline_layouts(renderer) || !create_descriptor_pool(renderer) || !create_frame_buffer(renderer) || !create_radiance_constant_buffers(renderer) ||
-        !create_radiance_scene_fallbacks(renderer) || !create_world_radiance_resources(renderer) || !create_pipelines(renderer) ||
+        !create_world_radiance_resources(renderer) || !create_pipelines(renderer) ||
         !create_radiance_surface_cache(renderer) ||
         !create_size_dependent_resources(renderer, gpu->swapchain_width, gpu->swapchain_height)) {
         renderer_deinit(renderer);
@@ -3871,7 +3898,6 @@ void renderer_deinit(RENDERER *renderer) {
         }
 
         destroy_scene_resources(renderer);
-        destroy_radiance_scene_fallbacks(renderer);
         destroy_radiance_surface_cache(renderer);
         destroy_world_radiance_resources(renderer);
         destroy_wavefront(renderer);
@@ -3913,7 +3939,7 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
 
     if (!create_scene_resources(renderer, scene)) return false;
     renderer->scene = scene;
-    if (!create_dynamic_grid(renderer) || !rebuild_dynamic_grid(renderer) || !update_radiance_constants(renderer)) {
+    if (!create_dynamic_grid(renderer) || !rebuild_dynamic_grid(renderer) || !create_global_sdf_resources(renderer) || !update_radiance_constants(renderer)) {
         renderer->scene = NULL;
         destroy_scene_resources(renderer);
         return false;

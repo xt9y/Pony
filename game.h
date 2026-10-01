@@ -338,19 +338,6 @@ typedef struct RADIANCE_SCENE_DATA {
 } RADIANCE_SCENE_DATA;
 
 
-typedef struct RADIANCE_SCENE_FALLBACKS {
-    NriBuffer *global_sdf_clipmaps;
-    NriBuffer *global_sdf_page_table;
-    NriBuffer *global_sdf_bricks;
-    NriBuffer *global_sdf_surface_ids;
-
-    NriDescriptor *global_sdf_clipmaps_srv;
-    NriDescriptor *global_sdf_page_table_srv;
-    NriDescriptor *global_sdf_bricks_srv;
-    NriDescriptor *global_sdf_surface_ids_srv;
-
-    NriAccessStage state;
-} RADIANCE_SCENE_FALLBACKS;
 
 typedef struct GPU_DYNAMIC_GRID_CELL {
     uint32_t range_flags[4];
@@ -739,7 +726,6 @@ typedef struct RENDERER {
     RADIANCE_SCENE_DATA radiance_scene;
     RADIANCE_DYNAMIC_GRID dynamic_grid;
     GLOBAL_SDF_DATA global_sdf;
-    RADIANCE_SCENE_FALLBACKS radiance_fallbacks;
 
     NriDescriptorPool *descriptor_pool;
     NriDescriptorSet *gbuffer_set;
