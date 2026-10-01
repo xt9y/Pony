@@ -30,9 +30,61 @@ typedef struct PROBE_WAVEFRONT_SCRATCH PROBE_WAVEFRONT_SCRATCH;
 typedef struct RENDER_MATERIAL RENDER_MATERIAL;
 
 typedef struct GPU {
-    const char *title;
-    int width;
-    int height;
+    SDL_Window *window;
+
+#if defined(__APPLE__)
+    SDL_MetalView metal_view;
+#endif
+
+    NriDevice *device;
+    NriCoreInterface core;
+    NriHelperInterface helper;
+    NriSwapChainInterface swapchain_api;
+
+    NriQueue *graphics_queue;
+    NriQueue *compute_queue;
+    NriQueue *copy_queue;
+    NriQueue *work_queue;
+
+    NriSwapChain *swapchain;
+    NriDescriptorPool *descriptor_pool;
+    NriFence *frame_fence;
+    NriFence *work_fence;
+
+    FRAME_CONTEXT *frame_contexts;
+    FRAME_CONTEXT *work_contexts;
+    FRAME_CONTEXT *active_frame;
+    FRAME_CONTEXT *active_work;
+    uint64_t work_index;
+    uint64_t work_next_fence;
+    UPLOAD_CONTEXT *upload;
+
+    SWAPCHAIN_TEXTURE *swapchain_frames;
+    NriTexture **swapchain_textures;
+    uint32_t swapchain_texture_count;
+
+    NriPipelineCache *pipeline_cache;
+    NriQueryPool *timestamp_pool;
+    NriBuffer *timestamp_readback;
+    uint32_t timestamp_query_size;
+    bool timestamp_supported;
+
+    uint32_t swapchain_width;
+    uint32_t swapchain_height;
+    uint32_t current_swap_index;
+    uint64_t frame_index;
+    NriFormat swapchain_format;
+
+    NriDescriptor **temporary_descriptors;
+    NriBuffer **temporary_buffers;
+    uint32_t temporary_descriptor_num;
+    uint32_t temporary_descriptor_cap;
+    uint32_t temporary_buffer_num;
+    uint32_t temporary_buffer_cap;
+
+    TEXTURE_STATE *texture_states;
+    uint32_t texture_state_num;
+    uint32_t texture_state_cap;
 } GPU;
 
 typedef struct FX_STATE {
@@ -92,49 +144,7 @@ struct RENDERER {
     GPU *gpu;
     SCENE *scene;
 
-    SDL_Window *window;
-    NriDevice *device;
-    NriCoreInterface core;
-    NriHelperInterface helper;
-    NriSwapChainInterface swapchain_api;
-    NriQueue *graphics_queue;
-    NriQueue *compute_queue;
-    NriQueue *copy_queue;
-    NriQueue *work_queue;
-    NriSwapChain *swapchain;
-    NriDescriptorPool *descriptor_pool;
-    NriFence *frame_fence;
-    NriFence *work_fence;
-    FRAME_CONTEXT *frame_contexts;
-    FRAME_CONTEXT *work_contexts;
-    FRAME_CONTEXT *active_frame;
-    FRAME_CONTEXT *active_work;
-    uint64_t work_index;
-    uint64_t work_next_fence;
-    UPLOAD_CONTEXT *upload;
-    SWAPCHAIN_TEXTURE *swapchain_frames;
-    NriTexture **swapchain_textures;
-    uint32_t swapchain_texture_count;
-
-    NriPipelineCache *pipeline_cache;
-    NriQueryPool *timestamp_pool;
-    NriBuffer *timestamp_readback;
-    uint32_t timestamp_query_size;
-    bool timestamp_supported;
     PROBE_WAVEFRONT_SCRATCH *probe_scratch;
-
-    uint32_t swapchain_width, swapchain_height, current_swap_index;
-    uint64_t frame_index;
-    NriFormat swapchain_format;
-    SDL_MetalView metal_view;
-
-    NriDescriptor **temporary_descriptors;
-    NriBuffer **temporary_buffers;
-    uint32_t temporary_descriptor_num, temporary_descriptor_cap;
-    uint32_t temporary_buffer_num, temporary_buffer_cap;
-
-    TEXTURE_STATE *texture_states;
-    uint32_t texture_state_num, texture_state_cap;
 
     NriPipelineLayout *surface_layout;
     NriPipelineLayout *line_layout;

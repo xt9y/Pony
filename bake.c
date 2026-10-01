@@ -425,7 +425,7 @@ bool bake_start(
     uint64_t volume_hash,
     uint64_t beam_hash
 ) {
-    if (!renderer || !renderer->device || !scene || !visual || !layout || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics || !path) return false;
+    if (!renderer || !renderer->gpu->device || !scene || !visual || !layout || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics || !path) return false;
 
     if (g_bake) {
         SDL_SetError("a bake is already in progress");
@@ -472,7 +472,7 @@ bool bake_start(
 
     renderer->bake_stage = "offscreen GPU bake";
 
-    if (renderer->window) SDL_SetWindowTitle(renderer->window, "BAKE | 0.0s");
+    if (renderer->gpu->window) SDL_SetWindowTitle(renderer->gpu->window, "BAKE | 0.0s");
 
     SDL_Log("B: full-speed offscreen rebake started; render device remains independent");
     return true;
@@ -483,7 +483,7 @@ bool bake_active(RENDERER *renderer) {
 }
 
 void bake_update_title(RENDERER *renderer) {
-    if (!renderer || !renderer->window) return;
+    if (!renderer || !renderer->gpu->window) return;
 
     const Uint64 now = SDL_GetTicks();
 
@@ -612,7 +612,7 @@ void bake_update_title(RENDERER *renderer) {
         }
     }
 
-    SDL_SetWindowTitle(renderer->window, title);
+    SDL_SetWindowTitle(renderer->gpu->window, title);
 }
 
 void bake_update(RENDERER *renderer) {

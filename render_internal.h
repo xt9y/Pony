@@ -3,8 +3,8 @@
 
 #include "gpu.h"
 
-bool r_init(RENDERER *renderer, const char *title, int width, int height);
-void r_deinit(RENDERER *renderer);
+bool renderer_gpu_resources_init(RENDERER *renderer);
+void renderer_gpu_resources_deinit(RENDERER *renderer);
 
 bool bake_lightmap(RENDERER *renderer, const BVH *tree, const LIGHTMAP *lightmap, const PROBE_GRID *probes);
 bool bake_probe_grid_fast(RENDERER *renderer, PROBE_GRID *grid, const BVH *tree, const BEAM_GRID *beams, PROBE_BAKE_PROGRESS_FN progress);

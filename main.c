@@ -249,7 +249,7 @@ int main(int argc, char **argv) {
 
     const bool cached = renderer_load_cached_lightmap(&renderer, bake_path, scene_hash, layout_hash, volume_hash, beam_hash, &lightmap);
 
-    SDL_SetWindowTitle(renderer.window, cached ? "READY" : "UNBAKED");
+    SDL_SetWindowTitle(gpu.window, cached ? "READY" : "UNBAKED");
 
     printf(
         "%s: %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n",

@@ -1,4 +1,5 @@
 #include "game.h"
+#include "render_internal.h"
 
 #include <SDL3_image/SDL_image.h>
 
@@ -174,15 +175,15 @@ static void free_probe_grid(PROBE_GRID *grid) {
 }
 
 static bool create_pipeline_cache(RENDERER *r) {
-    if (!r || !r->device) return false;
+    if (!r || !r->gpu->device) return false;
 
-    if (r->pipeline_cache) return true;
+    if (r->gpu->pipeline_cache) return true;
 
     const NriPipelineCacheDesc desc = {0};
-    NriResult result = r->core.CreatePipelineCache(r->device, &desc, &r->pipeline_cache);
+    NriResult result = r->gpu->core.CreatePipelineCache(r->gpu->device, &desc, &r->gpu->pipeline_cache);
 
     if (result == NriResult_UNSUPPORTED) {
-        r->pipeline_cache = NULL;
+        r->gpu->pipeline_cache = NULL;
 
         return true;
     }
@@ -191,56 +192,56 @@ static bool create_pipeline_cache(RENDERER *r) {
 }
 
 static void destroy_pipeline_cache(RENDERER *r) {
-    if (!r || !r->pipeline_cache) return;
-    r->core.DestroyPipelineCache(r->pipeline_cache);
-    r->pipeline_cache = NULL;
+    if (!r || !r->gpu->pipeline_cache) return;
+    r->gpu->core.DestroyPipelineCache(r->gpu->pipeline_cache);
+    r->gpu->pipeline_cache = NULL;
 }
 
 static bool acquire_queues(RENDERER *r) {
-    if (!r || !r->device) return false;
+    if (!r || !r->gpu->device) return false;
 
-    if (r->core.GetQueue(r->device, NriQueueType_GRAPHICS, 0, &r->graphics_queue) != NriResult_SUCCESS) return false;
+    if (r->gpu->core.GetQueue(r->gpu->device, NriQueueType_GRAPHICS, 0, &r->gpu->graphics_queue) != NriResult_SUCCESS) return false;
 
-    if (r->core.GetQueue(r->device, NriQueueType_COMPUTE, 0, &r->compute_queue) != NriResult_SUCCESS) r->compute_queue = r->graphics_queue;
+    if (r->gpu->core.GetQueue(r->gpu->device, NriQueueType_COMPUTE, 0, &r->gpu->compute_queue) != NriResult_SUCCESS) r->gpu->compute_queue = r->gpu->graphics_queue;
 
-    if (r->core.GetQueue(r->device, NriQueueType_COPY, 0, &r->copy_queue) != NriResult_SUCCESS) r->copy_queue = r->graphics_queue;
+    if (r->gpu->core.GetQueue(r->gpu->device, NriQueueType_COPY, 0, &r->gpu->copy_queue) != NriResult_SUCCESS) r->gpu->copy_queue = r->gpu->graphics_queue;
 
-    r->work_queue = r->compute_queue ? r->compute_queue : r->graphics_queue;
+    r->gpu->work_queue = r->gpu->compute_queue ? r->gpu->compute_queue : r->gpu->graphics_queue;
 
     return true;
 }
 
 static bool create_gpu_timestamps(RENDERER *r) {
-    if (!r || !r->device) return false;
+    if (!r || !r->gpu->device) return false;
 
-    const NriDeviceDesc *device = r->core.GetDeviceDesc(r->device);
+    const NriDeviceDesc *device = r->gpu->core.GetDeviceDesc(r->gpu->device);
 
     if (!device || !device->features.timestamp || !device->other.timestampFrequencyHz) return true;
 
     const NriQueryPoolDesc query_desc = {.queryType = NriQueryType_TIMESTAMP, .capacity = TIMESTAMP_CAPACITY};
 
-    if (r->core.CreateQueryPool(r->device, &query_desc, &r->timestamp_pool) != NriResult_SUCCESS) return true;
+    if (r->gpu->core.CreateQueryPool(r->gpu->device, &query_desc, &r->gpu->timestamp_pool) != NriResult_SUCCESS) return true;
 
-    r->timestamp_query_size = r->core.GetQuerySize(r->timestamp_pool);
+    r->gpu->timestamp_query_size = r->gpu->core.GetQuerySize(r->gpu->timestamp_pool);
 
-    if (!r->timestamp_query_size) {
-        r->core.DestroyQueryPool(r->timestamp_pool);
-        r->timestamp_pool = NULL;
-
-        return true;
-    }
-
-    const NriBufferDesc readback_desc = {.size = (uint64_t)r->timestamp_query_size * TIMESTAMP_CAPACITY};
-
-    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_READBACK, 0.0f, &readback_desc, &r->timestamp_readback) != NriResult_SUCCESS) {
-        r->core.DestroyQueryPool(r->timestamp_pool);
-        r->timestamp_pool = NULL;
-        r->timestamp_query_size = 0u;
+    if (!r->gpu->timestamp_query_size) {
+        r->gpu->core.DestroyQueryPool(r->gpu->timestamp_pool);
+        r->gpu->timestamp_pool = NULL;
 
         return true;
     }
 
-    r->timestamp_supported = true;
+    const NriBufferDesc readback_desc = {.size = (uint64_t)r->gpu->timestamp_query_size * TIMESTAMP_CAPACITY};
+
+    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_HOST_READBACK, 0.0f, &readback_desc, &r->gpu->timestamp_readback) != NriResult_SUCCESS) {
+        r->gpu->core.DestroyQueryPool(r->gpu->timestamp_pool);
+        r->gpu->timestamp_pool = NULL;
+        r->gpu->timestamp_query_size = 0u;
+
+        return true;
+    }
+
+    r->gpu->timestamp_supported = true;
 
     return true;
 }
@@ -248,45 +249,45 @@ static bool create_gpu_timestamps(RENDERER *r) {
 static void destroy_gpu_timestamps(RENDERER *r) {
     if (!r) return;
 
-    if (r->timestamp_readback) r->core.DestroyBuffer(r->timestamp_readback);
+    if (r->gpu->timestamp_readback) r->gpu->core.DestroyBuffer(r->gpu->timestamp_readback);
 
-    if (r->timestamp_pool) r->core.DestroyQueryPool(r->timestamp_pool);
-    r->timestamp_readback = NULL;
-    r->timestamp_pool = NULL;
-    r->timestamp_query_size = 0u;
-    r->timestamp_supported = false;
+    if (r->gpu->timestamp_pool) r->gpu->core.DestroyQueryPool(r->gpu->timestamp_pool);
+    r->gpu->timestamp_readback = NULL;
+    r->gpu->timestamp_pool = NULL;
+    r->gpu->timestamp_query_size = 0u;
+    r->gpu->timestamp_supported = false;
 }
 
 static bool gpu_timestamp_begin(RENDERER *r, NriCommandBuffer *cmd, uint32_t slot) {
-    if (!r || !cmd || !r->timestamp_supported) return true;
+    if (!r || !cmd || !r->gpu->timestamp_supported) return true;
 
     if (slot + 1u >= TIMESTAMP_CAPACITY) return false;
-    r->core.CmdResetQueries(cmd, r->timestamp_pool, slot, 2u);
-    r->core.CmdEndQuery(cmd, r->timestamp_pool, slot);
+    r->gpu->core.CmdResetQueries(cmd, r->gpu->timestamp_pool, slot, 2u);
+    r->gpu->core.CmdEndQuery(cmd, r->gpu->timestamp_pool, slot);
 
     return true;
 }
 
 static bool gpu_timestamp_end(RENDERER *r, NriCommandBuffer *cmd, uint32_t slot) {
-    if (!r || !cmd || !r->timestamp_supported) return true;
+    if (!r || !cmd || !r->gpu->timestamp_supported) return true;
 
     if (slot + 1u >= TIMESTAMP_CAPACITY) return false;
-    r->core.CmdEndQuery(cmd, r->timestamp_pool, slot + 1u);
-    r->core.CmdCopyQueries(cmd, r->timestamp_pool, slot, 2u, r->timestamp_readback, (uint64_t)slot * r->timestamp_query_size);
+    r->gpu->core.CmdEndQuery(cmd, r->gpu->timestamp_pool, slot + 1u);
+    r->gpu->core.CmdCopyQueries(cmd, r->gpu->timestamp_pool, slot, 2u, r->gpu->timestamp_readback, (uint64_t)slot * r->gpu->timestamp_query_size);
 
     return true;
 }
 
 static void gpu_timestamp_log(RENDERER *r, uint32_t slot, const char *label) {
-    if (!r || !r->timestamp_supported || slot + 1u >= TIMESTAMP_CAPACITY || !label) return;
+    if (!r || !r->gpu->timestamp_supported || slot + 1u >= TIMESTAMP_CAPACITY || !label) return;
 
-    const NriDeviceDesc *device = r->core.GetDeviceDesc(r->device);
+    const NriDeviceDesc *device = r->gpu->core.GetDeviceDesc(r->gpu->device);
 
     if (!device || !device->other.timestampFrequencyHz) return;
 
-    const uint64_t offset = (uint64_t)slot * r->timestamp_query_size;
-    const uint64_t bytes = (uint64_t)r->timestamp_query_size * 2u;
-    const uint8_t *mapped = r->core.MapBuffer(r->timestamp_readback, offset, bytes);
+    const uint64_t offset = (uint64_t)slot * r->gpu->timestamp_query_size;
+    const uint64_t bytes = (uint64_t)r->gpu->timestamp_query_size * 2u;
+    const uint8_t *mapped = r->gpu->core.MapBuffer(r->gpu->timestamp_readback, offset, bytes);
 
     if (!mapped) return;
 
@@ -294,8 +295,8 @@ static void gpu_timestamp_log(RENDERER *r, uint32_t slot, const char *label) {
     uint64_t end = 0u;
 
     memcpy(&begin, mapped, sizeof(begin));
-    memcpy(&end, mapped + r->timestamp_query_size, sizeof(end));
-    r->core.UnmapBuffer(r->timestamp_readback);
+    memcpy(&end, mapped + r->gpu->timestamp_query_size, sizeof(end));
+    r->gpu->core.UnmapBuffer(r->gpu->timestamp_readback);
 
     if (end >= begin) {
         const double ms = (double)(end - begin) * 1000.0 / (double)device->other.timestampFrequencyHz;
@@ -328,9 +329,9 @@ static NriPipeline *compile_compute(RENDERER *r, NriPipelineLayout *layout, cons
     if (!spirv) return NULL;
 
     const NriShaderDesc shader = {.stage = NriStageBits_COMPUTE_SHADER, .bytecode = spirv, .size = spirv_size, .entryPointName = entrypoint};
-    const NriComputePipelineDesc desc = {.pipelineLayout = layout, .shader = shader, .cache = r->pipeline_cache};
+    const NriComputePipelineDesc desc = {.pipelineLayout = layout, .shader = shader, .cache = r->gpu->pipeline_cache};
     NriPipeline *pipeline = NULL;
-    NriResult result = r->core.CreateComputePipeline(r->device, &desc, &pipeline);
+    NriResult result = r->gpu->core.CreateComputePipeline(r->gpu->device, &desc, &pipeline);
 
     SDL_free(spirv);
 
@@ -445,11 +446,11 @@ static NriPipeline *make_surface_pipeline(RENDERER *r, NriCoreInterface *core, N
 
                                           .shaders = shaders,
                                           .shaderNum = 2,
-                                          .cache = r->pipeline_cache};
+                                          .cache = r->gpu->pipeline_cache};
 
     NriPipeline *pipeline = NULL;
 
-    if (core->CreateGraphicsPipeline(r->device, &desc, &pipeline) != NriResult_SUCCESS) {
+    if (core->CreateGraphicsPipeline(r->gpu->device, &desc, &pipeline) != NriResult_SUCCESS) {
         return NULL;
     }
 
@@ -519,7 +520,7 @@ static bool create_pipeline_layout(RENDERER *r, NriPipelineLayout **out, const N
         .shaderStages = stages
     };
 
-    return r->core.CreatePipelineLayout(r->device, &desc, out) == NriResult_SUCCESS;
+    return r->gpu->core.CreatePipelineLayout(r->gpu->device, &desc, out) == NriResult_SUCCESS;
 }
 
 static bool create_pipeline_layouts(RENDERER *r);
@@ -676,11 +677,11 @@ static bool create_descriptor_pool_object(RENDERER *r, NriDescriptorPool **pool)
         .constantBufferMaxNum = 8192
     };
 
-    return r->core.CreateDescriptorPool(r->device, &desc, pool) == NriResult_SUCCESS;
+    return r->gpu->core.CreateDescriptorPool(r->gpu->device, &desc, pool) == NriResult_SUCCESS;
 }
 
 static bool create_descriptor_pool(RENDERER *r) {
-    return create_descriptor_pool_object(r, &r->descriptor_pool);
+    return create_descriptor_pool_object(r, &r->gpu->descriptor_pool);
 }
 
 static bool track_descriptor_array(RENDERER *r, NriDescriptor ***items, uint32_t *count, uint32_t *capacity, NriDescriptor *descriptor) {
@@ -691,7 +692,7 @@ static bool track_descriptor_array(RENDERER *r, NriDescriptor ***items, uint32_t
         NriDescriptor **data = realloc(*items, cap * sizeof(*data));
 
         if (!data) {
-            r->core.DestroyDescriptor(descriptor);
+            r->gpu->core.DestroyDescriptor(descriptor);
 
             return false;
         }
@@ -712,7 +713,7 @@ static bool track_buffer_array(RENDERER *r, NriBuffer ***items, uint32_t *count,
         NriBuffer **data = realloc(*items, cap * sizeof(*data));
 
         if (!data) {
-            r->core.DestroyBuffer(buffer);
+            r->gpu->core.DestroyBuffer(buffer);
 
             return false;
         }
@@ -726,49 +727,49 @@ static bool track_buffer_array(RENDERER *r, NriBuffer ***items, uint32_t *count,
 }
 
 static bool track_descriptor(RENDERER *r, NriDescriptor *descriptor) {
-    if (r->active_frame) {
-        FRAME_CONTEXT *frame = r->active_frame;
+    if (r->gpu->active_frame) {
+        FRAME_CONTEXT *frame = r->gpu->active_frame;
 
-        return track_descriptor_array(r, &frame->temporary_descriptors, &frame->temporary_descriptor_num, &frame->temporary_descriptor_cap, descriptor);
+        return track_descriptor_array(r, &frame->gpu->temporary_descriptors, &frame->gpu->temporary_descriptor_num, &frame->gpu->temporary_descriptor_cap, descriptor);
     }
 
-    return track_descriptor_array(r, &r->temporary_descriptors, &r->temporary_descriptor_num, &r->temporary_descriptor_cap, descriptor);
+    return track_descriptor_array(r, &r->gpu->temporary_descriptors, &r->gpu->temporary_descriptor_num, &r->gpu->temporary_descriptor_cap, descriptor);
 }
 
 static bool track_buffer(RENDERER *r, NriBuffer *buffer) {
-    if (r->active_frame) {
-        FRAME_CONTEXT *frame = r->active_frame;
+    if (r->gpu->active_frame) {
+        FRAME_CONTEXT *frame = r->gpu->active_frame;
 
-        return track_buffer_array(r, &frame->temporary_buffers, &frame->temporary_buffer_num, &frame->temporary_buffer_cap, buffer);
+        return track_buffer_array(r, &frame->gpu->temporary_buffers, &frame->gpu->temporary_buffer_num, &frame->gpu->temporary_buffer_cap, buffer);
     }
 
-    return track_buffer_array(r, &r->temporary_buffers, &r->temporary_buffer_num, &r->temporary_buffer_cap, buffer);
+    return track_buffer_array(r, &r->gpu->temporary_buffers, &r->gpu->temporary_buffer_num, &r->gpu->temporary_buffer_cap, buffer);
 }
 
 static void clear_temporary(RENDERER *r) {
-    for (uint32_t i = 0; i < r->temporary_descriptor_num; ++i)
-        r->core.DestroyDescriptor(r->temporary_descriptors[i]);
+    for (uint32_t i = 0; i < r->gpu->temporary_descriptor_num; ++i)
+        r->gpu->core.DestroyDescriptor(r->gpu->temporary_descriptors[i]);
 
-    for (uint32_t i = 0; i < r->temporary_buffer_num; ++i)
-        r->core.DestroyBuffer(r->temporary_buffers[i]);
-    r->temporary_descriptor_num = r->temporary_buffer_num = 0;
+    for (uint32_t i = 0; i < r->gpu->temporary_buffer_num; ++i)
+        r->gpu->core.DestroyBuffer(r->gpu->temporary_buffers[i]);
+    r->gpu->temporary_descriptor_num = r->gpu->temporary_buffer_num = 0;
 
-    if (r->descriptor_pool) r->core.ResetDescriptorPool(r->descriptor_pool);
+    if (r->gpu->descriptor_pool) r->gpu->core.ResetDescriptorPool(r->gpu->descriptor_pool);
 }
 
 static void clear_frame_temporary(RENDERER *r, FRAME_CONTEXT *frame) {
     if (!frame) return;
 
-    for (uint32_t i = 0; i < frame->temporary_descriptor_num; ++i)
-        r->core.DestroyDescriptor(frame->temporary_descriptors[i]);
+    for (uint32_t i = 0; i < frame->gpu->temporary_descriptor_num; ++i)
+        r->gpu->core.DestroyDescriptor(frame->gpu->temporary_descriptors[i]);
 
-    for (uint32_t i = 0; i < frame->temporary_buffer_num; ++i)
-        r->core.DestroyBuffer(frame->temporary_buffers[i]);
-    frame->temporary_descriptor_num = 0;
-    frame->temporary_buffer_num = 0;
+    for (uint32_t i = 0; i < frame->gpu->temporary_buffer_num; ++i)
+        r->gpu->core.DestroyBuffer(frame->gpu->temporary_buffers[i]);
+    frame->gpu->temporary_descriptor_num = 0;
+    frame->gpu->temporary_buffer_num = 0;
     frame->uniform_offset = 0u;
 
-    if (frame->descriptor_pool) r->core.ResetDescriptorPool(frame->descriptor_pool);
+    if (frame->gpu->descriptor_pool) r->gpu->core.ResetDescriptorPool(frame->gpu->descriptor_pool);
 }
 
 static bool create_uniform_ring(RENDERER *r, FRAME_CONTEXT *context) {
@@ -776,84 +777,84 @@ static bool create_uniform_ring(RENDERER *r, FRAME_CONTEXT *context) {
 
     const NriBufferDesc desc = {.size = UNIFORM_RING_BYTES, .usage = NriBufferUsageBits_CONSTANT};
 
-    return r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_UPLOAD, 0.0f, &desc, &context->uniform_buffer) == NriResult_SUCCESS;
+    return r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_HOST_UPLOAD, 0.0f, &desc, &context->uniform_buffer) == NriResult_SUCCESS;
 }
 
 static bool create_work_contexts(RENDERER *r) {
-    if (!r || !r->device || !r->work_queue) return false;
+    if (!r || !r->gpu->device || !r->gpu->work_queue) return false;
 
-    r->work_contexts = calloc(WORK_QUEUE_DEPTH, sizeof(*r->work_contexts));
+    r->gpu->work_contexts = calloc(WORK_QUEUE_DEPTH, sizeof(*r->gpu->work_contexts));
 
-    if (!r->work_contexts) return false;
+    if (!r->gpu->work_contexts) return false;
 
-    if (r->core.CreateFence(r->device, 0u, &r->work_fence) != NriResult_SUCCESS) return false;
+    if (r->gpu->core.CreateFence(r->gpu->device, 0u, &r->gpu->work_fence) != NriResult_SUCCESS) return false;
 
     for (uint32_t i = 0; i < WORK_QUEUE_DEPTH; ++i) {
-        FRAME_CONTEXT *work = &r->work_contexts[i];
+        FRAME_CONTEXT *work = &r->gpu->work_contexts[i];
 
-        if (!create_descriptor_pool_object(r, &work->descriptor_pool) || !create_uniform_ring(r, work) ||
-            r->core.CreateCommandAllocator(r->work_queue, &work->allocator) != NriResult_SUCCESS ||
-            r->core.CreateCommandBuffer(work->allocator, &work->command_buffer) != NriResult_SUCCESS)
+        if (!create_descriptor_pool_object(r, &work->gpu->descriptor_pool) || !create_uniform_ring(r, work) ||
+            r->gpu->core.CreateCommandAllocator(r->gpu->work_queue, &work->allocator) != NriResult_SUCCESS ||
+            r->gpu->core.CreateCommandBuffer(work->allocator, &work->command_buffer) != NriResult_SUCCESS)
             return false;
     }
 
-    r->work_next_fence = 1u;
+    r->gpu->work_next_fence = 1u;
 
     return true;
 }
 
 static void work_drain(RENDERER *r) {
-    if (!r || !r->work_fence || r->work_next_fence <= 1u) return;
-    r->core.Wait(r->work_fence, r->work_next_fence - 1u);
+    if (!r || !r->gpu->work_fence || r->gpu->work_next_fence <= 1u) return;
+    r->gpu->core.Wait(r->gpu->work_fence, r->gpu->work_next_fence - 1u);
 }
 
 static void destroy_work_contexts(RENDERER *r) {
     if (!r) return;
     work_drain(r);
 
-    if (r->work_contexts) {
+    if (r->gpu->work_contexts) {
         for (uint32_t i = 0; i < WORK_QUEUE_DEPTH; ++i) {
-            FRAME_CONTEXT *work = &r->work_contexts[i];
+            FRAME_CONTEXT *work = &r->gpu->work_contexts[i];
             clear_frame_temporary(r, work);
 
-            if (work->command_buffer) r->core.DestroyCommandBuffer(work->command_buffer);
+            if (work->command_buffer) r->gpu->core.DestroyCommandBuffer(work->command_buffer);
 
-            if (work->allocator) r->core.DestroyCommandAllocator(work->allocator);
+            if (work->allocator) r->gpu->core.DestroyCommandAllocator(work->allocator);
 
-            if (work->descriptor_pool) r->core.DestroyDescriptorPool(work->descriptor_pool);
+            if (work->gpu->descriptor_pool) r->gpu->core.DestroyDescriptorPool(work->gpu->descriptor_pool);
 
-            if (work->uniform_buffer) r->core.DestroyBuffer(work->uniform_buffer);
+            if (work->uniform_buffer) r->gpu->core.DestroyBuffer(work->uniform_buffer);
 
-            free(work->temporary_descriptors);
-            free(work->temporary_buffers);
+            free(work->gpu->temporary_descriptors);
+            free(work->gpu->temporary_buffers);
         }
 
-        free(r->work_contexts);
+        free(r->gpu->work_contexts);
     }
 
-    r->work_contexts = NULL;
-    r->active_work = NULL;
+    r->gpu->work_contexts = NULL;
+    r->gpu->active_work = NULL;
 
-    if (r->work_fence) r->core.DestroyFence(r->work_fence);
-    r->work_fence = NULL;
+    if (r->gpu->work_fence) r->gpu->core.DestroyFence(r->gpu->work_fence);
+    r->gpu->work_fence = NULL;
 }
 
 static bool begin_work_commands(RENDERER *r, NriCommandAllocator **allocator, NriCommandBuffer **command_buffer) {
-    if (!r || !r->work_contexts || !r->work_fence || !r->work_queue || !allocator || !command_buffer) return false;
+    if (!r || !r->gpu->work_contexts || !r->gpu->work_fence || !r->gpu->work_queue || !allocator || !command_buffer) return false;
 
-    FRAME_CONTEXT *work = &r->work_contexts[r->work_index % WORK_QUEUE_DEPTH];
+    FRAME_CONTEXT *work = &r->gpu->work_contexts[r->gpu->work_index % WORK_QUEUE_DEPTH];
 
-    if (work->fence_value && r->core.GetFenceValue(r->work_fence) < work->fence_value) r->core.Wait(r->work_fence, work->fence_value);
+    if (work->fence_value && r->gpu->core.GetFenceValue(r->gpu->work_fence) < work->fence_value) r->gpu->core.Wait(r->gpu->work_fence, work->fence_value);
 
     clear_frame_temporary(r, work);
-    r->core.ResetCommandAllocator(work->allocator);
+    r->gpu->core.ResetCommandAllocator(work->allocator);
     r->current_graphics_layout = r->current_compute_layout = NULL;
-    r->active_work = work;
-    r->active_frame = work;
+    r->gpu->active_work = work;
+    r->gpu->active_frame = work;
 
-    if (r->core.BeginCommandBuffer(work->command_buffer, work->descriptor_pool) != NriResult_SUCCESS) {
-        r->active_work = NULL;
-        r->active_frame = NULL;
+    if (r->gpu->core.BeginCommandBuffer(work->command_buffer, work->gpu->descriptor_pool) != NriResult_SUCCESS) {
+        r->gpu->active_work = NULL;
+        r->gpu->active_frame = NULL;
 
         return false;
     }
@@ -864,21 +865,21 @@ static bool begin_work_commands(RENDERER *r, NriCommandAllocator **allocator, Nr
 }
 
 static bool submit_work_commands(RENDERER *r, NriCommandAllocator *allocator, NriCommandBuffer *command_buffer, bool wait) {
-    FRAME_CONTEXT *work = r ? r->active_work : NULL;
+    FRAME_CONTEXT *work = r ? r->gpu->active_work : NULL;
 
     if (!r || !work || work->allocator != allocator || work->command_buffer != command_buffer) return false;
 
-    bool good = r->core.EndCommandBuffer(command_buffer) == NriResult_SUCCESS;
+    bool good = r->gpu->core.EndCommandBuffer(command_buffer) == NriResult_SUCCESS;
     uint64_t value = 0u;
 
     if (good) {
-        value = r->work_next_fence++;
-        const NriFenceSubmitDesc signal = {.fence = r->work_fence, .value = value};
+        value = r->gpu->work_next_fence++;
+        const NriFenceSubmitDesc signal = {.fence = r->gpu->work_fence, .value = value};
         NriFenceSubmitDesc upload_wait = {0};
         uint32_t upload_wait_num = 0u;
 
-        if (r->upload && r->upload->fence && r->upload->next_fence_value > 1u) {
-            upload_wait = (NriFenceSubmitDesc){.fence = r->upload->fence, .value = r->upload->next_fence_value - 1u, .stages = NriStageBits_ALL};
+        if (r->gpu->upload && r->gpu->upload->fence && r->gpu->upload->next_fence_value > 1u) {
+            upload_wait = (NriFenceSubmitDesc){.fence = r->gpu->upload->fence, .value = r->gpu->upload->next_fence_value - 1u, .stages = NriStageBits_ALL};
             upload_wait_num = 1u;
         }
 
@@ -889,18 +890,18 @@ static bool submit_work_commands(RENDERER *r, NriCommandAllocator *allocator, Nr
                                            .signalFences = &signal,
                                            .signalFenceNum = 1u};
 
-        good = r->core.QueueSubmit(r->work_queue, &submit) == NriResult_SUCCESS;
+        good = r->gpu->core.QueueSubmit(r->gpu->work_queue, &submit) == NriResult_SUCCESS;
     }
 
     if (good) {
         work->fence_value = value;
-        r->work_index++;
+        r->gpu->work_index++;
     }
 
-    r->active_work = NULL;
-    r->active_frame = NULL;
+    r->gpu->active_work = NULL;
+    r->gpu->active_frame = NULL;
 
-    if (good && wait) r->core.Wait(r->work_fence, value);
+    if (good && wait) r->gpu->core.Wait(r->gpu->work_fence, value);
 
     return good;
 }
@@ -908,36 +909,36 @@ static bool submit_work_commands(RENDERER *r, NriCommandAllocator *allocator, Nr
 static void abort_work_commands(RENDERER *r, NriCommandAllocator *allocator, NriCommandBuffer *command_buffer) {
     if (!r) return;
 
-    FRAME_CONTEXT *work = r->active_work;
+    FRAME_CONTEXT *work = r->gpu->active_work;
 
     if (!work || work->allocator != allocator || work->command_buffer != command_buffer) return;
 
-    if (work->command_buffer) r->core.DestroyCommandBuffer(work->command_buffer);
+    if (work->command_buffer) r->gpu->core.DestroyCommandBuffer(work->command_buffer);
 
-    if (work->allocator) r->core.DestroyCommandAllocator(work->allocator);
+    if (work->allocator) r->gpu->core.DestroyCommandAllocator(work->allocator);
 
     work->command_buffer = NULL;
     work->allocator = NULL;
     clear_frame_temporary(r, work);
-    r->active_work = NULL;
-    r->active_frame = NULL;
+    r->gpu->active_work = NULL;
+    r->gpu->active_frame = NULL;
 
-    if (r->core.CreateCommandAllocator(r->work_queue, &work->allocator) == NriResult_SUCCESS) r->core.CreateCommandBuffer(work->allocator, &work->command_buffer);
+    if (r->gpu->core.CreateCommandAllocator(r->gpu->work_queue, &work->allocator) == NriResult_SUCCESS) r->gpu->core.CreateCommandBuffer(work->allocator, &work->command_buffer);
 }
 
 static bool create_frame_contexts(RENDERER *r) {
-    r->frame_contexts = calloc(FRAME_QUEUE_DEPTH, sizeof(*r->frame_contexts));
+    r->gpu->frame_contexts = calloc(FRAME_QUEUE_DEPTH, sizeof(*r->gpu->frame_contexts));
 
-    if (!r->frame_contexts) return false;
+    if (!r->gpu->frame_contexts) return false;
 
-    if (r->core.CreateFence(r->device, 0, &r->frame_fence) != NriResult_SUCCESS) return false;
+    if (r->gpu->core.CreateFence(r->gpu->device, 0, &r->gpu->frame_fence) != NriResult_SUCCESS) return false;
 
     for (uint32_t i = 0; i < FRAME_QUEUE_DEPTH; ++i) {
-        FRAME_CONTEXT *frame = &r->frame_contexts[i];
+        FRAME_CONTEXT *frame = &r->gpu->frame_contexts[i];
 
-        if (!create_descriptor_pool_object(r, &frame->descriptor_pool) || !create_uniform_ring(r, frame) ||
-            r->core.CreateCommandAllocator(r->graphics_queue, &frame->allocator) != NriResult_SUCCESS ||
-            r->core.CreateCommandBuffer(frame->allocator, &frame->command_buffer) != NriResult_SUCCESS)
+        if (!create_descriptor_pool_object(r, &frame->gpu->descriptor_pool) || !create_uniform_ring(r, frame) ||
+            r->gpu->core.CreateCommandAllocator(r->gpu->graphics_queue, &frame->allocator) != NriResult_SUCCESS ||
+            r->gpu->core.CreateCommandBuffer(frame->allocator, &frame->command_buffer) != NriResult_SUCCESS)
             return false;
     }
 
@@ -945,47 +946,47 @@ static bool create_frame_contexts(RENDERER *r) {
 }
 
 static void destroy_frame_contexts(RENDERER *r) {
-    if (r->frame_contexts) {
+    if (r->gpu->frame_contexts) {
         for (uint32_t i = 0; i < FRAME_QUEUE_DEPTH; ++i) {
-            FRAME_CONTEXT *frame = &r->frame_contexts[i];
+            FRAME_CONTEXT *frame = &r->gpu->frame_contexts[i];
             clear_frame_temporary(r, frame);
 
-            if (frame->command_buffer) r->core.DestroyCommandBuffer(frame->command_buffer);
+            if (frame->command_buffer) r->gpu->core.DestroyCommandBuffer(frame->command_buffer);
 
-            if (frame->allocator) r->core.DestroyCommandAllocator(frame->allocator);
+            if (frame->allocator) r->gpu->core.DestroyCommandAllocator(frame->allocator);
 
-            if (frame->descriptor_pool) r->core.DestroyDescriptorPool(frame->descriptor_pool);
+            if (frame->gpu->descriptor_pool) r->gpu->core.DestroyDescriptorPool(frame->gpu->descriptor_pool);
 
-            if (frame->uniform_buffer) r->core.DestroyBuffer(frame->uniform_buffer);
-            free(frame->temporary_descriptors);
-            free(frame->temporary_buffers);
+            if (frame->uniform_buffer) r->gpu->core.DestroyBuffer(frame->uniform_buffer);
+            free(frame->gpu->temporary_descriptors);
+            free(frame->gpu->temporary_buffers);
         }
 
-        free(r->frame_contexts);
+        free(r->gpu->frame_contexts);
     }
 
-    r->frame_contexts = NULL;
-    r->active_frame = NULL;
+    r->gpu->frame_contexts = NULL;
+    r->gpu->active_frame = NULL;
 
-    if (r->frame_fence) r->core.DestroyFence(r->frame_fence);
-    r->frame_fence = NULL;
+    if (r->gpu->frame_fence) r->gpu->core.DestroyFence(r->gpu->frame_fence);
+    r->gpu->frame_fence = NULL;
 }
 
 static bool begin_frame_commands(RENDERER *r, FRAME_CONTEXT **out_frame, NriCommandBuffer **out_command_buffer) {
-    if (!r || !r->frame_contexts || !r->frame_fence || !out_frame || !out_command_buffer) return false;
+    if (!r || !r->gpu->frame_contexts || !r->gpu->frame_fence || !out_frame || !out_command_buffer) return false;
 
-    const uint64_t wait_value = r->frame_index >= FRAME_QUEUE_DEPTH ? 1u + r->frame_index - FRAME_QUEUE_DEPTH : 0u;
+    const uint64_t wait_value = r->gpu->frame_index >= FRAME_QUEUE_DEPTH ? 1u + r->gpu->frame_index - FRAME_QUEUE_DEPTH : 0u;
 
-    r->core.Wait(r->frame_fence, wait_value);
+    r->gpu->core.Wait(r->gpu->frame_fence, wait_value);
 
-    FRAME_CONTEXT *frame = &r->frame_contexts[r->frame_index % FRAME_QUEUE_DEPTH];
+    FRAME_CONTEXT *frame = &r->gpu->frame_contexts[r->gpu->frame_index % FRAME_QUEUE_DEPTH];
     clear_frame_temporary(r, frame);
-    r->core.ResetCommandAllocator(frame->allocator);
+    r->gpu->core.ResetCommandAllocator(frame->allocator);
     r->current_graphics_layout = r->current_compute_layout = NULL;
-    r->active_frame = frame;
+    r->gpu->active_frame = frame;
 
-    if (r->core.BeginCommandBuffer(frame->command_buffer, frame->descriptor_pool) != NriResult_SUCCESS) {
-        r->active_frame = NULL;
+    if (r->gpu->core.BeginCommandBuffer(frame->command_buffer, frame->gpu->descriptor_pool) != NriResult_SUCCESS) {
+        r->gpu->active_frame = NULL;
 
         return false;
     }
@@ -998,15 +999,15 @@ static bool begin_frame_commands(RENDERER *r, FRAME_CONTEXT **out_frame, NriComm
 static void abort_frame_commands(RENDERER *r, FRAME_CONTEXT *frame) {
     if (!r || !frame) return;
 
-    if (frame->command_buffer) r->core.DestroyCommandBuffer(frame->command_buffer);
+    if (frame->command_buffer) r->gpu->core.DestroyCommandBuffer(frame->command_buffer);
 
-    if (frame->allocator) r->core.DestroyCommandAllocator(frame->allocator);
+    if (frame->allocator) r->gpu->core.DestroyCommandAllocator(frame->allocator);
     frame->command_buffer = NULL;
     frame->allocator = NULL;
-    r->active_frame = NULL;
+    r->gpu->active_frame = NULL;
     clear_frame_temporary(r, frame);
 
-    if (r->core.CreateCommandAllocator(r->graphics_queue, &frame->allocator) == NriResult_SUCCESS) r->core.CreateCommandBuffer(frame->allocator, &frame->command_buffer);
+    if (r->gpu->core.CreateCommandAllocator(r->gpu->graphics_queue, &frame->allocator) == NriResult_SUCCESS) r->gpu->core.CreateCommandBuffer(frame->allocator, &frame->command_buffer);
 }
 
 static NriDescriptor *create_texture_view(RENDERER *r, NriTexture *texture, NriTextureView type) {
@@ -1017,13 +1018,13 @@ static NriDescriptor *create_texture_view(RENDERER *r, NriTexture *texture, NriT
     const NriTextureViewDesc desc = {
         .texture = texture,
         .type = type,
-        .format = r->core.GetTextureDesc(texture)->format,
+        .format = r->gpu->core.GetTextureDesc(texture)->format,
         .mipNum = 1,
         .layerNum = 1,
         .sliceNum = 1
     };
 
-    if (r->core.CreateTextureView(&desc, &view) != NriResult_SUCCESS) return NULL;
+    if (r->gpu->core.CreateTextureView(&desc, &view) != NriResult_SUCCESS) return NULL;
 
     return track_descriptor(r, view) ? view : NULL;
 }
@@ -1037,11 +1038,11 @@ static NriDescriptor *create_buffer_view(RENDERER *r, NriBuffer *buffer, NriBuff
         .buffer = buffer,
         .type = type,
         .offset = 0,
-        .size = r->core.GetBufferDesc(buffer)->size,
+        .size = r->gpu->core.GetBufferDesc(buffer)->size,
         .structureStride = stride
     };
 
-    if (r->core.CreateBufferView(&desc, &view) != NriResult_SUCCESS) return NULL;
+    if (r->gpu->core.CreateBufferView(&desc, &view) != NriResult_SUCCESS) return NULL;
 
     return track_descriptor(r, view) ? view : NULL;
 }
@@ -1049,8 +1050,8 @@ static NriDescriptor *create_buffer_view(RENDERER *r, NriBuffer *buffer, NriBuff
 static NriDescriptor *uniform_view(RENDERER *r, const void *data, size_t size) {
     if (!r || !data || !size) return NULL;
 
-    FRAME_CONTEXT *context = r->active_frame;
-    const NriDeviceDesc *device = r->core.GetDeviceDesc(r->device);
+    FRAME_CONTEXT *context = r->gpu->active_frame;
+    const NriDeviceDesc *device = r->gpu->core.GetDeviceDesc(r->gpu->device);
     uint64_t alignment = device ? device->memoryAlignment.constantBufferOffset : 256u;
 
     if (alignment < 16u) alignment = 16u;
@@ -1061,17 +1062,17 @@ static NriDescriptor *uniform_view(RENDERER *r, const void *data, size_t size) {
         const uint64_t offset = (context->uniform_offset + alignment - 1u) / alignment * alignment;
 
         if (offset + view_size <= UNIFORM_RING_BYTES) {
-            void *mapped = r->core.MapBuffer(context->uniform_buffer, offset, view_size);
+            void *mapped = r->gpu->core.MapBuffer(context->uniform_buffer, offset, view_size);
 
             if (mapped) {
                 memset(mapped, 0, view_size);
                 memcpy(mapped, data, size);
-                r->core.UnmapBuffer(context->uniform_buffer);
+                r->gpu->core.UnmapBuffer(context->uniform_buffer);
 
                 NriDescriptor *view = NULL;
                 const NriBufferViewDesc desc = {.buffer = context->uniform_buffer, .type = NriBufferView_CONSTANT_BUFFER, .offset = offset, .size = view_size};
 
-                if (r->core.CreateBufferView(&desc, &view) == NriResult_SUCCESS && track_descriptor(r, view)) {
+                if (r->gpu->core.CreateBufferView(&desc, &view) == NriResult_SUCCESS && track_descriptor(r, view)) {
                     context->uniform_offset = offset + view_size;
 
                     return view;
@@ -1083,16 +1084,16 @@ static NriDescriptor *uniform_view(RENDERER *r, const void *data, size_t size) {
     const NriBufferDesc desc = {.size = view_size, .usage = NriBufferUsageBits_CONSTANT};
     NriBuffer *buffer = NULL;
 
-    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_UPLOAD, 0.0f, &desc, &buffer) != NriResult_SUCCESS) return NULL;
+    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_HOST_UPLOAD, 0.0f, &desc, &buffer) != NriResult_SUCCESS) return NULL;
 
     if (!track_buffer(r, buffer)) return NULL;
 
-    void *mapped = r->core.MapBuffer(buffer, 0, desc.size);
+    void *mapped = r->gpu->core.MapBuffer(buffer, 0, desc.size);
 
     if (!mapped) return NULL;
     memset(mapped, 0, desc.size);
     memcpy(mapped, data, size);
-    r->core.UnmapBuffer(buffer);
+    r->gpu->core.UnmapBuffer(buffer);
 
     return create_buffer_view(r, buffer, NriBufferView_CONSTANT_BUFFER, 0);
 }
@@ -1100,9 +1101,9 @@ static NriDescriptor *uniform_view(RENDERER *r, const void *data, size_t size) {
 static bool
 bind_descriptor_set(RENDERER *r, NriCommandBuffer *cmd, NriPipelineLayout *layout, NriBindPoint point, uint32_t set_index, NriDescriptor *const *descriptors, uint32_t count) {
     NriDescriptorSet *set = NULL;
-    NriDescriptorPool *pool = r->active_frame ? r->active_frame->descriptor_pool : r->descriptor_pool;
+    NriDescriptorPool *pool = r->gpu->active_frame ? r->gpu->active_frame->descriptor_pool : r->gpu->descriptor_pool;
 
-    if (r->core.AllocateDescriptorSets(pool, layout, set_index, &set, 1, 0) != NriResult_SUCCESS) return false;
+    if (r->gpu->core.AllocateDescriptorSets(pool, layout, set_index, &set, 1, 0) != NriResult_SUCCESS) return false;
 
     for (uint32_t i = 0; i < count; ++i) {
         if (!descriptors[i]) return false;
@@ -1116,17 +1117,17 @@ bind_descriptor_set(RENDERER *r, NriCommandBuffer *cmd, NriPipelineLayout *layou
             .descriptorNum = 1
         };
 
-        r->core.UpdateDescriptorRanges(&update, 1);
+        r->gpu->core.UpdateDescriptorRanges(&update, 1);
     }
 
     NriPipelineLayout **current = point == NriBindPoint_GRAPHICS ? &r->current_graphics_layout : &r->current_compute_layout;
 
     if (*current != layout) {
-        r->core.CmdSetPipelineLayout(cmd, point, layout);
+        r->gpu->core.CmdSetPipelineLayout(cmd, point, layout);
         *current = layout;
     }
 
-    r->core.CmdSetDescriptorSet(cmd, &(NriSetDescriptorSetDesc){
+    r->gpu->core.CmdSetDescriptorSet(cmd, &(NriSetDescriptorSetDesc){
         .setIndex = set_index,
         .descriptorSet = set,
         .bindPoint = point
@@ -1189,9 +1190,9 @@ static bool bind_bake_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *
 static bool bind_probe_resources(RENDERER *r, NriCommandBuffer *cmd, NriBuffer *input, NriBuffer *nodes, NriBuffer *triangles, NriBuffer *output, const BAKE_UNIFORMS *uniforms,
                                  size_t size) {
     const NriBufferBarrierDesc barrier = {.buffer = output, .after = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER}};
-    r->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
 
-    r->core.CmdBarrier(cmd, &(NriBarrierDesc){
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){
         .buffers = &barrier,
         .bufferNum = 1
     });
@@ -1215,7 +1216,7 @@ static bool read_buffer(RENDERER *r, NriBuffer *output, PROBE_GRID *grid, uint32
 
     NriBuffer *staging = NULL;
 
-    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_READBACK, 1.0f, &desc, &staging) != NriResult_SUCCESS) return false;
+    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_HOST_READBACK, 1.0f, &desc, &staging) != NriResult_SUCCESS) return false;
 
     NriCommandAllocator *allocator = NULL;
     NriCommandBuffer *cmd = NULL;
@@ -1234,17 +1235,17 @@ static bool read_buffer(RENDERER *r, NriBuffer *output, PROBE_GRID *grid, uint32
             }
         };
 
-        r->core.CmdBarrier(cmd, &(NriBarrierDesc){
+        r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){
             .buffers = &barrier,
             .bufferNum = 1
         });
-        r->core.CmdCopyBuffer(cmd, staging, 0, output, 0, bytes);
+        r->gpu->core.CmdCopyBuffer(cmd, staging, 0, output, 0, bytes);
 
         good = submit_commands(r, allocator, cmd);
     }
 
     if (good) {
-        const float (*values)[4] = r->core.MapBuffer(staging, 0, bytes);
+        const float (*values)[4] = r->gpu->core.MapBuffer(staging, 0, bytes);
 
         good = values != NULL;
 
@@ -1255,11 +1256,11 @@ static bool read_buffer(RENDERER *r, NriBuffer *output, PROBE_GRID *grid, uint32
                 grid->probes[i].position[3] = values[i * 9u][3];
             }
 
-            r->core.UnmapBuffer(staging);
+            r->gpu->core.UnmapBuffer(staging);
         }
     }
 
-    r->core.DestroyBuffer(staging);
+    r->gpu->core.DestroyBuffer(staging);
 
     return good;
 }
@@ -1396,17 +1397,17 @@ static void free_shader(NriShaderDesc *shader) {
 
 static TEXTURE_STATE *find_texture_state(RENDERER *r, NriTexture *texture);
 static bool create_swapchain(RENDERER *r, uint32_t width, uint32_t height) {
-    if (!r->window || !width || !height) return false;
+    if (!r->gpu->window || !width || !height) return false;
 
     NriWindow window = {0};
-    const SDL_PropertiesID props = SDL_GetWindowProperties(r->window);
+    const SDL_PropertiesID props = SDL_GetWindowProperties(r->gpu->window);
 #if defined(__APPLE__)
     (void)props;
 
-    if (!r->metal_view) r->metal_view = SDL_Metal_CreateView(r->window);
+    if (!r->gpu->metal_view) r->gpu->metal_view = SDL_Metal_CreateView(r->gpu->window);
 
-    if (!r->metal_view) return false;
-    window.metal.caMetalLayer = SDL_Metal_GetLayer(r->metal_view);
+    if (!r->gpu->metal_view) return false;
+    window.metal.caMetalLayer = SDL_Metal_GetLayer(r->gpu->metal_view);
 #elif defined(_WIN32)
     window.windows.hwnd = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
 #else
@@ -1423,7 +1424,7 @@ static bool create_swapchain(RENDERER *r, uint32_t width, uint32_t height) {
 #endif
     const NriSwapChainDesc desc = {
         .window = window,
-        .queue = r->graphics_queue,
+        .queue = r->gpu->graphics_queue,
         .width = (NriDim_t)width,
         .height = (NriDim_t)height,
         .textureNum = FRAME_QUEUE_DEPTH + 1u,
@@ -1432,24 +1433,24 @@ static bool create_swapchain(RENDERER *r, uint32_t width, uint32_t height) {
         .queuedFrameNum = FRAME_QUEUE_DEPTH
     };
 
-    if (r->swapchain_api.CreateSwapChain(r->device, &desc, &r->swapchain) != NriResult_SUCCESS) return false;
+    if (r->gpu->swapchain_api.CreateSwapChain(r->gpu->device, &desc, &r->gpu->swapchain) != NriResult_SUCCESS) return false;
 
     uint32_t count = 0;
 
-    NriTexture *const *textures = r->swapchain_api.GetSwapChainTextures(r->swapchain, &count);
+    NriTexture *const *textures = r->gpu->swapchain_api.GetSwapChainTextures(r->gpu->swapchain, &count);
 
     if (!textures || !count) return false;
-    r->swapchain_textures = calloc(count, sizeof(*r->swapchain_textures));
-    r->swapchain_frames = calloc(count, sizeof(*r->swapchain_frames));
+    r->gpu->swapchain_textures = calloc(count, sizeof(*r->gpu->swapchain_textures));
+    r->gpu->swapchain_frames = calloc(count, sizeof(*r->gpu->swapchain_frames));
 
-    if (!r->swapchain_textures || !r->swapchain_frames) return false;
-    r->swapchain_texture_count = count;
-    r->swapchain_format = r->core.GetTextureDesc(textures[0])->format;
-    r->swapchain_width = width;
-    r->swapchain_height = height;
+    if (!r->gpu->swapchain_textures || !r->gpu->swapchain_frames) return false;
+    r->gpu->swapchain_texture_count = count;
+    r->gpu->swapchain_format = r->gpu->core.GetTextureDesc(textures[0])->format;
+    r->gpu->swapchain_width = width;
+    r->gpu->swapchain_height = height;
 
     for (uint32_t i = 0; i < count; ++i) {
-        r->swapchain_textures[i] = textures[i];
+        r->gpu->swapchain_textures[i] = textures[i];
 
         TEXTURE_STATE *state = find_texture_state(r, textures[i]);
 
@@ -1459,21 +1460,21 @@ static bool create_swapchain(RENDERER *r, uint32_t width, uint32_t height) {
             .stages = NriStageBits_NONE
         };
 
-        SWAPCHAIN_TEXTURE *frame = &r->swapchain_frames[i];
+        SWAPCHAIN_TEXTURE *frame = &r->gpu->swapchain_frames[i];
         frame->texture = textures[i];
 
         const NriTextureViewDesc view = {
             .texture = textures[i],
             .type = NriTextureView_COLOR_ATTACHMENT,
-            .format = r->swapchain_format,
+            .format = r->gpu->swapchain_format,
             .mipNum = 1,
             .layerNum = 1,
             .sliceNum = 1
         };
 
-        if (r->core.CreateTextureView(&view, &frame->color_attachment) != NriResult_SUCCESS ||
-            r->core.CreateFence(r->device, NRI_SWAPCHAIN_SEMAPHORE, &frame->acquire) != NriResult_SUCCESS ||
-            r->core.CreateFence(r->device, NRI_SWAPCHAIN_SEMAPHORE, &frame->release) != NriResult_SUCCESS)
+        if (r->gpu->core.CreateTextureView(&view, &frame->color_attachment) != NriResult_SUCCESS ||
+            r->gpu->core.CreateFence(r->gpu->device, NRI_SWAPCHAIN_SEMAPHORE, &frame->acquire) != NriResult_SUCCESS ||
+            r->gpu->core.CreateFence(r->gpu->device, NRI_SWAPCHAIN_SEMAPHORE, &frame->release) != NriResult_SUCCESS)
             return false;
     }
 
@@ -1481,55 +1482,55 @@ static bool create_swapchain(RENDERER *r, uint32_t width, uint32_t height) {
 }
 
 static void destroy_swapchain(RENDERER *r) {
-    for (uint32_t i = 0; i < r->swapchain_texture_count; ++i) {
-        for (uint32_t j = 0; j < r->texture_state_num; ++j)
-            if (r->texture_states[j].texture == r->swapchain_textures[i]) {
-                r->texture_states[j] = r->texture_states[--r->texture_state_num];
+    for (uint32_t i = 0; i < r->gpu->swapchain_texture_count; ++i) {
+        for (uint32_t j = 0; j < r->gpu->texture_state_num; ++j)
+            if (r->gpu->texture_states[j].texture == r->gpu->swapchain_textures[i]) {
+                r->gpu->texture_states[j] = r->gpu->texture_states[--r->gpu->texture_state_num];
 
                 break;
             }
 
-        SWAPCHAIN_TEXTURE *frame = &r->swapchain_frames[i];
+        SWAPCHAIN_TEXTURE *frame = &r->gpu->swapchain_frames[i];
 
-        if (frame->color_attachment) r->core.DestroyDescriptor(frame->color_attachment);
+        if (frame->color_attachment) r->gpu->core.DestroyDescriptor(frame->color_attachment);
 
-        if (frame->acquire) r->core.DestroyFence(frame->acquire);
+        if (frame->acquire) r->gpu->core.DestroyFence(frame->acquire);
 
-        if (frame->release) r->core.DestroyFence(frame->release);
+        if (frame->release) r->gpu->core.DestroyFence(frame->release);
     }
 
-    free(r->swapchain_frames);
-    free(r->swapchain_textures);
-    r->swapchain_frames = NULL;
-    r->swapchain_textures = NULL;
-    r->swapchain_texture_count = 0;
+    free(r->gpu->swapchain_frames);
+    free(r->gpu->swapchain_textures);
+    r->gpu->swapchain_frames = NULL;
+    r->gpu->swapchain_textures = NULL;
+    r->gpu->swapchain_texture_count = 0;
 
-    if (r->swapchain) r->swapchain_api.DestroySwapChain(r->swapchain);
-    r->swapchain = NULL;
+    if (r->gpu->swapchain) r->gpu->swapchain_api.DestroySwapChain(r->gpu->swapchain);
+    r->gpu->swapchain = NULL;
 }
 
 static bool acquire_swapchain_texture(RENDERER *r, uint32_t *index) {
-    NriFence *acquire = r->swapchain_frames[r->frame_index % r->swapchain_texture_count].acquire;
+    NriFence *acquire = r->gpu->swapchain_frames[r->gpu->frame_index % r->gpu->swapchain_texture_count].acquire;
 
-    NriResult result = r->swapchain_api.AcquireNextTexture(r->swapchain, acquire, index);
+    NriResult result = r->gpu->swapchain_api.AcquireNextTexture(r->gpu->swapchain, acquire, index);
 
-    return result == NriResult_SUCCESS && *index < r->swapchain_texture_count;
+    return result == NriResult_SUCCESS && *index < r->gpu->swapchain_texture_count;
 }
 
 static TEXTURE_STATE *find_texture_state(RENDERER *r, NriTexture *texture) {
-    for (uint32_t i = 0; i < r->texture_state_num; ++i)
-        if (r->texture_states[i].texture == texture) return &r->texture_states[i];
+    for (uint32_t i = 0; i < r->gpu->texture_state_num; ++i)
+        if (r->gpu->texture_states[i].texture == texture) return &r->gpu->texture_states[i];
 
-    if (r->texture_state_num == r->texture_state_cap) {
-        uint32_t cap = r->texture_state_cap ? r->texture_state_cap * 2 : 32;
-        TEXTURE_STATE *items = realloc(r->texture_states, cap * sizeof(*items));
+    if (r->gpu->texture_state_num == r->gpu->texture_state_cap) {
+        uint32_t cap = r->gpu->texture_state_cap ? r->gpu->texture_state_cap * 2 : 32;
+        TEXTURE_STATE *items = realloc(r->gpu->texture_states, cap * sizeof(*items));
 
         if (!items) return NULL;
-        r->texture_states = items;
-        r->texture_state_cap = cap;
+        r->gpu->texture_states = items;
+        r->gpu->texture_state_cap = cap;
     }
 
-    TEXTURE_STATE *item = &r->texture_states[r->texture_state_num++];
+    TEXTURE_STATE *item = &r->gpu->texture_states[r->gpu->texture_state_num++];
     *item = (TEXTURE_STATE){
         .texture = texture
     };
@@ -1552,7 +1553,7 @@ static bool texture_barrier(RENDERER *r, NriCommandBuffer *cmd, NriTexture *text
         .layerNum = 1
     };
 
-    r->core.CmdBarrier(cmd, &(NriBarrierDesc){
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){
         .textures = &barrier,
         .textureNum = 1
     });
@@ -1615,16 +1616,16 @@ static bool begin_scene_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTexture
         }
     };
 
-    r->core.CmdSetViewports(cmd, &(NriViewport){
+    r->gpu->core.CmdSetViewports(cmd, &(NriViewport){
         .width = (float)width,
         .height = (float)height,
         .depthMax = 1.0f
     }, 1);
-    r->core.CmdSetScissors(cmd, &(NriRect){
+    r->gpu->core.CmdSetScissors(cmd, &(NriRect){
         .width = (NriDim_t)width,
         .height = (NriDim_t)height
     }, 1);
-    r->core.CmdBeginRendering(cmd, &desc);
+    r->gpu->core.CmdBeginRendering(cmd, &desc);
 
     return true;
 }
@@ -1678,7 +1679,7 @@ static bool begin_compose_rendering(
         return false;
 
     const NriAttachmentDesc color = {
-        .descriptor = r->swapchain_frames[r->current_swap_index].color_attachment,
+        .descriptor = r->gpu->swapchain_frames[r->gpu->current_swap_index].color_attachment,
         .loadOp = NriLoadOp_CLEAR,
         .storeOp = NriStoreOp_STORE
     };
@@ -1688,7 +1689,7 @@ static bool begin_compose_rendering(
         .colorNum = 1
     };
 
-    r->core.CmdBeginRendering(cmd, &desc);
+    r->gpu->core.CmdBeginRendering(cmd, &desc);
 
     return true;
 }
@@ -1697,7 +1698,7 @@ static bool submit_frame(RENDERER *r, FRAME_CONTEXT *frame, NriCommandBuffer *cm
     bool good = frame && texture_barrier(
                              r,
                              cmd,
-                             r->swapchain_textures[index],
+                             r->gpu->swapchain_textures[index],
                              (NriAccessLayoutStage){
                                  .access = NriAccessBits_COLOR_ATTACHMENT,
                                  .layout = NriLayout_COLOR_ATTACHMENT,
@@ -1708,25 +1709,25 @@ static bool submit_frame(RENDERER *r, FRAME_CONTEXT *frame, NriCommandBuffer *cm
                                  .stages = NriStageBits_NONE
                              }
                          );
-    if (good) good = r->core.EndCommandBuffer(cmd) == NriResult_SUCCESS;
+    if (good) good = r->gpu->core.EndCommandBuffer(cmd) == NriResult_SUCCESS;
 
-    const uint64_t frame_value = 1u + r->frame_index;
-    NriFenceSubmitDesc waits[2] = {{.fence = r->swapchain_frames[r->frame_index % r->swapchain_texture_count].acquire, .stages = NriStageBits_COLOR_ATTACHMENT}, {0}};
+    const uint64_t frame_value = 1u + r->gpu->frame_index;
+    NriFenceSubmitDesc waits[2] = {{.fence = r->gpu->swapchain_frames[r->gpu->frame_index % r->gpu->swapchain_texture_count].acquire, .stages = NriStageBits_COLOR_ATTACHMENT}, {0}};
     uint32_t wait_num = 1u;
 
-    if (r->upload && r->upload->fence && r->upload->next_fence_value > 1u) {
-        waits[wait_num++] = (NriFenceSubmitDesc){.fence = r->upload->fence, .value = r->upload->next_fence_value - 1u, .stages = NriStageBits_ALL};
+    if (r->gpu->upload && r->gpu->upload->fence && r->gpu->upload->next_fence_value > 1u) {
+        waits[wait_num++] = (NriFenceSubmitDesc){.fence = r->gpu->upload->fence, .value = r->gpu->upload->next_fence_value - 1u, .stages = NriStageBits_ALL};
     }
 
     const NriFenceSubmitDesc wait = {
-        .fence = r->swapchain_frames[r->frame_index % r->swapchain_texture_count].acquire,
+        .fence = r->gpu->swapchain_frames[r->gpu->frame_index % r->gpu->swapchain_texture_count].acquire,
         .stages = NriStageBits_COLOR_ATTACHMENT
     };
 
     const NriFenceSubmitDesc signals[2] = {{
-    .fence = r->swapchain_frames[index].release
+    .fence = r->gpu->swapchain_frames[index].release
 }, {
-    .fence = r->frame_fence,
+    .fence = r->gpu->frame_fence,
     .value = frame_value
 }};
 
@@ -1740,16 +1741,16 @@ static bool submit_frame(RENDERER *r, FRAME_CONTEXT *frame, NriCommandBuffer *cm
     bool submitted = false;
 
     if (good) {
-        submitted = r->core.QueueSubmit(r->graphics_queue, &submit) == NriResult_SUCCESS;
+        submitted = r->gpu->core.QueueSubmit(r->gpu->graphics_queue, &submit) == NriResult_SUCCESS;
 
         good = submitted;
     }
 
-    if (good) good = r->swapchain_api.QueuePresent(r->swapchain, r->swapchain_frames[index].release, frame_value) == NriResult_SUCCESS;
+    if (good) good = r->gpu->swapchain_api.QueuePresent(r->gpu->swapchain, r->gpu->swapchain_frames[index].release, frame_value) == NriResult_SUCCESS;
 
-    r->active_frame = NULL;
+    r->gpu->active_frame = NULL;
 
-    if (submitted) r->frame_index++;
+    if (submitted) r->gpu->frame_index++;
     else if (!good) abort_frame_commands(r, frame);
 
     return good;
@@ -1769,7 +1770,7 @@ static NriDescriptor *sampler(RENDERER *r, NriFilter min_filter, NriFilter mag_f
 
     NriDescriptor *result = NULL;
 
-    if (r->core.CreateSampler(r->device, &desc, &result) != NriResult_SUCCESS) return NULL;
+    if (r->gpu->core.CreateSampler(r->gpu->device, &desc, &result) != NriResult_SUCCESS) return NULL;
 
     return result;
 }
@@ -1856,11 +1857,11 @@ static NriPipeline *make_line_pipeline(RENDERER *r, NriPipelineLayout *layout, c
         },
         .shaders = shaders,
         .shaderNum = 2,
-        .cache = r->pipeline_cache};
+        .cache = r->gpu->pipeline_cache};
 
     NriPipeline *pipeline = NULL;
 
-    if (r->core.CreateGraphicsPipeline(r->device, &desc, &pipeline) != NriResult_SUCCESS) return NULL;
+    if (r->gpu->core.CreateGraphicsPipeline(r->gpu->device, &desc, &pipeline) != NriResult_SUCCESS) return NULL;
 
     return pipeline;
 }
@@ -1889,17 +1890,17 @@ static NriPipeline *make_sky_pipeline(RENDERER *r, NriPipelineLayout *layout, co
                                           .outputMerger = {.colors = targets, .colorNum = 2, .depthStencilFormat = r->depth_format},
                                           .shaders = shaders,
                                           .shaderNum = 2,
-                                          .cache = r->pipeline_cache};
+                                          .cache = r->gpu->pipeline_cache};
 
     NriPipeline *pipeline = NULL;
 
-    if (r->core.CreateGraphicsPipeline(r->device, &desc, &pipeline) != NriResult_SUCCESS) return NULL;
+    if (r->gpu->core.CreateGraphicsPipeline(r->gpu->device, &desc, &pipeline) != NriResult_SUCCESS) return NULL;
 
     return pipeline;
 }
 
 static NriTexture *create_texture(RENDERER *r, NriFormat format, NriTextureUsageBits usage, Uint32 width, Uint32 height) {
-    if (!r || !r->device || !width || !height) return NULL;
+    if (!r || !r->gpu->device || !width || !height) return NULL;
 
     const NriTextureDesc desc = {
         .type = NriTextureType_TEXTURE_2D,
@@ -1915,7 +1916,7 @@ static NriTexture *create_texture(RENDERER *r, NriFormat format, NriTextureUsage
 
     NriTexture *result = NULL;
 
-    if (r->core.CreateCommittedTexture(r->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &result) != NriResult_SUCCESS) return NULL;
+    if (r->gpu->core.CreateCommittedTexture(r->gpu->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &result) != NriResult_SUCCESS) return NULL;
 
     if (!find_texture_state(r, result)) {
         release_texture(r, result);
@@ -1933,37 +1934,37 @@ static uint64_t upload_align(uint64_t value, uint64_t alignment) {
 }
 
 static void destroy_upload_context(RENDERER *r) {
-    if (!r || !r->upload) return;
+    if (!r || !r->gpu->upload) return;
 
-    UPLOAD_CONTEXT *upload = r->upload;
+    UPLOAD_CONTEXT *upload = r->gpu->upload;
 
     for (uint32_t i = 0; i < UPLOAD_RING_SIZE; ++i) {
         UPLOAD_SLOT *slot = &upload->slots[i];
 
-        if (slot->command_buffer) r->core.DestroyCommandBuffer(slot->command_buffer);
+        if (slot->command_buffer) r->gpu->core.DestroyCommandBuffer(slot->command_buffer);
 
-        if (slot->allocator) r->core.DestroyCommandAllocator(slot->allocator);
+        if (slot->allocator) r->gpu->core.DestroyCommandAllocator(slot->allocator);
 
-        if (slot->staging) r->core.DestroyBuffer(slot->staging);
+        if (slot->staging) r->gpu->core.DestroyBuffer(slot->staging);
     }
 
-    if (upload->fence) r->core.DestroyFence(upload->fence);
+    if (upload->fence) r->gpu->core.DestroyFence(upload->fence);
 
     free(upload);
-    r->upload = NULL;
+    r->gpu->upload = NULL;
 }
 
 static bool create_upload_context(RENDERER *r) {
-    if (!r || !r->device || !r->graphics_queue) return false;
+    if (!r || !r->gpu->device || !r->gpu->graphics_queue) return false;
 
-    if (r->upload) return true;
+    if (r->gpu->upload) return true;
 
     UPLOAD_CONTEXT *upload = calloc(1, sizeof(*upload));
 
     if (!upload) return false;
-    r->upload = upload;
+    r->gpu->upload = upload;
 
-    if (r->core.CreateFence(r->device, 0u, &upload->fence) != NriResult_SUCCESS) goto fail;
+    if (r->gpu->core.CreateFence(r->gpu->device, 0u, &upload->fence) != NriResult_SUCCESS) goto fail;
 
     const NriBufferDesc staging_desc = {
         .size = UPLOAD_CHUNK_BYTES,
@@ -1973,9 +1974,9 @@ static bool create_upload_context(RENDERER *r) {
     for (uint32_t i = 0; i < UPLOAD_RING_SIZE; ++i) {
         UPLOAD_SLOT *slot = &upload->slots[i];
 
-        if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_UPLOAD, 0.0f, &staging_desc, &slot->staging) != NriResult_SUCCESS ||
-            r->core.CreateCommandAllocator(r->graphics_queue, &slot->allocator) != NriResult_SUCCESS ||
-            r->core.CreateCommandBuffer(slot->allocator, &slot->command_buffer) != NriResult_SUCCESS)
+        if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_HOST_UPLOAD, 0.0f, &staging_desc, &slot->staging) != NriResult_SUCCESS ||
+            r->gpu->core.CreateCommandAllocator(r->gpu->graphics_queue, &slot->allocator) != NriResult_SUCCESS ||
+            r->gpu->core.CreateCommandBuffer(slot->allocator, &slot->command_buffer) != NriResult_SUCCESS)
             goto fail;
     }
 
@@ -1990,12 +1991,12 @@ fail:
 }
 
 static bool upload_wait_slot(RENDERER *r, UPLOAD_SLOT *slot) {
-    if (!r || !r->upload || !slot || !slot->fence_value) return true;
+    if (!r || !r->gpu->upload || !slot || !slot->fence_value) return true;
 
     const Uint64 started = SDL_GetTicks();
     bool logged = false;
 
-    while (r->core.GetFenceValue(r->upload->fence) < slot->fence_value) {
+    while (r->gpu->core.GetFenceValue(r->gpu->upload->fence) < slot->fence_value) {
         if (!logged && SDL_GetTicks() - started >= UPLOAD_SLOW_LOG_MS) {
             SDL_Log(
                 "GPU upload chunk is still pending after %u ms; continuing "
@@ -2016,28 +2017,28 @@ static bool upload_wait_slot(RENDERER *r, UPLOAD_SLOT *slot) {
 static bool upload_begin_slot(RENDERER *r, UPLOAD_SLOT **out) {
     if (!out || !create_upload_context(r)) return false;
 
-    UPLOAD_CONTEXT *upload = r->upload;
+    UPLOAD_CONTEXT *upload = r->gpu->upload;
     UPLOAD_SLOT *slot = &upload->slots[upload->next_slot];
     upload->next_slot = (upload->next_slot + 1u) % UPLOAD_RING_SIZE;
 
     if (!upload_wait_slot(r, slot)) return false;
-    r->core.ResetCommandAllocator(slot->allocator);
+    r->gpu->core.ResetCommandAllocator(slot->allocator);
 
-    if (r->core.BeginCommandBuffer(slot->command_buffer, NULL) != NriResult_SUCCESS) return false;
+    if (r->gpu->core.BeginCommandBuffer(slot->command_buffer, NULL) != NriResult_SUCCESS) return false;
 
     *out = slot;
     return true;
 }
 
 static bool upload_submit_slot(RENDERER *r, UPLOAD_SLOT *slot) {
-    if (!r || !r->upload || !slot) return false;
+    if (!r || !r->gpu->upload || !slot) return false;
 
-    if (r->core.EndCommandBuffer(slot->command_buffer) != NriResult_SUCCESS) return false;
+    if (r->gpu->core.EndCommandBuffer(slot->command_buffer) != NriResult_SUCCESS) return false;
 
-    const uint64_t value = r->upload->next_fence_value++;
+    const uint64_t value = r->gpu->upload->next_fence_value++;
 
     const NriFenceSubmitDesc signal = {
-        .fence = r->upload->fence,
+        .fence = r->gpu->upload->fence,
         .value = value
     };
 
@@ -2050,7 +2051,7 @@ static bool upload_submit_slot(RENDERER *r, UPLOAD_SLOT *slot) {
         .signalFenceNum = 1u
     };
 
-    if (r->core.QueueSubmit(r->graphics_queue, &submit) != NriResult_SUCCESS) return false;
+    if (r->gpu->core.QueueSubmit(r->gpu->graphics_queue, &submit) != NriResult_SUCCESS) return false;
 
     slot->fence_value = value;
 
@@ -2058,10 +2059,10 @@ static bool upload_submit_slot(RENDERER *r, UPLOAD_SLOT *slot) {
 }
 
 static bool upload_drain(RENDERER *r) {
-    if (!r || !r->upload) return true;
+    if (!r || !r->gpu->upload) return true;
 
     for (uint32_t i = 0; i < UPLOAD_RING_SIZE; ++i)
-        if (!upload_wait_slot(r, &r->upload->slots[i])) return false;
+        if (!upload_wait_slot(r, &r->gpu->upload->slots[i])) return false;
 
     return true;
 }
@@ -2083,7 +2084,7 @@ static NriAccessStage uploaded_buffer_state(NriBufferUsageBits usage) {
 }
 
 static NriBuffer *upload_buffer(RENDERER *r, NriBufferUsageBits usage, const void *data, size_t bytes, uint32_t stride) {
-    if (!r || !r->device || !r->graphics_queue || !data || !bytes) return NULL;
+    if (!r || !r->gpu->device || !r->gpu->graphics_queue || !data || !bytes) return NULL;
 
     const NriBufferDesc desc = {
         .size = bytes,
@@ -2093,7 +2094,7 @@ static NriBuffer *upload_buffer(RENDERER *r, NriBufferUsageBits usage, const voi
 
     NriBuffer *buffer = NULL;
 
-    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &buffer) != NriResult_SUCCESS) return NULL;
+    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &buffer) != NriResult_SUCCESS) return NULL;
 
     const NriAccessStage copy_state = {
         .access = NriAccessBits_COPY_DESTINATION,
@@ -2112,16 +2113,16 @@ static NriBuffer *upload_buffer(RENDERER *r, NriBufferUsageBits usage, const voi
 
         if (!upload_begin_slot(r, &slot)) goto fail;
 
-        void *mapped = r->core.MapBuffer(slot->staging, 0u, chunk);
+        void *mapped = r->gpu->core.MapBuffer(slot->staging, 0u, chunk);
 
         if (!mapped) {
-            (void)r->core.EndCommandBuffer(slot->command_buffer);
+            (void)r->gpu->core.EndCommandBuffer(slot->command_buffer);
 
             goto fail;
         }
 
         memcpy(mapped, source + offset, chunk);
-        r->core.UnmapBuffer(slot->staging);
+        r->gpu->core.UnmapBuffer(slot->staging);
 
         if (!offset) {
             const NriBufferBarrierDesc barrier = {
@@ -2130,13 +2131,13 @@ static NriBuffer *upload_buffer(RENDERER *r, NriBufferUsageBits usage, const voi
                 .after = copy_state
             };
 
-            r->core.CmdBarrier(slot->command_buffer, &(NriBarrierDesc){
+            r->gpu->core.CmdBarrier(slot->command_buffer, &(NriBarrierDesc){
                 .buffers = &barrier,
                 .bufferNum = 1u
             });
         }
 
-        r->core.CmdCopyBuffer(slot->command_buffer, buffer, offset, slot->staging, 0u, chunk);
+        r->gpu->core.CmdCopyBuffer(slot->command_buffer, buffer, offset, slot->staging, 0u, chunk);
 
         if (offset + chunk == bytes) {
             const NriBufferBarrierDesc barrier = {
@@ -2145,7 +2146,7 @@ static NriBuffer *upload_buffer(RENDERER *r, NriBufferUsageBits usage, const voi
                 .after = final_state
             };
 
-            r->core.CmdBarrier(slot->command_buffer, &(NriBarrierDesc){
+            r->gpu->core.CmdBarrier(slot->command_buffer, &(NriBarrierDesc){
                 .buffers = &barrier,
                 .bufferNum = 1u
             });
@@ -2159,7 +2160,7 @@ static NriBuffer *upload_buffer(RENDERER *r, NriBufferUsageBits usage, const voi
 
 fail:
     (void)upload_drain(r);
-    r->core.DestroyBuffer(buffer);
+    r->gpu->core.DestroyBuffer(buffer);
 
     return NULL;
 }
@@ -2168,8 +2169,8 @@ static bool
 upload_texture_data(RENDERER *r, NriTexture *texture, const void *data, uint32_t row_pitch, uint32_t slice_pitch, NriAccessBits access, NriLayout layout, NriStageBits stages) {
     if (!r || !texture || !data || !row_pitch || !slice_pitch || slice_pitch % row_pitch) return false;
 
-    const NriTextureDesc *desc = r->core.GetTextureDesc(texture);
-    const NriDeviceDesc *device = r->core.GetDeviceDesc(r->device);
+    const NriTextureDesc *desc = r->gpu->core.GetTextureDesc(texture);
+    const NriDeviceDesc *device = r->gpu->core.GetDeviceDesc(r->gpu->device);
     const uint32_t row_alignment = device->memoryAlignment.uploadBufferTextureRow;
     const uint32_t slice_alignment = device->memoryAlignment.uploadBufferTextureSlice;
 
@@ -2216,17 +2217,17 @@ upload_texture_data(RENDERER *r, NriTexture *texture, const void *data, uint32_t
 
         if (!upload_begin_slot(r, &slot)) goto fail;
 
-        Uint8 *mapped = r->core.MapBuffer(slot->staging, 0u, staging_bytes);
+        Uint8 *mapped = r->gpu->core.MapBuffer(slot->staging, 0u, staging_bytes);
 
         if (!mapped) {
-            (void)r->core.EndCommandBuffer(slot->command_buffer);
+            (void)r->gpu->core.EndCommandBuffer(slot->command_buffer);
 
             goto fail;
         }
 
         for (uint32_t row = 0; row < rows; ++row)
             memcpy(mapped + (size_t)row * aligned_row, source + (size_t)(first_row + row) * row_pitch, row_pitch);
-        r->core.UnmapBuffer(slot->staging);
+        r->gpu->core.UnmapBuffer(slot->staging);
 
         if (!first_row && !texture_barrier(r, slot->command_buffer, texture, (NriAccessLayoutStage){0}, copy_state)) goto fail;
 
@@ -2247,7 +2248,7 @@ upload_texture_data(RENDERER *r, NriTexture *texture, const void *data, uint32_t
             .layerOffset = 0u
         };
 
-        r->core.CmdUploadBufferToTexture(slot->command_buffer, texture, &region, slot->staging, &source_layout);
+        r->gpu->core.CmdUploadBufferToTexture(slot->command_buffer, texture, &region, slot->staging, &source_layout);
 
         if (first_row + rows == row_count && !texture_barrier(r, slot->command_buffer, texture, copy_state, final_state)) goto fail;
 
@@ -2282,19 +2283,19 @@ static NriTexture *pixel_texture(RENDERER *r, Uint8 red, Uint8 green, Uint8 blue
 void release_texture(RENDERER *r, NriTexture *value) {
     if (!r || !value) return;
 
-    for (uint32_t i = 0; i < r->texture_state_num; ++i) {
-        if (r->texture_states[i].texture == value) {
-            r->texture_states[i] = r->texture_states[--r->texture_state_num];
+    for (uint32_t i = 0; i < r->gpu->texture_state_num; ++i) {
+        if (r->gpu->texture_states[i].texture == value) {
+            r->gpu->texture_states[i] = r->gpu->texture_states[--r->gpu->texture_state_num];
 
             break;
         }
     }
 
-    r->core.DestroyTexture(value);
+    r->gpu->core.DestroyTexture(value);
 }
 
 void release_buffer(RENDERER *r, NriBuffer *value) {
-    if (r && value) r->core.DestroyBuffer(value);
+    if (r && value) r->gpu->core.DestroyBuffer(value);
 }
 
 static bool ensure_depth_texture(RENDERER *r, Uint32 width, Uint32 height) {
@@ -2399,7 +2400,7 @@ static NriTexture *resolve_texture(RENDERER *r, const GLTF_SCENE *visual, int32_
 }
 
 static void release_scene_resources(RENDERER *r) {
-    if (!r || !r->device) return;
+    if (!r || !r->gpu->device) return;
 
     if (r->image_textures) {
         for (uint32_t i = 0; i < r->image_texture_count; ++i)
@@ -2417,11 +2418,11 @@ static void release_scene_resources(RENDERER *r) {
     release_texture(r, r->default_white);
     release_texture(r, r->default_normal);
 
-    if (r->material_sampler) r->core.DestroyDescriptor(r->material_sampler);
+    if (r->material_sampler) r->gpu->core.DestroyDescriptor(r->material_sampler);
     release_buffer(r, r->vertex_buffer);
     release_texture(r, r->lightmap_texture);
 
-    if (r->lightmap_sampler) r->core.DestroyDescriptor(r->lightmap_sampler);
+    if (r->lightmap_sampler) r->gpu->core.DestroyDescriptor(r->lightmap_sampler);
 
     r->default_white = NULL;
     r->default_normal = NULL;
@@ -2432,7 +2433,7 @@ static void release_scene_resources(RENDERER *r) {
 }
 
 bool upload_scene(RENDERER *r, const GLTF_SCENE *visual) {
-    if (!r || !r->device || !visual || !r->vertices || !r->vertex_count) return false;
+    if (!r || !r->gpu->device || !visual || !r->vertices || !r->vertex_count) return false;
 
     release_scene_resources(r);
 
@@ -2488,7 +2489,7 @@ static bool transfer_size(uint32_t width, uint32_t height, Uint32 *out) {
 }
 
 NriTexture *upload_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached) {
-    if (!r || !r->device || !cached || !cached->pixels) return NULL;
+    if (!r || !r->gpu->device || !cached || !cached->pixels) return NULL;
 
     Uint32 bytes = 0;
 
@@ -2508,7 +2509,7 @@ NriTexture *upload_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached) {
 }
 
 static bool read_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width, Uint32 height, Uint8 **pixels) {
-    if (!r || !r->device || !texture || !width || !height || !pixels) return false;
+    if (!r || !r->gpu->device || !texture || !width || !height || !pixels) return false;
     *pixels = NULL;
 
     Uint32 tight_bytes = 0;
@@ -2516,7 +2517,7 @@ static bool read_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width,
     if (!transfer_size(width, height, &tight_bytes)) return false;
 
     const uint32_t row_bytes = width * 8u;
-    const NriDeviceDesc *device = r->core.GetDeviceDesc(r->device);
+    const NriDeviceDesc *device = r->gpu->core.GetDeviceDesc(r->gpu->device);
     const uint32_t row_alignment = device->memoryAlignment.uploadBufferTextureRow;
     const uint32_t slice_alignment = device->memoryAlignment.uploadBufferTextureSlice;
 
@@ -2535,7 +2536,7 @@ static bool read_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width,
 
     NriBuffer *readback = NULL;
 
-    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_READBACK, 1.0f, &desc, &readback) != NriResult_SUCCESS) return false;
+    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_HOST_READBACK, 1.0f, &desc, &readback) != NriResult_SUCCESS) return false;
 
     NriCommandAllocator *allocator = NULL;
     NriCommandBuffer *cmd = NULL;
@@ -2559,7 +2560,7 @@ static bool read_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width,
         good = transition_texture(r, cmd, texture, NriAccessBits_COPY_SOURCE, NriLayout_COPY_SOURCE, NriStageBits_COPY);
 
         if (good) {
-            r->core.CmdReadbackTextureToBuffer(cmd, readback, &layout, texture, &region);
+            r->gpu->core.CmdReadbackTextureToBuffer(cmd, readback, &layout, texture, &region);
 
             good = submit_commands(r, allocator, cmd);
             allocator = NULL;
@@ -2569,15 +2570,15 @@ static bool read_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width,
 
     if (!good) {
         abort_commands(r, allocator, cmd);
-        r->core.DestroyBuffer(readback);
+        r->gpu->core.DestroyBuffer(readback);
 
         return false;
     }
 
-    const Uint8 *mapped = r->core.MapBuffer(readback, 0, staging_bytes);
+    const Uint8 *mapped = r->gpu->core.MapBuffer(readback, 0, staging_bytes);
 
     if (!mapped) {
-        r->core.DestroyBuffer(readback);
+        r->gpu->core.DestroyBuffer(readback);
 
         return false;
     }
@@ -2589,8 +2590,8 @@ static bool read_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width,
             memcpy(data + (size_t)y * row_bytes, mapped + (size_t)y * row_pitch, row_bytes);
     }
 
-    r->core.UnmapBuffer(readback);
-    r->core.DestroyBuffer(readback);
+    r->gpu->core.UnmapBuffer(readback);
+    r->gpu->core.DestroyBuffer(readback);
     *pixels = data;
     return data != NULL;
 }
@@ -2679,7 +2680,7 @@ static NriBuffer *lightmap_queue_buffer(RENDERER *r, uint64_t bytes, NriBufferUs
     const NriBufferDesc desc = {.size = bytes, .structureStride = sizeof(Uint32), .usage = usage};
     NriBuffer *buffer = NULL;
 
-    return r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &buffer) == NriResult_SUCCESS ? buffer : NULL;
+    return r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &buffer) == NriResult_SUCCESS ? buffer : NULL;
 }
 
 static bool lightmap_queue_ensure(RENDERER *r, Uint32 capacity) {
@@ -2747,7 +2748,7 @@ static void lightmap_buffer_barrier(RENDERER *r, NriCommandBuffer *cmd, NriBuffe
                                     NriStageBits after_stages) {
     const NriBufferBarrierDesc barrier = {
         .buffer = buffer, .before = {.access = before_access, .stages = before_stages}, .after = {.access = after_access, .stages = after_stages}};
-    r->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1u});
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1u});
 }
 
 static bool record_lightmap_queue_reset(RENDERER *r, NriCommandBuffer *cmd, uint32_t index, bool reused) {
@@ -2757,8 +2758,8 @@ static bool record_lightmap_queue_reset(RENDERER *r, NriCommandBuffer *cmd, uint
     NriDescriptor *dst = create_buffer_view(r, count, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32));
 
     if (!dst || !bind_descriptor_set(r, cmd, r->lightmap_queue_reset_layout, NriBindPoint_COMPUTE, 1, &dst, 1)) return false;
-    r->core.CmdSetPipeline(cmd, r->lightmap_queue_reset_pipeline);
-    r->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = 1u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+    r->gpu->core.CmdSetPipeline(cmd, r->lightmap_queue_reset_pipeline);
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = 1u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
 
     return true;
 }
@@ -2778,8 +2779,8 @@ static bool record_lightmap_queue_args(RENDERER *r, NriCommandBuffer *cmd, uint3
         !bind_uniform_data(r, cmd, r->lightmap_queue_args_layout, NriBindPoint_COMPUTE, 2, &uniforms, sizeof(uniforms)))
         return false;
 
-    r->core.CmdSetPipeline(cmd, r->lightmap_queue_args_pipeline);
-    r->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = 1u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+    r->gpu->core.CmdSetPipeline(cmd, r->lightmap_queue_args_pipeline);
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = 1u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
     lightmap_buffer_barrier(r, cmd, r->lightmap_dispatch_args, NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER, NriAccessBits_ARGUMENT_BUFFER,
                             NriStageBits_INDIRECT);
     return true;
@@ -2833,8 +2834,8 @@ record_bake_pass(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriText
 
     if (!bind_bake_resources(r, cmd, source, destination, &uniforms, sizeof(uniforms))) return false;
 
-    r->core.CmdSetPipeline(cmd, r->bake_pipeline);
-    r->core.CmdDispatch(cmd, &(NriDispatchDesc){
+    r->gpu->core.CmdSetPipeline(cmd, r->bake_pipeline);
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
         .workGroupNumX = groups_x,
         .workGroupNumY = groups_y,
         .workGroupNumZ = 1
@@ -2876,10 +2877,10 @@ static bool record_trace_batch(RENDERER *r, NriCommandBuffer *cmd, Uint32 first,
                                 r->lightmap_active_buffer[output_index], r->lightmap_active_count[output_index], &uniforms, sizeof(uniforms)))
         return false;
 
-    r->core.CmdSetPipeline(cmd, r->bake_pipeline);
+    r->gpu->core.CmdSetPipeline(cmd, r->bake_pipeline);
 
-    if (active_mode) r->core.CmdDispatchIndirect(cmd, r->lightmap_dispatch_args, 0u);
-    else r->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = groups_x, .workGroupNumY = groups_y, .workGroupNumZ = 1u});
+    if (active_mode) r->gpu->core.CmdDispatchIndirect(cmd, r->lightmap_dispatch_args, 0u);
+    else r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = groups_x, .workGroupNumY = groups_y, .workGroupNumZ = 1u});
 
     if (!record_lightmap_queue_args(r, cmd, output_index, dispatch_width, batch_index != 0u)) return false;
     swap_lightmaps(r);
@@ -3154,7 +3155,7 @@ static bool bake_lightmap_once(RENDERER *r, const LIGHTMAP *lm) {
 }
 
 bool bake_lightmap(RENDERER *r, const BVH *tree, const LIGHTMAP *lm, const PROBE_GRID *probes) {
-    if (!r || !r->device || !tree || !tree->node_count || !lm || !lm->width || !lm->height || !lm->samples || !lm->sample_count || !r->lightmap_sampler || !probes ||
+    if (!r || !r->gpu->device || !tree || !tree->node_count || !lm || !lm->width || !lm->height || !lm->samples || !lm->sample_count || !r->lightmap_sampler || !probes ||
         !probes->probes || !probes->spacing || !probes->count_x || !probes->count_y || !probes->count_z)
         return false;
 
@@ -3199,7 +3200,7 @@ bool bake_lightmap(RENDERER *r, const BVH *tree, const LIGHTMAP *lm, const PROBE
     if (!lightmap_queue_ensure(r, lm->sample_count)) return false;
 
     if (!r->bake_pipeline) {
-        const NriDeviceDesc *device = r->core.GetDeviceDesc(r->device);
+        const NriDeviceDesc *device = r->gpu->core.GetDeviceDesc(r->gpu->device);
         const bool wave_ops = device && (device->wave.waveOpsStages & NriStageBits_COMPUTE_SHADER) != 0;
 
         r->bake_pipeline = compile_compute(r, r->bake_layout, "shaders/compute.hlsl", "lightmap_cs", wave_ops ? "BUILD_LIGHTMAP_WAVE_CS" : "BUILD_LIGHTMAP_CS");
@@ -3307,12 +3308,12 @@ static PROBE_WAVEFRONT_BUFFER probe_wavefront_uploaded(RENDERER *r, const void *
 static PROBE_WAVEFRONT_BUFFER probe_wavefront_storage(RENDERER *r, uint64_t bytes, uint32_t stride) {
     PROBE_WAVEFRONT_BUFFER result = {0};
 
-    if (!r || !r->device || !bytes) return result;
+    if (!r || !r->gpu->device || !bytes) return result;
 
     const NriBufferUsageBits usage = NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE;
     const NriBufferDesc desc = {.size = bytes, .structureStride = stride, .usage = usage};
 
-    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &result.buffer) == NriResult_SUCCESS) {
+    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &result.buffer) == NriResult_SUCCESS) {
         result.stride = stride;
         result.usage = usage;
         result.capacity = bytes;
@@ -3326,7 +3327,7 @@ static PROBE_WAVEFRONT_BUFFER probe_wavefront_argument(RENDERER *r) {
     const NriBufferDesc desc = {
         .size = 3u * sizeof(uint32_t), .structureStride = sizeof(uint32_t), .usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE | NriBufferUsageBits_ARGUMENT};
 
-    if (r && r->device && r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &result.buffer) == NriResult_SUCCESS) {
+    if (r && r->gpu->device && r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &result.buffer) == NriResult_SUCCESS) {
         result.stride = sizeof(uint32_t);
         result.usage = desc.usage;
         result.capacity = desc.size;
@@ -3350,7 +3351,7 @@ static bool probe_wavefront_reserve(RENDERER *r, PROBE_WAVEFRONT_BUFFER *buffer,
 
     const NriBufferDesc desc = {.size = bytes, .structureStride = stride, .usage = usage};
 
-    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &buffer->buffer) != NriResult_SUCCESS) return false;
+    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &buffer->buffer) != NriResult_SUCCESS) return false;
 
     buffer->stride = stride;
     buffer->usage = usage;
@@ -3364,13 +3365,13 @@ static bool probe_wavefront_reserve_readback(RENDERER *r, NriBuffer **buffer, ui
 
     if (*buffer && *capacity >= bytes) return true;
 
-    if (*buffer) r->core.DestroyBuffer(*buffer);
+    if (*buffer) r->gpu->core.DestroyBuffer(*buffer);
     *buffer = NULL;
     *capacity = 0u;
 
     const NriBufferDesc desc = {.size = bytes};
 
-    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_READBACK, 0.0f, &desc, buffer) != NriResult_SUCCESS) return false;
+    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_HOST_READBACK, 0.0f, &desc, buffer) != NriResult_SUCCESS) return false;
 
     *capacity = bytes;
     return true;
@@ -3407,16 +3408,16 @@ static bool probe_wavefront_stage_init(RENDERER *r, PROBE_WAVEFRONT_STAGE *stage
 static void probe_wavefront_stage_deinit(RENDERER *r, PROBE_WAVEFRONT_STAGE *stage) {
     if (!stage) return;
 
-    if (stage->pipeline) r->core.DestroyPipeline(stage->pipeline);
+    if (stage->pipeline) r->gpu->core.DestroyPipeline(stage->pipeline);
 
-    if (stage->layout) r->core.DestroyPipelineLayout(stage->layout);
+    if (stage->layout) r->gpu->core.DestroyPipelineLayout(stage->layout);
     *stage = (PROBE_WAVEFRONT_STAGE){0};
 }
 
 static bool probe_wavefront_pipelines_init(RENDERER *r, PROBE_WAVEFRONT_PIPELINES *p) {
     memset(p, 0, sizeof(*p));
 
-    const NriDeviceDesc *device = r->core.GetDeviceDesc(r->device);
+    const NriDeviceDesc *device = r->gpu->core.GetDeviceDesc(r->gpu->device);
     const bool wave_ops = device && (device->wave.waveOpsStages & NriStageBits_COMPUTE_SHADER) != 0;
     const char *primary_define = wave_ops ? "BUILD_PROBE_PRIMARY_WAVE_CS" : "BUILD_PROBE_PRIMARY_CS";
     const char *bounce_define = wave_ops ? "BUILD_PROBE_BOUNCE_WAVE_CS" : "BUILD_PROBE_BOUNCE_CS";
@@ -3497,9 +3498,9 @@ static void probe_wavefront_scratch_destroy(RENDERER *r) {
     probe_wavefront_release_buffer(r, &scratch->packed_triangles);
     probe_wavefront_release_buffer(r, &scratch->packed_nodes);
 
-    if (scratch->counter_readback) r->core.DestroyBuffer(scratch->counter_readback);
+    if (scratch->counter_readback) r->gpu->core.DestroyBuffer(scratch->counter_readback);
 
-    if (scratch->output_readback) r->core.DestroyBuffer(scratch->output_readback);
+    if (scratch->output_readback) r->gpu->core.DestroyBuffer(scratch->output_readback);
     free(scratch);
     r->probe_scratch = NULL;
 }
@@ -3551,7 +3552,7 @@ static bool probe_wavefront_transition(RENDERER *r, NriCommandBuffer *cmd, PROBE
         buffer->stages = NriStageBits_COMPUTE_SHADER;
     }
 
-    if (count) r->core.CmdBarrier(cmd, &(NriBarrierDesc){
+    if (count) r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){
         .buffers = barriers,
         .bufferNum = count
     });
@@ -3592,8 +3593,8 @@ static bool probe_wavefront_dispatch(
 
     if (!bind_uniform_data(r, cmd, stage->layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms))) return false;
 
-    r->core.CmdSetPipeline(cmd, stage->pipeline);
-    r->core.CmdDispatch(cmd, &(NriDispatchDesc){
+    r->gpu->core.CmdSetPipeline(cmd, stage->pipeline);
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
         .workGroupNumX = groups_x,
         .workGroupNumY = 1,
         .workGroupNumZ = 1
@@ -3631,12 +3632,12 @@ static bool probe_wavefront_dispatch_indirect(RENDERER *r, NriCommandBuffer *cmd
     const NriBufferBarrierDesc barrier = {.buffer = arguments->buffer,
                                           .before = {.access = arguments->access, .stages = arguments->stages},
                                           .after = {.access = NriAccessBits_ARGUMENT_BUFFER, .stages = NriStageBits_INDIRECT}};
-    r->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
     arguments->access = NriAccessBits_ARGUMENT_BUFFER;
     arguments->stages = NriStageBits_INDIRECT;
 
-    r->core.CmdSetPipeline(cmd, stage->pipeline);
-    r->core.CmdDispatchIndirect(cmd, arguments->buffer, 0u);
+    r->gpu->core.CmdSetPipeline(cmd, stage->pipeline);
+    r->gpu->core.CmdDispatchIndirect(cmd, arguments->buffer, 0u);
 
     return true;
 }
@@ -3694,7 +3695,7 @@ static NriBuffer *probe_wavefront_readback_buffer(RENDERER *r, uint64_t bytes) {
 
     NriBuffer *buffer = NULL;
 
-    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_HOST_READBACK, 1.0f, &desc, &buffer) != NriResult_SUCCESS) return NULL;
+    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_HOST_READBACK, 1.0f, &desc, &buffer) != NriResult_SUCCESS) return NULL;
 
     return buffer;
 }
@@ -3714,19 +3715,19 @@ static bool probe_wavefront_copy_to_readback(RENDERER *r, NriCommandBuffer *cmd,
         }
     };
 
-    r->core.CmdBarrier(cmd, &(NriBarrierDesc){
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){
         .buffers = &barrier,
         .bufferNum = 1
     });
     source->access = NriAccessBits_COPY_SOURCE;
     source->stages = NriStageBits_COPY;
-    r->core.CmdCopyBuffer(cmd, destination, 0, source->buffer, 0, bytes);
+    r->gpu->core.CmdCopyBuffer(cmd, destination, 0, source->buffer, 0, bytes);
 
     return true;
 }
 
 bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const BEAM_GRID *beams, PROBE_BAKE_PROGRESS_FN progress) {
-    if (!r || !r->device || !grid || !grid->probes || !tree || !tree->node_count || !tree->triangle_count || !beams || !beams->shadow_depth) return false;
+    if (!r || !r->gpu->device || !grid || !grid->probes || !tree || !tree->node_count || !tree->triangle_count || !beams || !beams->shadow_depth) return false;
 
     const uint64_t probe_count64 = (uint64_t)grid->count_x * grid->count_y * grid->count_z;
 
@@ -3897,7 +3898,7 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
         if (!good) break;
         gpu_timestamp_log(r, 2u, "probe trace block");
 
-        const uint32_t *values = r->core.MapBuffer(counter_readback, 0, 4u * sizeof(uint32_t));
+        const uint32_t *values = r->gpu->core.MapBuffer(counter_readback, 0, 4u * sizeof(uint32_t));
 
         if (!values) {
             good = false;
@@ -3907,7 +3908,7 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
 
         active = values[3];
 
-        r->core.UnmapBuffer(counter_readback);
+        r->gpu->core.UnmapBuffer(counter_readback);
         completed += block;
 
         const uint32_t progress_total = active ? max_samples : completed;
@@ -3946,7 +3947,7 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
     }
 
     if (good) {
-        const float (*values)[4] = r->core.MapBuffer(output_readback, 0, output_bytes);
+        const float (*values)[4] = r->gpu->core.MapBuffer(output_readback, 0, output_bytes);
 
         if (!values) good = false;
         else {
@@ -3956,7 +3957,7 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
                 grid->probes[i].position[3] = values[i * 9u][3];
             }
 
-            r->core.UnmapBuffer(output_readback);
+            r->gpu->core.UnmapBuffer(output_readback);
         }
     }
 
@@ -4014,7 +4015,7 @@ bool bake_probe_grid(RENDERER *r, PROBE_GRID *grid, Uint32 samples) {
 
     NriBuffer *output = NULL;
 
-    if (r->core.CreateCommittedBuffer(r->device, NriMemoryLocation_DEVICE, 1.0f, &output_desc, &output) != NriResult_SUCCESS) output = NULL;
+    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_DEVICE, 1.0f, &output_desc, &output) != NriResult_SUCCESS) output = NULL;
 
     NriPipeline *pipeline = compile_compute(r, r->probe_layout, "shaders/compute.hlsl", "probe_cs", "BUILD_PROBE_CS");
 
@@ -4031,9 +4032,9 @@ bool bake_probe_grid(RENDERER *r, PROBE_GRID *grid, Uint32 samples) {
             good = bind_probe_resources(r, cmd, input, r->bvh_node_buffer, r->bvh_triangle_buffer, output, &u, sizeof(u));
 
             if (good) {
-                r->core.CmdSetPipeline(cmd, pipeline);
+                r->gpu->core.CmdSetPipeline(cmd, pipeline);
 
-                r->core.CmdDispatch(cmd, &(NriDispatchDesc){
+                r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
                     .workGroupNumX = (Uint32)count,
                     .workGroupNumY = 1,
                     .workGroupNumZ = 1
@@ -4048,7 +4049,7 @@ bool bake_probe_grid(RENDERER *r, PROBE_GRID *grid, Uint32 samples) {
 
     if (good) good = read_buffer(r, output, grid, output_bytes, (uint32_t)count);
 
-    if (pipeline) r->core.DestroyPipeline(pipeline);
+    if (pipeline) r->gpu->core.DestroyPipeline(pipeline);
     release_buffer(r, output);
     release_buffer(r, input);
 
@@ -4056,7 +4057,7 @@ bool bake_probe_grid(RENDERER *r, PROBE_GRID *grid, Uint32 samples) {
 }
 
 void release_bake_resources(RENDERER *r) {
-    if (!r || !r->device) return;
+    if (!r || !r->gpu->device) return;
 
     release_buffer(r, r->bvh_node_buffer);
     release_buffer(r, r->bvh_triangle_buffer);
@@ -4076,11 +4077,11 @@ void release_bake_resources(RENDERER *r) {
     release_texture(r, r->lightmap_scratch);
     release_texture(r, r->lightmap_direct);
 
-    if (r->bake_pipeline) r->core.DestroyPipeline(r->bake_pipeline);
+    if (r->bake_pipeline) r->gpu->core.DestroyPipeline(r->bake_pipeline);
 
-    if (r->lightmap_queue_reset_pipeline) r->core.DestroyPipeline(r->lightmap_queue_reset_pipeline);
+    if (r->lightmap_queue_reset_pipeline) r->gpu->core.DestroyPipeline(r->lightmap_queue_reset_pipeline);
 
-    if (r->lightmap_queue_args_pipeline) r->core.DestroyPipeline(r->lightmap_queue_args_pipeline);
+    if (r->lightmap_queue_args_pipeline) r->gpu->core.DestroyPipeline(r->lightmap_queue_args_pipeline);
 
     r->bvh_node_buffer = NULL;
     r->bvh_triangle_buffer = NULL;
@@ -4116,8 +4117,8 @@ static bool dispatch_one(
 
     if (!bind_fx_resources(r, cmd, pipeline, source, destination, fx->sampler, uniforms, uniform_size)) return false;
 
-    r->core.CmdSetPipeline(cmd, pipeline);
-    r->core.CmdDispatch(cmd, &(NriDispatchDesc){
+    r->gpu->core.CmdSetPipeline(cmd, pipeline);
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
         .workGroupNumX = (width + 7u) / 8u,
         .workGroupNumY = (height + 7u) / 8u,
         .workGroupNumZ = 1
@@ -4159,21 +4160,21 @@ static void fx_deinit(FX_STATE *fx) {
 
     release_texture(r, fx->lut);
 
-    if (fx->sampler) r->core.DestroyDescriptor(fx->sampler);
+    if (fx->sampler) r->gpu->core.DestroyDescriptor(fx->sampler);
 
-    if (fx->depth_sampler) r->core.DestroyDescriptor(fx->depth_sampler);
+    if (fx->depth_sampler) r->gpu->core.DestroyDescriptor(fx->depth_sampler);
 
-    if (fx->compose_pipeline) r->core.DestroyPipeline(fx->compose_pipeline);
+    if (fx->compose_pipeline) r->gpu->core.DestroyPipeline(fx->compose_pipeline);
 
-    if (fx->ssao_pipeline) r->core.DestroyPipeline(fx->ssao_pipeline);
+    if (fx->ssao_pipeline) r->gpu->core.DestroyPipeline(fx->ssao_pipeline);
 
-    if (fx->bloom_pipeline) r->core.DestroyPipeline(fx->bloom_pipeline);
+    if (fx->bloom_pipeline) r->gpu->core.DestroyPipeline(fx->bloom_pipeline);
 
-    if (fx->grade_pipeline) r->core.DestroyPipeline(fx->grade_pipeline);
+    if (fx->grade_pipeline) r->gpu->core.DestroyPipeline(fx->grade_pipeline);
 
-    if (fx->volume_pipeline) r->core.DestroyPipeline(fx->volume_pipeline);
+    if (fx->volume_pipeline) r->gpu->core.DestroyPipeline(fx->volume_pipeline);
 
-    if (fx->volume_compose_pipeline) r->core.DestroyPipeline(fx->volume_compose_pipeline);
+    if (fx->volume_compose_pipeline) r->gpu->core.DestroyPipeline(fx->volume_compose_pipeline);
 
     memset(fx, 0, sizeof(*fx));
 }
@@ -4191,13 +4192,13 @@ static bool make_compose_pipeline(RENDERER *r, NriShaderDesc *vs, NriShaderDesc 
                                           .outputMerger = {.colors = &target, .colorNum = 1},
                                           .shaders = shaders,
                                           .shaderNum = 2,
-                                          .cache = r->pipeline_cache};
+                                          .cache = r->gpu->pipeline_cache};
 
-    return r->core.CreateGraphicsPipeline(r->device, &desc, out) == NriResult_SUCCESS;
+    return r->gpu->core.CreateGraphicsPipeline(r->gpu->device, &desc, out) == NriResult_SUCCESS;
 }
 
 static bool fx_init(FX_STATE *fx, RENDERER *r) {
-    if (!fx || !r || !r->device) return false;
+    if (!fx || !r || !r->gpu->device) return false;
 
     NriShaderDesc vs = {0};
     NriShaderDesc ps = {0};
@@ -4229,7 +4230,7 @@ static bool fx_init(FX_STATE *fx, RENDERER *r) {
 
     if (!vs.bytecode || !ps.bytecode || !fx->ssao_pipeline || !fx->bloom_pipeline || !fx->grade_pipeline || !fx->volume_pipeline || !fx->volume_compose_pipeline) goto fail;
 
-    if (!make_compose_pipeline(r, &vs, &ps, r->swapchain_format, &fx->compose_pipeline)) goto fail;
+    if (!make_compose_pipeline(r, &vs, &ps, r->gpu->swapchain_format, &fx->compose_pipeline)) goto fail;
 
     free_shader(&vs);
     free_shader(&ps);
@@ -4318,9 +4319,9 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
 
     if (!bind_volume_resources(r, cmd, fx->normal_depth, fx->depth_sampler, probes, beams, fx->volume, &u, sizeof(u))) return false;
 
-    r->core.CmdSetPipeline(cmd, fx->volume_pipeline);
+    r->gpu->core.CmdSetPipeline(cmd, fx->volume_pipeline);
 
-    r->core.CmdDispatch(cmd, &(NriDispatchDesc){
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
         .workGroupNumX = (fx->ao_width + 7u) / 8u,
         .workGroupNumY = (fx->ao_height + 7u) / 8u,
         .workGroupNumZ = 1
@@ -4338,9 +4339,9 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
 
     if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, &compose, sizeof(compose))) return false;
 
-    r->core.CmdSetPipeline(cmd, fx->volume_compose_pipeline);
+    r->gpu->core.CmdSetPipeline(cmd, fx->volume_compose_pipeline);
 
-    r->core.CmdDispatch(cmd, &(NriDispatchDesc){
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
         .workGroupNumX = (fx->width + 7u) / 8u,
         .workGroupNumY = (fx->height + 7u) / 8u,
         .workGroupNumZ = 1
@@ -4365,9 +4366,9 @@ static bool run_vision_only(FX_STATE *fx, NriCommandBuffer *cmd) {
 
     if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, &compose, sizeof(compose))) return false;
 
-    r->core.CmdSetPipeline(cmd, fx->volume_compose_pipeline);
+    r->gpu->core.CmdSetPipeline(cmd, fx->volume_compose_pipeline);
 
-    r->core.CmdDispatch(cmd, &(NriDispatchDesc){
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
         .workGroupNumX = (fx->width + 7u) / 8u,
         .workGroupNumY = (fx->height + 7u) / 8u,
         .workGroupNumZ = 1
@@ -4422,15 +4423,15 @@ static bool fx_apply_base(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *swap,
 
     if (!begin_compose_rendering(r, cmd, swap, hdr, fx->ao, fx->bloom_a, fx->lut, fx->sampler, &u, sizeof(u))) return false;
 
-    r->core.CmdSetPipeline(cmd, fx->compose_pipeline);
-    r->core.CmdDraw(cmd, &(NriDrawDesc){
+    r->gpu->core.CmdSetPipeline(cmd, fx->compose_pipeline);
+    r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){
         .vertexNum = 3,
         .instanceNum = 1,
         .baseVertex = 0,
         .baseInstance = 0
     });
 
-    r->core.CmdEndRendering(cmd);
+    r->gpu->core.CmdEndRendering(cmd);
 
     return true;
 }
@@ -4484,42 +4485,28 @@ static void destroy_pipeline_layouts(RENDERER *r) {
 
     for (uint32_t i = 0; i < sizeof(layouts) / sizeof(layouts[0]); ++i) {
         if (*layouts[i]) {
-            r->core.DestroyPipelineLayout(*layouts[i]);
+            r->gpu->core.DestroyPipelineLayout(*layouts[i]);
             *layouts[i] = NULL;
         }
     }
 }
 
-bool r_init(RENDERER *r, const char *title, int width, int height) {
-    if (!r) return false;
+bool gpu_init(GPU *gpu, const char *title, int width, int height) {
+    if (!gpu || !title || width <= 0 || height <= 0) return false;
 
-    memset(r, 0, sizeof(*r));
-    r->show_volume = true;
-    r->yaw = -0.78f;
-    r->pitch = 0.34f;
-    r->distance = 14.0f;
-    r->target = v3(0.0f, 1.0f, 0.0f);
-
-    r->window = SDL_CreateWindow(title, width, height,
-                                 SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY
+    memset(gpu, 0, sizeof(*gpu));
+    gpu->window = SDL_CreateWindow(title, width, height,
+                                   SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY
 #if defined(__APPLE__)
             | SDL_WINDOW_METAL
 #else
             | SDL_WINDOW_VULKAN
 #endif
     );
-    if (!r->window) {
-        r_deinit(r);
-
-        return false;
-    }
+    if (!gpu->window) return false;
 
     NriDeviceCreationDesc device_desc = {0};
-#if defined(__APPLE__)
     device_desc.graphicsAPI = NriGraphicsAPI_VK;
-#else
-    device_desc.graphicsAPI = NriGraphicsAPI_VK;
-#endif
     device_desc.enableNRIValidation = false;
     device_desc.enableGraphicsAPIValidation = false;
     device_desc.vkBindingOffsets = (NriVKBindingOffsets){
@@ -4529,38 +4516,49 @@ bool r_init(RENDERER *r, const char *title, int width, int height) {
         .uRegister = 48
     };
 
-    if (nriCreateDevice(&device_desc, &r->device) != NriResult_SUCCESS) {
+    if (nriCreateDevice(&device_desc, &gpu->device) != NriResult_SUCCESS) {
         SDL_Log("NRI device creation failed");
-        r_deinit(r);
-
+        gpu_deinit(gpu);
         return false;
     }
 
-    if (nriGetInterface(r->device, NRI_INTERFACE(NriCoreInterface), &r->core) != NriResult_SUCCESS ||
-        nriGetInterface(r->device, NRI_INTERFACE(NriHelperInterface), &r->helper) != NriResult_SUCCESS ||
-        nriGetInterface(r->device, NRI_INTERFACE(NriSwapChainInterface), &r->swapchain_api) != NriResult_SUCCESS) {
+    if (nriGetInterface(gpu->device, NRI_INTERFACE(NriCoreInterface), &gpu->core) != NriResult_SUCCESS ||
+        nriGetInterface(gpu->device, NRI_INTERFACE(NriHelperInterface), &gpu->helper) != NriResult_SUCCESS ||
+        nriGetInterface(gpu->device, NRI_INTERFACE(NriSwapChainInterface), &gpu->swapchain_api) != NriResult_SUCCESS) {
         SDL_Log("NRI interface acquisition failed");
-        r_deinit(r);
-
+        gpu_deinit(gpu);
         return false;
     }
 
-    if (!acquire_queues(r)) {
-        r_deinit(r);
+    RENDERER shell = {.gpu = gpu};
 
+    if (!acquire_queues(&shell) || !create_pipeline_cache(&shell) || !create_gpu_timestamps(&shell) ||
+        !create_swapchain(&shell, width, height) || !create_descriptor_pool(&shell) ||
+        !create_work_contexts(&shell) || !create_frame_contexts(&shell)) {
+        gpu_deinit(gpu);
         return false;
     }
 
-    if (!create_pipeline_cache(r) || !create_gpu_timestamps(r) || !create_swapchain(r, width, height) || !create_descriptor_pool(r) || !create_work_contexts(r) ||
-        !create_frame_contexts(r) || !create_pipeline_layouts(r)) {
-        r_deinit(r);
+    return true;
+}
 
+bool renderer_gpu_resources_init(RENDERER *r) {
+    if (!r || !r->gpu || !r->gpu->device) return false;
+
+    r->show_volume = true;
+    r->yaw = -0.78f;
+    r->pitch = 0.34f;
+    r->distance = 14.0f;
+    r->target = v3(0.0f, 1.0f, 0.0f);
+
+    if (!create_pipeline_layouts(r)) {
+        renderer_gpu_resources_deinit(r);
         return false;
     }
 
-    if (r->core.GetFormatSupport(r->device, NriFormat_D32_SFLOAT) & NriFormatSupportBits_DEPTH_STENCIL_ATTACHMENT) {
+    if (r->gpu->core.GetFormatSupport(r->gpu->device, NriFormat_D32_SFLOAT) & NriFormatSupportBits_DEPTH_STENCIL_ATTACHMENT) {
         r->depth_format = NriFormat_D32_SFLOAT;
-    } else if (r->core.GetFormatSupport(r->device, NriFormat_D24_UNORM_S8_UINT) & NriFormatSupportBits_DEPTH_STENCIL_ATTACHMENT) {
+    } else if (r->gpu->core.GetFormatSupport(r->gpu->device, NriFormat_D24_UNORM_S8_UINT) & NriFormatSupportBits_DEPTH_STENCIL_ATTACHMENT) {
         r->depth_format = NriFormat_D24_UNORM_S8_UINT;
     } else {
         r->depth_format = NriFormat_D16_UNORM;
@@ -4580,12 +4578,11 @@ bool r_init(RENDERER *r, const char *title, int width, int height) {
         free_shader(&line_ps);
         free_shader(&sky_vs);
         free_shader(&sky_ps);
-        r_deinit(r);
-
+        renderer_gpu_resources_deinit(r);
         return false;
     }
 
-    r->solid_pipeline = make_surface_pipeline(r, &r->core, r->surface_layout, &surface_vs, &surface_ps);
+    r->solid_pipeline = make_surface_pipeline(r, &r->gpu->core, r->surface_layout, &surface_vs, &surface_ps);
     r->line_pipeline = make_line_pipeline(r, r->line_layout, &line_vs, &line_ps);
     r->sky_pipeline = make_sky_pipeline(r, r->sky_layout, &sky_vs, &sky_ps);
 
@@ -4597,8 +4594,7 @@ bool r_init(RENDERER *r, const char *title, int width, int height) {
     free_shader(&sky_ps);
 
     if (!r->solid_pipeline || !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
-        r_deinit(r);
-
+        renderer_gpu_resources_deinit(r);
         return false;
     }
 
@@ -4610,17 +4606,17 @@ bool r_init(RENDERER *r, const char *title, int width, int height) {
 }
 
 bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
-    if (!r || !frame || !r->device || !r->solid_pipeline || !r->sky_pipeline || !r->vertex_buffer || !r->lightmap_texture || !r->lightmap_sampler) return false;
+    if (!r || !frame || !r->gpu->device || !r->solid_pipeline || !r->sky_pipeline || !r->vertex_buffer || !r->lightmap_texture || !r->lightmap_sampler) return false;
 
     uint32_t width = 0;
     uint32_t height = 0;
 
-    SDL_GetWindowSizeInPixels(r->window, (int *)&width, (int *)&height);
+    SDL_GetWindowSizeInPixels(r->gpu->window, (int *)&width, (int *)&height);
 
     if (!width || !height) return true;
 
-    if (!r->swapchain || width != r->swapchain_width || height != r->swapchain_height) {
-        if (r->core.QueueWaitIdle(r->graphics_queue) != NriResult_SUCCESS) return false;
+    if (!r->gpu->swapchain || width != r->gpu->swapchain_width || height != r->gpu->swapchain_height) {
+        if (r->gpu->core.QueueWaitIdle(r->gpu->graphics_queue) != NriResult_SUCCESS) return false;
         destroy_swapchain(r);
 
         if (!create_swapchain(r, width, height)) return false;
@@ -4636,9 +4632,9 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
         return false;
     }
 
-    r->current_swap_index = swap_index;
+    r->gpu->current_swap_index = swap_index;
 
-    NriTexture *swap = r->swapchain_textures[swap_index];
+    NriTexture *swap = r->gpu->swapchain_textures[swap_index];
 
     FRAME_CONTEXT *queued_frame = NULL;
     NriCommandBuffer *cmd = NULL;
@@ -4664,9 +4660,9 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     if (!begin_scene_rendering(r, cmd, r->fx.hdr, r->fx.normal_depth, r->depth_texture, width, height)) goto failed_frame;
 
     if (!bind_sky_resources(r, cmd, &sky, sizeof(sky))) goto failed_frame;
-    r->core.CmdSetPipeline(cmd, r->sky_pipeline);
+    r->gpu->core.CmdSetPipeline(cmd, r->sky_pipeline);
 
-    r->core.CmdDraw(cmd, &(NriDrawDesc){
+    r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){
         .vertexNum = 3,
         .instanceNum = 1,
         .baseVertex = 0,
@@ -4679,8 +4675,8 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
         .stride = sizeof(RENDER_VERTEX)
     };
 
-    r->core.CmdSetVertexBuffers(cmd, 0, &vertex, 1);
-    r->core.CmdSetPipeline(cmd, r->solid_pipeline);
+    r->gpu->core.CmdSetVertexBuffers(cmd, 0, &vertex, 1);
+    r->gpu->core.CmdSetPipeline(cmd, r->solid_pipeline);
 
     if (!bind_camera_resources(r, cmd, &camera, sizeof(camera))) goto failed_frame;
 
@@ -4699,7 +4695,7 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
 
         if (!bind_surface_resources(r, cmd, m, r->lightmap_texture, r->material_sampler, r->lightmap_sampler, &material, sizeof(material))) goto failed_frame;
 
-        r->core.CmdDraw(cmd, &(NriDrawDesc){
+        r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){
             .vertexNum = draw->count,
             .instanceNum = 1,
             .baseVertex = draw->first,
@@ -4708,11 +4704,11 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     }
 
     if (r->show_debug && r->debug_vertex_count) {
-        r->core.CmdSetPipeline(cmd, r->line_pipeline);
+        r->gpu->core.CmdSetPipeline(cmd, r->line_pipeline);
 
         if (!bind_line_resources(r, cmd, camera.mvp, sizeof(camera.mvp))) goto failed_frame;
 
-        r->core.CmdDraw(cmd, &(NriDrawDesc){
+        r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){
             .vertexNum = r->debug_vertex_count,
             .instanceNum = 1,
             .baseVertex = r->debug_vertex_start,
@@ -4720,7 +4716,7 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
         });
     }
 
-    r->core.CmdEndRendering(cmd);
+    r->gpu->core.CmdEndRendering(cmd);
 
     r->fx.volume_ready = false;
     r->fx.debug_view = r->debug_view;
@@ -4752,10 +4748,12 @@ failed_frame:
 
 bool bake_worker_init(RENDERER *r) {
     if (!r) return false;
+
     memset(r, 0, sizeof(*r));
+    r->gpu = calloc(1, sizeof(*r->gpu));
+    if (!r->gpu) return false;
 
     NriDeviceCreationDesc device_desc = {0};
-
     device_desc.graphicsAPI = NriGraphicsAPI_VK;
     device_desc.vkBindingOffsets = (NriVKBindingOffsets){
         .sRegister = 0,
@@ -4764,28 +4762,29 @@ bool bake_worker_init(RENDERER *r) {
         .uRegister = 48
     };
 
-    if (nriCreateDevice(&device_desc, &r->device) != NriResult_SUCCESS) return false;
-
-    if (nriGetInterface(r->device, NRI_INTERFACE(NriCoreInterface), &r->core) != NriResult_SUCCESS ||
-        nriGetInterface(r->device, NRI_INTERFACE(NriHelperInterface), &r->helper) != NriResult_SUCCESS || !acquire_queues(r)) {
+    if (nriCreateDevice(&device_desc, &r->gpu->device) != NriResult_SUCCESS) {
         bake_worker_deinit(r);
-
         return false;
     }
 
-    if (!create_pipeline_cache(r) || !create_gpu_timestamps(r) || !create_descriptor_pool(r) || !create_work_contexts(r) || !create_pipeline_layouts(r)) {
+    if (nriGetInterface(r->gpu->device, NRI_INTERFACE(NriCoreInterface), &r->gpu->core) != NriResult_SUCCESS ||
+        nriGetInterface(r->gpu->device, NRI_INTERFACE(NriHelperInterface), &r->gpu->helper) != NriResult_SUCCESS ||
+        !acquire_queues(r)) {
         bake_worker_deinit(r);
+        return false;
+    }
 
+    if (!create_pipeline_cache(r) || !create_gpu_timestamps(r) || !create_descriptor_pool(r) ||
+        !create_work_contexts(r) || !create_pipeline_layouts(r)) {
+        bake_worker_deinit(r);
         return false;
     }
 
     r->lightmap_sampler = sampler(r, NriFilter_LINEAR, NriFilter_LINEAR, NriAddressMode_CLAMP_TO_EDGE);
-
     r->lightmap_texture = create_texture(r, NriFormat_RGBA16_SFLOAT, NriTextureUsageBits_SHADER_RESOURCE, 1, 1);
 
     if (!r->lightmap_sampler || !r->lightmap_texture) {
         bake_worker_deinit(r);
-
         return false;
     }
 
@@ -4795,58 +4794,46 @@ bool bake_worker_init(RENDERER *r) {
 void bake_worker_deinit(RENDERER *r) {
     if (!r) return;
 
+    GPU *gpu = r->gpu;
     free_probe_grid(&r->volume_probes);
     beam_free(&r->beams);
 
-    if (r->device) {
-        if (r->graphics_queue) r->core.QueueWaitIdle(r->graphics_queue);
+    if (gpu && gpu->device) {
+        if (gpu->graphics_queue) gpu->core.QueueWaitIdle(gpu->graphics_queue);
 
-        destroy_upload_context(r);
-        destroy_work_contexts(r);
         clear_temporary(r);
-
         probe_wavefront_scratch_destroy(r);
         release_bake_resources(r);
-        destroy_gpu_timestamps(r);
         release_buffer(r, r->volume_probe_buffer);
         release_buffer(r, r->beam_buffer);
         release_texture(r, r->lightmap_texture);
 
-        if (r->lightmap_sampler) r->core.DestroyDescriptor(r->lightmap_sampler);
-
+        if (r->lightmap_sampler) gpu->core.DestroyDescriptor(r->lightmap_sampler);
         destroy_pipeline_layouts(r);
-
-        if (r->descriptor_pool) r->core.DestroyDescriptorPool(r->descriptor_pool);
-        destroy_pipeline_cache(r);
-
-        nriDestroyDevice(r->device);
     }
 
-    free(r->temporary_descriptors);
-    free(r->temporary_buffers);
-    free(r->texture_states);
+    if (gpu) {
+        gpu_deinit(gpu);
+        free(gpu);
+    }
 
     memset(r, 0, sizeof(*r));
 }
 
-void r_deinit(RENDERER *r) {
+void renderer_gpu_resources_deinit(RENDERER *r) {
     if (!r) return;
 
+    GPU *gpu = r->gpu;
     free(r->vertices);
     free(r->draws);
     free_probe_grid(&r->volume_probes);
     beam_free(&r->beams);
 
-    if (r->device) {
-        if (r->graphics_queue) r->core.QueueWaitIdle(r->graphics_queue);
+    if (gpu && gpu->device) {
+        if (gpu->graphics_queue) gpu->core.QueueWaitIdle(gpu->graphics_queue);
 
-        destroy_upload_context(r);
-        destroy_work_contexts(r);
         clear_temporary(r);
-        destroy_frame_contexts(r);
         probe_wavefront_scratch_destroy(r);
-        destroy_gpu_timestamps(r);
-
         fx_deinit(&r->fx);
 
         if (r->image_textures) {
@@ -4856,11 +4843,10 @@ void r_deinit(RENDERER *r) {
 
         free(r->image_textures);
         free(r->materials);
-
         release_texture(r, r->default_white);
         release_texture(r, r->default_normal);
 
-        if (r->material_sampler) r->core.DestroyDescriptor(r->material_sampler);
+        if (r->material_sampler) gpu->core.DestroyDescriptor(r->material_sampler);
 
         release_buffer(r, r->vertex_buffer);
         release_bake_resources(r);
@@ -4869,32 +4855,45 @@ void r_deinit(RENDERER *r) {
         release_texture(r, r->depth_texture);
         release_texture(r, r->lightmap_texture);
 
-        if (r->lightmap_sampler) r->core.DestroyDescriptor(r->lightmap_sampler);
+        if (r->lightmap_sampler) gpu->core.DestroyDescriptor(r->lightmap_sampler);
+        if (r->sky_pipeline) gpu->core.DestroyPipeline(r->sky_pipeline);
+        if (r->solid_pipeline) gpu->core.DestroyPipeline(r->solid_pipeline);
+        if (r->line_pipeline) gpu->core.DestroyPipeline(r->line_pipeline);
 
-        if (r->sky_pipeline) r->core.DestroyPipeline(r->sky_pipeline);
-
-        if (r->solid_pipeline) r->core.DestroyPipeline(r->solid_pipeline);
-
-        if (r->line_pipeline) r->core.DestroyPipeline(r->line_pipeline);
-
-        destroy_swapchain(r);
         destroy_pipeline_layouts(r);
-
-        if (r->descriptor_pool) r->core.DestroyDescriptorPool(r->descriptor_pool);
-        destroy_pipeline_cache(r);
-
-        nriDestroyDevice(r->device);
     }
 
-    free(r->temporary_descriptors);
-    free(r->temporary_buffers);
-    free(r->texture_states);
+    memset(r, 0, sizeof(*r));
+}
+
+void gpu_deinit(GPU *gpu) {
+    if (!gpu) return;
+
+    RENDERER shell = {.gpu = gpu};
+
+    if (gpu->device) {
+        if (gpu->graphics_queue) gpu->core.QueueWaitIdle(gpu->graphics_queue);
+
+        destroy_upload_context(&shell);
+        destroy_work_contexts(&shell);
+        clear_temporary(&shell);
+        destroy_frame_contexts(&shell);
+        destroy_gpu_timestamps(&shell);
+        destroy_swapchain(&shell);
+
+        if (gpu->descriptor_pool) gpu->core.DestroyDescriptorPool(gpu->descriptor_pool);
+        destroy_pipeline_cache(&shell);
+        nriDestroyDevice(gpu->device);
+    }
+
+    free(gpu->temporary_descriptors);
+    free(gpu->temporary_buffers);
+    free(gpu->texture_states);
 
 #if defined(__APPLE__)
-    if (r->metal_view) SDL_Metal_DestroyView(r->metal_view);
+    if (gpu->metal_view) SDL_Metal_DestroyView(gpu->metal_view);
 #endif
 
-    if (r->window) SDL_DestroyWindow(r->window);
-
-    memset(r, 0, sizeof(*r));
+    if (gpu->window) SDL_DestroyWindow(gpu->window);
+    memset(gpu, 0, sizeof(*gpu));
 }

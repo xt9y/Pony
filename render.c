@@ -15,7 +15,7 @@ typedef struct COLOR4 {
 } COLOR4;
 
 void bake_progress(RENDERER *renderer, const char *stage, Uint32 done, Uint32 total) {
-    if (!renderer || !renderer->window) return;
+    if (!renderer || !renderer->gpu->window) return;
 
     renderer->bake_stage = stage;
 
@@ -33,7 +33,7 @@ void bake_progress(RENDERER *renderer, const char *stage, Uint32 done, Uint32 to
         snprintf(title, sizeof(title), "Pony - B baking %s...", stage);
     }
 
-    SDL_SetWindowTitle(renderer->window, title);
+    SDL_SetWindowTitle(renderer->gpu->window, title);
     SDL_PumpEvents();
 }
 
@@ -219,7 +219,7 @@ bool renderer_load_cached_lightmap(
     uint64_t beam_hash,
     const LIGHTMAP *lightmap
 ) {
-    if (!renderer || !renderer->device || !lightmap) return false;
+    if (!renderer || !renderer->gpu->device || !lightmap) return false;
 
     CACHED_LIGHTMAP cached = {0};
 
@@ -294,7 +294,7 @@ bool renderer_rebake_current_scene(
     uint64_t volume_hash,
     uint64_t beam_hash
 ) {
-    if (!renderer || !mesh || !lightmap || !renderer->device || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics) return false;
+    if (!renderer || !mesh || !lightmap || !renderer->gpu->device || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics) return false;
 
     renderer->sun = light->directional;
     renderer->sun.direction = v3_normalize(renderer->sun.direction);
@@ -582,7 +582,7 @@ static void renderer_handle_event(RENDERER *renderer, const SDL_Event *event) {
 }
 
 static bool renderer_draw(RENDERER *renderer, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const PERIPHERAL_VISION *vision) {
-    if (!renderer || !renderer->window || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics || !vision) return false;
+    if (!renderer || !renderer->gpu->window || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics || !vision) return false;
 
     DIRECTIONAL_LIGHT sun = light->directional;
     sun.direction = v3_normalize(sun.direction);
@@ -595,7 +595,7 @@ static bool renderer_draw(RENDERER *renderer, const struct LIGHT *light, const S
     int width = 0;
     int height = 0;
 
-    if (!SDL_GetWindowSizeInPixels(renderer->window, &width, &height)) return false;
+    if (!SDL_GetWindowSizeInPixels(renderer->gpu->window, &width, &height)) return false;
     if (width <= 0 || height <= 0) return true;
 
     const float fov = 62.0f * 3.14159265358979323846f / 180.0f;
@@ -663,28 +663,18 @@ static struct LIGHT *scene_directional_light(const SCENE *scene) {
     return NULL;
 }
 
-bool gpu_init(GPU *gpu, const char *title, int width, int height) {
-    if (!gpu || !title || width <= 0 || height <= 0) return false;
-
-    *gpu = (GPU){
-        .title = title,
-        .width = width,
-        .height = height
-    };
-
-    return true;
-}
-
-void gpu_deinit(GPU *gpu) {
-    if (!gpu) return;
-    memset(gpu, 0, sizeof(*gpu));
-}
 
 bool renderer_init(RENDERER *renderer, GPU *gpu) {
-    if (!renderer || !gpu || !gpu->title || gpu->width <= 0 || gpu->height <= 0) return false;
-    if (!r_init(renderer, gpu->title, gpu->width, gpu->height)) return false;
+    if (!renderer || !gpu || !gpu->device) return false;
 
+    memset(renderer, 0, sizeof(*renderer));
     renderer->gpu = gpu;
+
+    if (!renderer_gpu_resources_init(renderer)) {
+        renderer->gpu = NULL;
+        return false;
+    }
+
     return true;
 }
 
@@ -718,5 +708,5 @@ bool renderer_frame(RENDERER *renderer) {
 
 void renderer_deinit(RENDERER *renderer) {
     if (!renderer) return;
-    r_deinit(renderer);
+    renderer_gpu_resources_deinit(renderer);
 }
