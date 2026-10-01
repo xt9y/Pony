@@ -3,7 +3,8 @@
 
 #include "game.h"
 
-#include <SDL3/SDL.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 #if defined(__clang__)
 #pragma clang diagnostic push
@@ -21,11 +22,21 @@
 #pragma clang diagnostic pop
 #endif
 
-typedef struct RENDERER RENDERER;
+typedef struct SWAPCHAIN_TEXTURE SWAPCHAIN_TEXTURE;
+typedef struct FRAME_CONTEXT FRAME_CONTEXT;
+typedef struct UPLOAD_CONTEXT UPLOAD_CONTEXT;
+typedef struct TEXTURE_STATE TEXTURE_STATE;
+typedef struct PROBE_WAVEFRONT_SCRATCH PROBE_WAVEFRONT_SCRATCH;
+typedef struct RENDER_MATERIAL RENDER_MATERIAL;
+
+typedef struct GPU {
+    const char *title;
+    int width;
+    int height;
+} GPU;
 
 typedef struct FX_STATE {
     RENDERER *owner;
-
     NriPipeline *compose_pipeline;
     NriPipeline *ssao_pipeline;
     NriPipeline *bloom_pipeline;
@@ -34,7 +45,6 @@ typedef struct FX_STATE {
     NriPipeline *volume_compose_pipeline;
     NriDescriptor *sampler;
     NriDescriptor *depth_sampler;
-
     NriTexture *hdr;
     NriTexture *normal_depth;
     NriTexture *ao;
@@ -43,10 +53,8 @@ typedef struct FX_STATE {
     NriTexture *lut;
     NriTexture *volume;
     NriTexture *lit;
-
     Uint32 width, height;
     Uint32 ao_width, ao_height;
-
     bool volume_ready;
     uint32_t debug_view;
 } FX_STATE;
@@ -58,8 +66,6 @@ typedef struct RENDER_VERTEX {
     float lu, lv;
     float r, g, b, a;
 } RENDER_VERTEX;
-
-typedef struct RENDER_MATERIAL RENDER_MATERIAL;
 
 typedef struct DRAW_RANGE {
     uint32_t first;
@@ -82,17 +88,12 @@ typedef struct RENDER_FRAME {
     float aspect;
 } RENDER_FRAME;
 
-typedef struct SWAPCHAIN_TEXTURE SWAPCHAIN_TEXTURE;
-typedef struct FRAME_CONTEXT FRAME_CONTEXT;
-typedef struct UPLOAD_CONTEXT UPLOAD_CONTEXT;
-typedef struct TEXTURE_STATE TEXTURE_STATE;
-typedef struct PROBE_WAVEFRONT_SCRATCH PROBE_WAVEFRONT_SCRATCH;
-
 struct RENDERER {
+    GPU *gpu;
+    SCENE *scene;
+
     SDL_Window *window;
-
     NriDevice *device;
-
     NriCoreInterface core;
     NriHelperInterface helper;
     NriSwapChainInterface swapchain_api;
@@ -123,18 +124,16 @@ struct RENDERER {
     PROBE_WAVEFRONT_SCRATCH *probe_scratch;
 
     uint32_t swapchain_width, swapchain_height, current_swap_index;
-
     uint64_t frame_index;
     NriFormat swapchain_format;
     SDL_MetalView metal_view;
+
     NriDescriptor **temporary_descriptors;
     NriBuffer **temporary_buffers;
-
     uint32_t temporary_descriptor_num, temporary_descriptor_cap;
     uint32_t temporary_buffer_num, temporary_buffer_cap;
 
     TEXTURE_STATE *texture_states;
-
     uint32_t texture_state_num, texture_state_cap;
 
     NriPipelineLayout *surface_layout;
@@ -239,21 +238,16 @@ struct RENDERER {
     uint32_t debug_view;
 };
 
-bool upload_scene(RENDERER *r, const GLTF_SCENE *visual);
-bool upload_bvh(RENDERER *r, const BVH *tree);
-bool bake_lightmap(RENDERER *r, const BVH *tree, const LIGHTMAP *lm, const PROBE_GRID *probes);
-typedef bool (*PROBE_BAKE_PROGRESS_FN)(Uint32 done, Uint32 total, Uint32 active);
-bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const BEAM_GRID *beams, PROBE_BAKE_PROGRESS_FN progress);
-bool bake_probe_grid(RENDERER *r, PROBE_GRID *grid, Uint32 samples);
-NriTexture *upload_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached);
-NriBuffer *upload_probes(RENDERER *r, const PROBE_GRID *grid);
-NriBuffer *upload_beams(RENDERER *r, const BEAM_GRID *grid);
-bool download_lightmap(RENDERER *r, CACHED_LIGHTMAP *out);
-void release_texture(RENDERER *r, NriTexture *texture);
-void release_buffer(RENDERER *r, NriBuffer *buffer);
-void release_bake_resources(RENDERER *r);
-bool draw_frame(RENDERER *r, const RENDER_FRAME *frame);
-bool bake_worker_init(RENDERER *r);
-void bake_worker_deinit(RENDERER *r);
+bool gpu_init(GPU *gpu, const char *title, int width, int height);
+void gpu_deinit(GPU *gpu);
+
+bool upload_scene(RENDERER *renderer, const GLTF_SCENE *visual);
+bool upload_bvh(RENDERER *renderer, const BVH *tree);
+void release_texture(RENDERER *renderer, NriTexture *texture);
+void release_buffer(RENDERER *renderer, NriBuffer *buffer);
+void release_bake_resources(RENDERER *renderer);
+bool draw_frame(RENDERER *renderer, const RENDER_FRAME *frame);
+bool bake_worker_init(RENDERER *renderer);
+void bake_worker_deinit(RENDERER *renderer);
 
 #endif

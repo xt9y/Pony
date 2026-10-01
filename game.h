@@ -5,7 +5,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-//// init: math + mesh
+#include <SDL3/SDL.h>
+
+typedef struct GPU GPU;
+typedef struct RENDERER RENDERER;
+typedef struct LIGHTMAP LIGHTMAP;
 
 typedef struct VEC3 {
     float x, y, z;
@@ -35,8 +39,8 @@ typedef struct AABB {
 } AABB;
 
 typedef struct MESH {
-    VECTOR vertices; /* point */
-    VECTOR faces;    /* mesh_face */
+    VECTOR vertices;
+    VECTOR faces;
     AABB bounds;
 } MESH;
 
@@ -48,11 +52,14 @@ float v3_dot(VEC3 a, VEC3 b);
 VEC3 v3_cross(VEC3 a, VEC3 b);
 float v3_len_sq(VEC3 v);
 VEC3 v3_normalize(VEC3 v);
-void mesh_free(MESH *m);
+void mesh_free(MESH *mesh);
 
-//// glb: container + JSON tokenizer + accessors
-
-typedef enum GLB_TOKEN_TYPE { GLB_TOKEN_OBJECT, GLB_TOKEN_ARRAY, GLB_TOKEN_STRING, GLB_TOKEN_PRIMITIVE } GLB_TOKEN_TYPE;
+typedef enum GLB_TOKEN_TYPE {
+    GLB_TOKEN_OBJECT,
+    GLB_TOKEN_ARRAY,
+    GLB_TOKEN_STRING,
+    GLB_TOKEN_PRIMITIVE
+} GLB_TOKEN_TYPE;
 
 typedef struct GLB_TOKEN {
     uint32_t start;
@@ -94,7 +101,6 @@ typedef struct GLB_ACCESSOR {
 bool glb_load(GLB_DOC *doc, const char *path);
 void glb_free(GLB_DOC *doc);
 const char *glb_error(const GLB_DOC *doc);
-
 int glb_root(const GLB_DOC *doc);
 int glb_get(const GLB_DOC *doc, int object_token, const char *key);
 int glb_at(const GLB_DOC *doc, int array_token, size_t index);
@@ -102,22 +108,16 @@ size_t glb_count(const GLB_DOC *doc, int token);
 bool glb_string(const GLB_DOC *doc, int token, const char **data, size_t *length);
 bool glb_number(const GLB_DOC *doc, int token, double *value);
 bool glb_boolean(const GLB_DOC *doc, int token, bool *value);
-
 bool glb_buffer_view(const GLB_DOC *doc, size_t index, GLB_SPAN *span, size_t *stride);
 bool glb_accessor_open(const GLB_DOC *doc, size_t index, GLB_ACCESSOR *out);
 bool glb_accessor_f32(const GLB_ACCESSOR *accessor, size_t element, uint32_t component, float *value);
 bool glb_accessor_u32(const GLB_ACCESSOR *accessor, size_t element, uint32_t *value);
-
 bool glb_extract_mesh(const GLB_DOC *doc, MESH *out);
-
-//// gltf: visual scene (materials, textures, images)
 
 typedef struct GLTF_VERTEX {
     VEC3 position;
     VEC3 normal;
-
     float u, v;
-
     uint32_t material;
 } GLTF_VERTEX;
 
@@ -148,29 +148,44 @@ typedef struct GLTF_SCENE {
     GLTF_VERTEX *vertices;
     size_t vertex_count;
     size_t vertex_capacity;
-
     GLTF_MATERIAL *materials;
     uint32_t material_count;
     uint32_t default_material;
-
     GLTF_TEXTURE *textures;
     uint32_t texture_count;
-
     GLTF_IMAGE *images;
     uint32_t image_count;
 } GLTF_SCENE;
 
-//// object: scene entity + attached components
+bool gltf_extract(const GLB_DOC *doc, GLTF_SCENE *scene);
+void gltf_free(GLTF_SCENE *scene);
 
-typedef enum OBJECT_STATE { STATIC, DYNAMIC } OBJECT_STATE;
-typedef enum OBJECT_TYPE { MODEL, LIGHT } OBJECT_TYPE;
+typedef struct TRANSFORM {
+    VEC3 position;
+    float rotation[4];
+    VEC3 scale;
+} TRANSFORM;
+
+typedef enum OBJECT_STATE {
+    STATIC,
+    DYNAMIC
+} OBJECT_STATE;
+
+typedef enum OBJECT_TYPE {
+    MODEL,
+    LIGHT
+} OBJECT_TYPE;
 
 struct MODEL {
     MESH *geometry;
     GLTF_SCENE *visual;
 };
 
-typedef enum LIGHT_TYPE { LIGHT_DIRECTIONAL, LIGHT_POINT, LIGHT_SPOT } LIGHT_TYPE;
+typedef enum LIGHT_TYPE {
+    LIGHT_DIRECTIONAL,
+    LIGHT_POINT,
+    LIGHT_SPOT
+} LIGHT_TYPE;
 
 typedef struct DIRECTIONAL_LIGHT {
     VEC3 direction;
@@ -178,6 +193,25 @@ typedef struct DIRECTIONAL_LIGHT {
     float intensity;
     float angular_radius;
 } DIRECTIONAL_LIGHT;
+
+typedef struct POINT_LIGHT {
+    VEC3 position;
+} POINT_LIGHT;
+
+typedef struct SPOT_LIGHT {
+    VEC3 position;
+    VEC3 direction;
+} SPOT_LIGHT;
+
+struct LIGHT {
+    LIGHT_TYPE type;
+
+    union {
+        DIRECTIONAL_LIGHT directional;
+        POINT_LIGHT point;
+        SPOT_LIGHT spot;
+    };
+};
 
 typedef struct SKY {
     VEC3 zenith;
@@ -211,48 +245,44 @@ typedef struct PERIPHERAL_VISION {
     uint32_t peripheral_stride;
 } PERIPHERAL_VISION;
 
-typedef struct POINT_LIGHT {
-    VEC3 position;
-} POINT_LIGHT;
-
-typedef struct SPOT_LIGHT {
-    VEC3 position;
-    VEC3 direction;
-} SPOT_LIGHT;
-
-struct LIGHT {
-    LIGHT_TYPE type;
-
-    union {
-        DIRECTIONAL_LIGHT directional;
-        POINT_LIGHT point;
-        SPOT_LIGHT spot;
-    };
-};
-
 typedef struct OBJECT {
     OBJECT_STATE state;
     OBJECT_TYPE type;
+    TRANSFORM transform;
     void *data;
+    uint32_t revision;
 } OBJECT;
 
-bool gltf_extract(const GLB_DOC *doc, GLTF_SCENE *scene);
-void gltf_free(GLTF_SCENE *scene);
+typedef struct SCENE {
+    OBJECT *objects;
+    SKY sky;
+    VOLUMETRICS_LIGHTING volumetrics;
+    PERIPHERAL_VISION vision;
+    LIGHTMAP *lightmap;
+    float radius;
+    uint32_t object_count;
+    uint32_t object_capacity;
+} SCENE;
 
-//// bvh
+TRANSFORM transform_identity(void);
+OBJECT *scene_add_model(SCENE *scene, struct MODEL *model, OBJECT_STATE state, TRANSFORM transform);
+OBJECT *scene_add_light(SCENE *scene, struct LIGHT *light, OBJECT_STATE state, TRANSFORM transform);
+void object_set_transform(OBJECT *object, TRANSFORM transform);
+void object_mark_dirty(OBJECT *object);
+void scene_free(SCENE *scene);
 
 typedef struct BVH_TRIANGLE {
     float a[4];
     float b[4];
     float c[4];
     float normal[4];
-    float emissive[4]; /* rgb radiance + cumulative importance */
+    float emissive[4];
 } BVH_TRIANGLE;
 
 typedef struct BVH_NODE {
     float min[4];
     float max[4];
-    uint32_t meta[4]; /* left, next, first triangle, triangle count */
+    uint32_t meta[4];
 } BVH_NODE;
 
 typedef struct BVH {
@@ -280,47 +310,45 @@ typedef struct TRACE_HIT {
 
 bool trace_any(const BVH *tree, TRACE_RAY ray);
 bool trace_closest(const BVH *tree, TRACE_RAY ray, TRACE_HIT *hit);
-bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual);
+bool bvh_build(BVH *tree, const MESH *mesh, const GLTF_SCENE *visual);
 void bvh_free(BVH *tree);
-
-//// lmap: lightmap atlas
 
 typedef struct LMAP_UV {
     float u, v;
 } LMAP_UV;
 
 typedef struct LMAP_SAMPLE {
-    float position[4]; /* xyz + pixel index bitcast */
+    float position[4];
     float normal[4];
 } LMAP_SAMPLE;
 
-typedef struct LIGHTMAP {
+struct LIGHTMAP {
     uint32_t width;
     uint32_t height;
     uint32_t padding;
     uint32_t chart_count;
     float texel_density;
-    LMAP_UV *uvs; /* front 3, back 3 per mesh face */
+    LMAP_UV *uvs;
     LMAP_SAMPLE *samples;
     uint32_t sample_count;
-} LIGHTMAP;
+};
 
-bool lmap_build(LIGHTMAP *lm, const MESH *m, uint32_t preferred_texels_per_unit, uint32_t max_size);
-void lmap_free(LIGHTMAP *lm);
+bool lmap_build(LIGHTMAP *lightmap, const MESH *mesh, uint32_t preferred_texels_per_unit, uint32_t max_size);
+void lmap_free(LIGHTMAP *lightmap);
 
 typedef struct PROBE {
-    float position[4];        /* xyz and validity */
-    float coefficients[9][4]; /* RGB SH9; coefficient[1].w is sun visibility */
+    float position[4];
+    float coefficients[9][4];
 } PROBE;
 
 typedef struct PROBE_GRID {
     VEC3 origin;
     float spacing;
-
     uint32_t count_x, count_y, count_z;
-
     PROBE *probes;
 } PROBE_GRID;
+
+typedef bool (*PROBE_BAKE_PROGRESS_FN)(Uint32 done, Uint32 total, Uint32 active);
 
 typedef struct BEAM_CELL {
     uint32_t x, y, z, side;
@@ -328,19 +356,16 @@ typedef struct BEAM_CELL {
 
 typedef struct BEAM_GRID {
     VEC3 origin;
-    VEC3 step; /* world-space spacing along the three sun-space axes */
+    VEC3 step;
     uint32_t width, height, depth;
-
     uint32_t count;
-    BEAM_CELL *cells;    /* visible quadtree squares; all other voxels are shaded */
-    float *shadow_depth; /* first sun-facing surface for each x/y column */
+    BEAM_CELL *cells;
+    float *shadow_depth;
 } BEAM_GRID;
 
 bool beam_build(BEAM_GRID *grid, const MESH *scene, const BVH *tree, VEC3 sun_direction);
 void beam_free(BEAM_GRID *grid);
 float *beam_expand(const BEAM_GRID *grid);
-
-//// cache: baked lighting
 
 typedef struct CACHED_LIGHTMAP {
     uint32_t width;
@@ -348,7 +373,7 @@ typedef struct CACHED_LIGHTMAP {
     uint64_t layout_hash;
     uint64_t volume_hash;
     uint64_t beam_hash;
-    unsigned char *pixels; /* tightly packed RGBA16F, width * height * 8 bytes */
+    unsigned char *pixels;
     PROBE_GRID object_probes;
     PROBE_GRID volume_probes;
     BEAM_GRID beams;
@@ -362,15 +387,26 @@ void cache_free(CACHED_LIGHTMAP *data);
 
 #include "gpu.h"
 
-/* Renderer and bake orchestration. */
-bool r_init(RENDERER *r, const char *title, int width, int height);
-bool r_build_scene(RENDERER *r, const MESH *m, const GLTF_SCENE *visual, const LIGHTMAP *lm);
-bool r_load_cached_lightmap(RENDERER *r, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash, const LIGHTMAP *lm);
-bool r_rebake_current_scene(
-    RENDERER *r,
-    const MESH *m,
+bool renderer_init(RENDERER *renderer, GPU *gpu);
+bool renderer_set_scene(RENDERER *renderer, SCENE *scene);
+void renderer_event(RENDERER *renderer, const SDL_Event *event);
+bool renderer_frame(RENDERER *renderer);
+void renderer_deinit(RENDERER *renderer);
+
+bool renderer_load_cached_lightmap(
+    RENDERER *renderer,
+    const char *path,
+    uint64_t scene_hash,
+    uint64_t layout_hash,
+    uint64_t volume_hash,
+    uint64_t beam_hash,
+    const LIGHTMAP *lightmap
+);
+bool renderer_rebake_current_scene(
+    RENDERER *renderer,
+    const MESH *mesh,
     const GLTF_SCENE *visual,
-    const LIGHTMAP *lm,
+    const LIGHTMAP *lightmap,
     const struct LIGHT *light,
     const SKY *sky,
     const VOLUMETRICS_LIGHTING *volumetrics,
@@ -380,13 +416,10 @@ bool r_rebake_current_scene(
     uint64_t volume_hash,
     uint64_t beam_hash
 );
-void r_event(RENDERER *r, const SDL_Event *event);
-bool r_draw(RENDERER *r, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const PERIPHERAL_VISION *vision);
-void r_deinit(RENDERER *r);
 
-void bake_progress(RENDERER *r, const char *stage, Uint32 done, Uint32 total);
+void bake_progress(RENDERER *renderer, const char *stage, Uint32 done, Uint32 total);
 bool bake_start(
-    RENDERER *r,
+    RENDERER *renderer,
     const MESH *scene,
     const GLTF_SCENE *visual,
     const LIGHTMAP *layout,
@@ -399,9 +432,9 @@ bool bake_start(
     uint64_t volume_hash,
     uint64_t beam_hash
 );
-void bake_update(RENDERER *r);
-void bake_cancel(RENDERER *r);
-bool bake_active(RENDERER *r);
-void bake_update_title(RENDERER *r);
+void bake_update(RENDERER *renderer);
+void bake_cancel(RENDERER *renderer);
+bool bake_active(RENDERER *renderer);
+void bake_update_title(RENDERER *renderer);
 
 #endif
