@@ -1556,6 +1556,7 @@ float3 EvaluateSurfaceReflectedDirect(SurfaceHit hit) {
 }
 
 float3 SurfaceReflectedRadiance(SurfaceHit hit);
+float3 WorldIndirectReflected(SurfaceHit hit, bool stable_previous);
 
 // -----------------------------------------------------------------------------
 // Screen-space direct-radiance reuse.
@@ -1911,10 +1912,12 @@ void SurfaceCacheStore(SurfaceHit hit, float3 direct, float3 indirect, float con
 float3 SurfaceReflectedRadiance(SurfaceHit hit) {
     if (hit.identity.w == TRACE_MISS || hit.identity.y >= Radiance.scene_counts.y) return 0.0f;
     SurfaceCacheEntry entry;
-    if (SurfaceCacheLookup(hit, entry)) return entry.direct_radiance.rgb + entry.indirect_radiance.rgb;
-    float3 reflected = EvaluateSurfaceReflectedDirect(hit);
-    SurfaceCacheStore(hit, reflected, 0.0f, 1.0f);
-    return reflected;
+    float3 direct;
+    if (SurfaceCacheLookup(hit, entry)) direct = entry.direct_radiance.rgb;
+    else direct = EvaluateSurfaceReflectedDirect(hit);
+    float3 indirect = WorldIndirectReflected(hit, false);
+    SurfaceCacheStore(hit, direct, indirect, 1.0f);
+    return direct + indirect;
 }
 
 float3 SurfaceOutgoingRadiance(SurfaceHit hit) {
@@ -2021,50 +2024,111 @@ uint WorldProbeDirectionCount() {
     return s * s;
 }
 
-uint WorldProbeRadianceIndex(uint probe_index, uint2 texel) {
+uint WorldProbeRadianceIndex(uint probe_index, uint2 texel, uint bank) {
     uint s = max(Radiance.world_probe_config.x, 1u);
-    return probe_index * s * s + texel.x + s * texel.y;
+    uint direction = texel.x + s * texel.y;
+    uint bank_stride = Radiance.cache_counts.w * WorldProbeDirectionCount();
+    return bank * bank_stride + probe_index * WorldProbeDirectionCount() + direction;
 }
 
-uint WorldProbeKey(float3 position) {
-    float cell_size = max(Radiance.world_probe_params.x, 0.25f);
-    int3 cell = int3(floor(position / cell_size));
+uint WorldProbeCellKey(int3 cell) {
     uint h = HashCombine(asuint(cell.x), asuint(cell.y));
     h = HashCombine(h, asuint(cell.z));
     return h | 1u;
 }
 
-uint FindWorldProbe(float3 position) {
+uint WorldProbeKey(float3 position) {
+    float cell_size = max(Radiance.world_probe_params.x, 0.25f);
+    return WorldProbeCellKey(int3(floor(position / cell_size)));
+}
+
+uint FindWorldProbeInternal(float3 position, float3 normal, bool surface_filter) {
     uint count = Radiance.cache_counts.y;
     if (!FeatureEnabled(RADIANCE_FEATURE_WORLD_CACHE) || count == 0u) return INVALID_INDEX;
     uint table_capacity = max(Radiance.cache_counts.z, 1u);
-    uint key = WorldProbeKey(position);
     uint mask = table_capacity - 1u;
-    [unroll]
-    for (uint i = 0u; i < MAX_CACHE_PROBES; ++i) {
-        uint slot = (key + i) & mask;
-        uint encoded = WorldProbeKeys[slot];
-        if (encoded == 0u) return INVALID_INDEX;
-        uint index = encoded - 1u;
-        if (index < count) {
-            WorldProbeState state = WorldProbes[index];
-            if (state.identity.x == key && distance(state.position_radius.xyz, position) <= state.position_radius.w) return index;
+    float cell_size = max(Radiance.world_probe_params.x, 0.25f);
+    int3 base_cell = int3(floor(position / cell_size));
+    uint best_index = INVALID_INDEX;
+    float best_distance = 3.402823466e+38f;
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                uint key = WorldProbeCellKey(base_cell + int3(dx, dy, dz));
+                [unroll]
+                for (uint i = 0u; i < MAX_CACHE_PROBES; ++i) {
+                    uint slot = (key + i) & mask;
+                    uint encoded = WorldProbeKeys[slot];
+                    if (encoded == 0u) break;
+                    uint index = encoded - 1u;
+                    if (index >= count) continue;
+                    WorldProbeState state = WorldProbes[index];
+                    if (state.identity.x != key || (state.state.w & 1u) == 0u || state.state.y != Radiance.feature_flags.y) continue;
+                    if (surface_filter && dot(state.position_radius.xyz - position, normal) <= 1.0e-4f) continue;
+                    float d = distance(state.position_radius.xyz, position);
+                    if (d > state.position_radius.w || d >= best_distance) continue;
+                    best_distance = d;
+                    best_index = index;
+                }
+            }
         }
     }
-    return INVALID_INDEX;
+    return best_index;
 }
 
-float3 SampleWorldProbeDirectional(uint probe_index, float3 direction) {
+uint FindWorldProbe(float3 position) {
+    return FindWorldProbeInternal(position, 0.0f, false);
+}
+
+uint FindWorldProbeForSurface(float3 position, float3 normal) {
+    return FindWorldProbeInternal(position, normalize(normal), true);
+}
+
+uint WorldProbeReadBank(WorldProbeState state, bool stable_previous) {
+    uint bank = state.state.z & 1u;
+    if (stable_previous && state.state.x == Pass.dispatch.x) bank ^= 1u;
+    return bank;
+}
+
+float3 SampleWorldProbeDirectional(uint probe_index, float3 direction, bool stable_previous) {
     if (probe_index == INVALID_INDEX || probe_index >= Radiance.cache_counts.y) return 0.0f;
+    WorldProbeState state = WorldProbes[probe_index];
+    if ((state.state.w & 1u) == 0u || state.state.y != Radiance.feature_flags.y) return 0.0f;
     uint s = max(Radiance.world_probe_config.x, 1u);
     float2 uv = OctEncode(direction);
     uint2 texel = min((uint2)floor(uv * (float)s), uint2(s - 1u, s - 1u));
-    return WorldProbeRadiance[WorldProbeRadianceIndex(probe_index, texel)].rgb;
+    return WorldProbeRadiance[WorldProbeRadianceIndex(probe_index, texel, WorldProbeReadBank(state, stable_previous))].rgb;
+}
+
+float3 IntegrateWorldProbeDiffuse(float3 position, float3 normal, bool stable_previous) {
+    uint probe = FindWorldProbeForSurface(position, normal);
+    if (probe == INVALID_INDEX) return 0.0f;
+    WorldProbeState state = WorldProbes[probe];
+    uint bank = WorldProbeReadBank(state, stable_previous);
+    uint s = max(Radiance.world_probe_config.x, 1u);
+    float3 sum = 0.0f;
+    float weight_sum = 0.0f;
+    for (uint d = 0u; d < WorldProbeDirectionCount(); ++d) {
+        uint2 texel = uint2(d % s, d / s);
+        float3 direction = OctDecode((float2(texel) + 0.5f) / (float)s);
+        float weight = saturate(dot(normal, direction));
+        sum += WorldProbeRadiance[WorldProbeRadianceIndex(probe, texel, bank)].rgb * weight;
+        weight_sum += weight;
+    }
+    return weight_sum > 0.0f ? sum / weight_sum : 0.0f;
+}
+
+float3 WorldIndirectReflected(SurfaceHit hit, bool stable_previous) {
+    if (!FeatureEnabled(RADIANCE_FEATURE_MULTIBOUNCE) || hit.identity.y >= Radiance.scene_counts.y) return 0.0f;
+    GPUMaterial material = SceneMaterials[hit.identity.y];
+    float diffuse = saturate(1.0f - material.metallic);
+    float3 incoming = IntegrateWorldProbeDiffuse(hit.position_distance.xyz, normalize(hit.normal_confidence.xyz), stable_previous);
+    return material.base_color.rgb * diffuse * incoming;
 }
 
 float3 WorldRadianceFallback(float3 position, float3 direction) {
     uint probe = FindWorldProbe(position);
-    return probe == INVALID_INDEX ? 0.0f : SampleWorldProbeDirectional(probe, direction);
+    return probe == INVALID_INDEX ? 0.0f : SampleWorldProbeDirectional(probe, direction, false);
 }
 
 // -----------------------------------------------------------------------------
@@ -2136,7 +2200,7 @@ void CS_WavefrontScreenTrace(uint3 dispatch_id : SV_DispatchThreadID) {
     if (hit.identity.w == TRACE_SCREEN) {
         RaySurfaceHits[index] = hit;
         uint2 hit_pixel = UnpackPixel(hit.meta.z);
-        RayRadiance[index] = float4(ReflectedDirectAtPixel(hit_pixel), 1.0f);
+        RayRadiance[index] = float4(ReflectedDirectAtPixel(hit_pixel) + WorldIndirectReflected(hit, false), 1.0f);
         return;
     }
     uint out_index;
@@ -2365,26 +2429,42 @@ void CS_UpdateWorldRadianceCache(uint3 dispatch_id : SV_DispatchThreadID) {
     uint probe_index = RadianceUpdateList[update_index];
     if (probe_index >= Radiance.cache_counts.y) return;
     WorldProbeState state = WorldProbes[probe_index];
+    uint old_bank = state.state.z & 1u;
+    uint new_bank = old_bank ^ 1u;
+    bool established = (state.state.w & 1u) != 0u && state.state.y == Radiance.feature_flags.y;
     uint s = max(Radiance.world_probe_config.x, 1u);
-    uint dir_count = s * s;
-    for (uint d = 0u; d < dir_count; ++d) {
+    for (uint d = 0u; d < WorldProbeDirectionCount(); ++d) {
         uint2 texel = uint2(d % s, d / s);
         float3 direction = OctDecode((float2(texel) + 0.5f) / (float)s);
         float bias = max(Radiance.trace_params.y, 1.0e-3f);
         TraceRay ray = MakeTraceRay(state.position_radius.xyz, direction, bias, Radiance.trace_params.x, TRACE_RAY_WORLD_PROBE, d, uint2(0u, 0u), 0u);
         SurfaceHit hit = TraceUnifiedRay(ray, false);
-        float3 sample = hit.identity.w == TRACE_MISS ? FutureSkyRadiance(direction) : SurfaceOutgoingRadiance(hit);
-        uint address = WorldProbeRadianceIndex(probe_index, texel);
-        float3 old = WorldProbeRadiance[address].rgb;
-        float blend = saturate(Radiance.world_probe_params.y);
-        WorldProbeRadiance[address] = float4(lerp(old, sample, blend), 1.0f);
+        float3 sample = FutureSkyRadiance(direction);
+        if (hit.identity.w != TRACE_MISS && hit.identity.w != TRACE_INACTIVE && hit.identity.y < Radiance.scene_counts.y) {
+            GPUMaterial material = SceneMaterials[hit.identity.y];
+            float3 normal = normalize(hit.normal_confidence.xyz);
+            float3 reflected = EvaluateSurfaceReflectedDirect(hit);
+            uint seed = HashCombine(probe_index, HashCombine(d, Pass.dispatch.x));
+            float3 nee = EvaluateEmissiveSampleForMaterial(hit.position_distance.xyz, normal, hit.identity.x, hit.identity.y, seed);
+            reflected += material.base_color.rgb * saturate(1.0f - material.metallic) * nee;
+            reflected += WorldIndirectReflected(hit, true);
+            sample = material.emissive + reflected;
+        }
+        uint old_address = WorldProbeRadianceIndex(probe_index, texel, old_bank);
+        uint new_address = WorldProbeRadianceIndex(probe_index, texel, new_bank);
+        float3 old = WorldProbeRadiance[old_address].rgb;
+        float blend = established ? saturate(Radiance.world_probe_params.y) : 1.0f;
+        WorldProbeRadiance[new_address] = float4(lerp(old, sample, blend), 1.0f);
     }
-    state.statistics.x = max(state.statistics.x * Radiance.temporal_params.y, 0.0f);
-    state.statistics.y = 0.0f;
+    state.statistics.x = established ? saturate(state.statistics.x + 0.1f) : 1.0f;
+    state.statistics.z = established ? state.statistics.z + 1.0f : 1.0f;
     state.state.x = Pass.dispatch.x;
     state.state.y = Radiance.feature_flags.y;
+    state.state.z = new_bank;
+    state.state.w = 1u;
     WorldProbes[probe_index] = state;
 }
+
 
 [numthreads(64, 1, 1)]
 void CS_InvalidateRadiance(uint3 dispatch_id : SV_DispatchThreadID) {
@@ -2400,7 +2480,7 @@ void CS_InvalidateRadiance(uint3 dispatch_id : SV_DispatchThreadID) {
     } else if (kind == 1u && target < Radiance.cache_counts.y) {
         WorldProbeState state = WorldProbes[target];
         state.statistics.x *= confidence_scale;
-        state.state.z = 1u;
+        state.state.w |= 2u;
         WorldProbes[target] = state;
     }
 }
