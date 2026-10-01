@@ -9,12 +9,77 @@ permissions:
 
 jobs:
   stage7:
-    if: github.actor != 'github-actions[bot]'
+    if: github.actor != 'github-actions[bot]' && !startsWith(github.event.head_commit.message, 'remove stage7')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: radiance
           fetch-depth: 2
-      - name: Chapter 7 architecture test
-        run: python3 .github/stage7_temporal_test.py
+
+      - name: Apply chapter 7
+        run: python3 .github/stage7_apply.py
+
+      - name: GREEN - architecture test
+        run: |
+          set -euo pipefail
+          python3 .github/stage7_temporal_test.py
+          git diff --check
+
+      - name: Compile active shader entries
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 \
+            -o /tmp/slang.tar.gz \
+            https://github.com/shader-slang/slang/releases/download/v2026.18.3/slang-2026.18.3-linux-x86_64-glibc-2.27.tar.gz
+          mkdir -p /tmp/slang
+          tar -xzf /tmp/slang.tar.gz -C /tmp/slang
+          SLANGC="$(find /tmp/slang -type f -name slangc | head -n1)"
+          test -n "$SLANGC"
+          chmod +x "$SLANGC"
+          export LD_LIBRARY_PATH="$(dirname "$SLANGC")/../lib:${LD_LIBRARY_PATH:-}"
+          compile() {
+            entry="$1"; stage="$2"; out="/tmp/${entry}.spv"
+            "$SLANGC" shader.hlsl -entry "$entry" -stage "$stage" -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "$out"
+            test -s "$out"
+          }
+          compile VS_GBuffer vertex
+          compile PS_GBufferFull fragment
+          compile CS_HZB compute
+          compile CS_RadianceDirect compute
+          compile CS_ResetWavefront compute
+          compile CS_ClassifyRayBudgets compute
+          compile CS_GenerateProbeRays compute
+          compile CS_WavefrontScreenTrace compute
+          compile CS_WavefrontLocalTrace compute
+          compile CS_ShadeRayHits compute
+          compile CS_ReprojectScreenProbes compute
+          compile CS_SpatialReuseScreenProbes compute
+          compile CS_ResolveDirectionalProbes compute
+          compile CS_EmissiveGather compute
+          compile CS_CommitScreenProbeHistory compute
+          compile PS_Present fragment
+
+      - name: Syntax compile C sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/libsdl-org/SDL.git /tmp/SDL >/dev/null 2>&1
+          git clone --depth 1 https://github.com/NVIDIA-RTX/NRI.git /tmp/NRI >/dev/null 2>&1
+          FLAGS='-I. -I/tmp/SDL/include -I/tmp/NRI/Include -I/tmp/NRI/Include/Extensions'
+          for f in init.c glb.c gltf.c scene.c sdf.c gpu.c render.c main.c; do
+            echo "syntax $f"
+            clang -std=c11 -fsyntax-only $FLAGS "$f"
+          done
+
+      - name: Commit chapter 7
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add game.h render.c shader.hlsl build.c
+          git diff --cached --quiet && exit 0
+          git commit -m 's7 temporal spatial probe reuse'
+          git push origin HEAD:radiance
