@@ -32,6 +32,13 @@ def forbid_symbols(path: str, *names: str) -> None:
         raise AssertionError(f"{path}: forbidden symbols {present}")
 
 
+def body(source: str, pattern: str, name: str) -> str:
+    match = re.search(pattern, source, re.S)
+    if not match:
+        raise AssertionError(f"could not find {name}")
+    return match.group(1)
+
+
 def main() -> None:
     # User explicitly froze these two files for this restructuring pass.
     subprocess.run(
@@ -57,6 +64,7 @@ def main() -> None:
         "void renderer_deinit(RENDERER *renderer);",
     )
 
+    gpu_header = text("gpu.h")
     require(
         "gpu.h",
         "typedef struct GPU",
@@ -74,6 +82,36 @@ def main() -> None:
         "NriBuffer *upload_beams(",
         "bool download_lightmap(",
     )
+
+    gpu = body(gpu_header, r"typedef struct GPU\s*\{(.*?)\}\s*GPU;", "GPU")
+    renderer = body(gpu_header, r"struct RENDERER\s*\{(.*?)\n\};", "RENDERER")
+    low_level = (
+        "SDL_Window *window;",
+        "NriDevice *device;",
+        "NriCoreInterface core;",
+        "NriHelperInterface helper;",
+        "NriSwapChainInterface swapchain_api;",
+        "NriQueue *graphics_queue;",
+        "NriQueue *compute_queue;",
+        "NriQueue *copy_queue;",
+        "NriQueue *work_queue;",
+        "NriSwapChain *swapchain;",
+        "NriDescriptorPool *descriptor_pool;",
+        "NriFence *frame_fence;",
+        "NriFence *work_fence;",
+        "FRAME_CONTEXT *frame_contexts;",
+        "FRAME_CONTEXT *work_contexts;",
+        "NriTexture **swapchain_textures;",
+        "uint32_t swapchain_texture_count;",
+        "uint64_t frame_index;",
+        "NriFormat swapchain_format;",
+    )
+    missing_gpu = [field for field in low_level if field not in gpu]
+    leaked_renderer = [field for field in low_level if field in renderer]
+    if missing_gpu:
+        raise AssertionError(f"GPU missing low-level ownership: {missing_gpu}")
+    if leaked_renderer:
+        raise AssertionError(f"RENDERER still owns low-level GPU state: {leaked_renderer}")
 
     require(
         "render.c",
