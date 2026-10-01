@@ -5,12 +5,31 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def text(path: str) -> str:
+def text(path: str | Path) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
 def compact(source: str) -> str:
     return re.sub(r"\s+", "", source)
+
+
+def shader_source(path: str, seen: set[Path] | None = None) -> str:
+    source_path = (ROOT / path).resolve()
+    if seen is None:
+        seen = set()
+    if source_path in seen:
+        return ""
+    seen.add(source_path)
+
+    source = source_path.read_text(encoding="utf-8")
+    expanded = [source]
+    for include in re.findall(r'^\s*#\s*include\s+"([^"]+)"', source, re.M):
+        candidate = source_path.parent / include
+        if not candidate.is_file():
+            candidate = ROOT / include
+        if candidate.is_file():
+            expanded.append(shader_source(str(candidate.relative_to(ROOT)), seen))
+    return "\n".join(expanded)
 
 
 def main() -> None:
@@ -71,13 +90,13 @@ def main() -> None:
         raise AssertionError(f"expected 27 frozen shader jobs, found {len(jobs)}")
 
     for path, entry, define, fallback, stage, wave in jobs:
-        source = text(path)
+        source = shader_source(path)
         if not re.search(rf"\b{re.escape(entry)}\s*\(", source):
-            raise AssertionError(f"{path}: shader entry {entry} missing")
+            raise AssertionError(f"{path}: shader entry {entry} missing from source/include graph")
         if define not in source:
-            raise AssertionError(f"{path}: build define {define} missing")
+            raise AssertionError(f"{path}: build define {define} missing from source/include graph")
         if fallback != "NULL" and fallback.strip('"') not in source:
-            raise AssertionError(f"{path}: fallback define {fallback} missing")
+            raise AssertionError(f"{path}: fallback define {fallback} missing from source/include graph")
 
     game = text("game.h")
     for field in ("layout_hash", "volume_hash", "beam_hash", "object_probes", "volume_probes", "beams"):
