@@ -548,6 +548,7 @@ typedef struct WORLD_PROBE_CANDIDATE {
     uint32_t surface_id;
     uint32_t object_index;
     uint32_t revision;
+    uint64_t source_order;
 } WORLD_PROBE_CANDIDATE;
 
 static VEC3 cross3(VEC3 a, VEC3 b) {
@@ -602,6 +603,8 @@ static int world_candidate_compare(const void *lhs, const void *rhs) {
     if (a->clearance < b->clearance) return 1;
     if (a->surface_id < b->surface_id) return -1;
     if (a->surface_id > b->surface_id) return 1;
+    if (a->source_order < b->source_order) return -1;
+    if (a->source_order > b->source_order) return 1;
     return 0;
 }
 
@@ -664,6 +667,7 @@ bool sdf_build_world_probes(
     size_t candidate_capacity = 4096u, candidate_count = 0u;
     WORLD_PROBE_CANDIDATE *candidates = malloc(candidate_capacity * sizeof(*candidates));
     if (!candidates) goto fail;
+    uint64_t source_order = 0u;
     uint32_t level_count = global_sdf->clip_count < 2u ? global_sdf->clip_count : 2u;
     for (uint32_t level = 0u; level < level_count; ++level) {
         const GPU_GLOBAL_SDF_CLIPMAP *clip = &global_sdf->cpu_clipmaps[level];
@@ -727,6 +731,7 @@ bool sdf_build_world_probes(
                             accepted = true;
                         }
                         if (!accepted) continue;
+                        candidate.source_order = source_order++;
                         if (candidate_count == candidate_capacity) {
                             if (candidate_capacity > SIZE_MAX / 2u / sizeof(*candidates)) goto fail_candidates;
                             candidate_capacity *= 2u;

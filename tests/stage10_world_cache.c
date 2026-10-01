@@ -116,6 +116,16 @@ int main(void) {
     assert(na == nb);
     assert(memcmp(a, b, (size_t)na * sizeof(*a)) == 0);
     assert(memcmp(ka, kb, WORLD_PROBE_HASH_CAPACITY * sizeof(*ka)) == 0);
+    for (uint32_t repeat = 0u; repeat < 8u; ++repeat) {
+        memset(b, 0, WORLD_PROBE_CAPACITY * sizeof(*b));
+        memset(kb, 0, WORLD_PROBE_HASH_CAPACITY * sizeof(*kb));
+        nb = 0u;
+        assert(sdf_build_world_probes(&g, &scene, &object, 1u, b, WORLD_PROBE_CAPACITY, &nb, kb, WORLD_PROBE_HASH_CAPACITY,
+                                      WORLD_PROBE_SPACING, WORLD_PROBE_RADIUS, WORLD_PROBE_CLEARANCE, WORLD_PROBE_MIN_CLEARANCE));
+        assert(na == nb);
+        assert(memcmp(a, b, (size_t)na * sizeof(*a)) == 0);
+        assert(memcmp(ka, kb, WORLD_PROBE_HASH_CAPACITY * sizeof(*ka)) == 0);
+    }
 
     int saw_negative = 0;
     for (uint32_t i = 0u; i < na; ++i) {
