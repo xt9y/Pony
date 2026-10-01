@@ -2019,7 +2019,8 @@ void CS_WavefrontScreenTrace(uint3 dispatch_id : SV_DispatchThreadID) {
     RaySurfaceHits[index] = hit;
     if (hit.identity.w == TRACE_SCREEN) {
         RaySurfaceHits[index] = hit;
-        RayRadiance[index] = float4(SurfaceReflectedRadiance(hit), 1.0f);
+        uint2 hit_pixel = UnpackPixel(hit.meta.z);
+        RayRadiance[index] = float4(ReflectedDirectAtPixel(hit_pixel), 1.0f);
         return;
     }
     uint out_index;
@@ -2073,7 +2074,9 @@ void CS_ShadeRayHits(uint3 dispatch_id : SV_DispatchThreadID) {
     TraceRay ray = RayQueueA[index];
     SurfaceHit hit = RaySurfaceHits[index];
     float3 radiance;
-    if (hit.identity.w == TRACE_MISS || hit.identity.w == TRACE_INACTIVE) radiance = FutureSkyRadiance(ray.direction_tmax.xyz);
+    if (hit.identity.w == TRACE_SCREEN) radiance = RayRadiance[index].rgb;
+    else if (hit.identity.w == TRACE_MISS || hit.identity.w == TRACE_INACTIVE) radiance = FutureSkyRadiance(ray.direction_tmax.xyz);
+    else if (ray.type == TRACE_RAY_DIFFUSE) radiance = SurfaceReflectedRadiance(hit);
     else radiance = SurfaceOutgoingRadiance(hit);
     RayRadiance[index] = float4(radiance, 1.0f);
     uint packed_flags = RayFlags[index];
@@ -2109,9 +2112,12 @@ void CS_ResolveDirectionalProbes(uint3 dispatch_id : SV_DispatchThreadID) {
         return;
     }
     float3 irradiance = IntegrateProbeIrradiance(probe, state.normal_confidence.xyz);
-    float previous_luma = dot(ProbePreviousIrradiance.Load(int3(probe, 0)).rgb, float3(0.2126f, 0.7152f, 0.0722f));
-    float current_luma = dot(irradiance, float3(0.2126f, 0.7152f, 0.0722f));
-    float variance = abs(current_luma - previous_luma);
+    float variance = 0.0f;
+    if (FeatureEnabled(RADIANCE_FEATURE_TEMPORAL_PROBES)) {
+        float previous_luma = dot(ProbePreviousIrradiance.Load(int3(probe, 0)).rgb, float3(0.2126f, 0.7152f, 0.0722f));
+        float current_luma = dot(irradiance, float3(0.2126f, 0.7152f, 0.0722f));
+        variance = abs(current_luma - previous_luma);
+    }
     ProbeIrradiance[probe] = float4(irradiance, 1.0f);
     ProbeCurrentMeta[probe] = float4(state.normal_confidence.w, variance, 0.0f, (float)Radiance.feature_flags.y);
 }

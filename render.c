@@ -33,7 +33,6 @@ _Static_assert(sizeof(TRACE_HIT) == 32u, "TRACE_HIT GPU layout changed");
 _Static_assert(sizeof(TRACE_RAY) == 48u, "TRACE_RAY GPU layout changed");
 _Static_assert(sizeof(GPU_SDF_MODEL) == 128u, "GPU_SDF_MODEL GPU layout changed");
 _Static_assert(sizeof(GPU_LIGHT) == 64u, "GPU_LIGHT GPU layout changed");
-_Static_assert(sizeof(SURFACE_CACHE_ENTRY) == 112u, "SURFACE_CACHE_ENTRY GPU layout changed");
 
 static bool update_radiance_constants(RENDERER *renderer);
 static bool update_radiance_scene_descriptors(RENDERER *renderer);
@@ -294,32 +293,6 @@ static bool compile_present_shader(const char *define) {
     return length > 0 && (size_t)length < sizeof(command) && system(command) == 0;
 }
 
-static bool clear_surface_cache(RENDERER *renderer) {
-
-    SURFACE_CACHE *cache = &renderer->surface_cache;
-
-    if (!cache->keys || !cache->capacity) return false;
-
-    uint32_t *zero_keys = calloc(cache->capacity, sizeof(*zero_keys));
-
-    if (!zero_keys) return false;
-
-    const NriAccessStage storage = {
-        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
-        .stages = NriStageBits_COMPUTE_SHADER
-    };
-
-    const bool ok = gpu_upload_buffer(renderer->gpu, cache->keys, zero_keys, storage);
-
-    free(zero_keys);
-
-    if (!ok) return false;
-
-    cache->keys_state = storage;
-
-    return true;
-}
-
 static bool create_render_texture(RENDERER *renderer, RENDER_TEXTURE *target, NriFormat format, NriTextureUsageBits usage, NriTextureView attachment_type, NriPlaneBits planes) {
     memset(target, 0, sizeof(*target));
     target->format = format;
@@ -374,15 +347,16 @@ static void destroy_render_texture(RENDERER *renderer, RENDER_TEXTURE *target) {
     memset(target, 0, sizeof(*target));
 }
 
-static bool create_compute_texture(RENDERER *renderer, COMPUTE_TEXTURE *target, uint32_t width, uint32_t height) {
+static bool create_compute_texture(RENDERER *renderer, COMPUTE_TEXTURE *target, uint32_t width, uint32_t height, NriFormat format) {
     memset(target, 0, sizeof(*target));
     target->width = width;
     target->height = height;
+    target->format = format;
 
     const NriTextureDesc desc = {
         .type = NriTextureType_TEXTURE_2D,
         .usage = NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE,
-        .format = NriFormat_RGBA16_SFLOAT,
+        .format = format,
         .width = (NriDim_t)width,
         .height = (NriDim_t)height,
         .depth = 1,
@@ -396,7 +370,7 @@ static bool create_compute_texture(RENDERER *renderer, COMPUTE_TEXTURE *target, 
     const NriTextureViewDesc srv = {
         .texture = target->texture,
         .type = NriTextureView_TEXTURE,
-        .format = NriFormat_RGBA16_SFLOAT,
+        .format = format,
         .mipNum = 1,
         .layerNum = 1,
         .sliceNum = 1,
@@ -406,14 +380,15 @@ static bool create_compute_texture(RENDERER *renderer, COMPUTE_TEXTURE *target, 
     const NriTextureViewDesc uav = {
         .texture = target->texture,
         .type = NriTextureView_STORAGE_TEXTURE,
-        .format = NriFormat_RGBA16_SFLOAT,
+        .format = format,
         .mipNum = 1,
         .layerNum = 1,
         .sliceNum = 1,
         .planes = NriPlaneBits_COLOR
     };
 
-    if (renderer->gpu->core.CreateTextureView(&srv, &target->srv) != NriResult_SUCCESS || renderer->gpu->core.CreateTextureView(&uav, &target->uav) != NriResult_SUCCESS)
+    if (renderer->gpu->core.CreateTextureView(&srv, &target->srv) != NriResult_SUCCESS ||
+        renderer->gpu->core.CreateTextureView(&uav, &target->uav) != NriResult_SUCCESS)
         return false;
 
     return true;
@@ -440,130 +415,116 @@ static bool create_buffer_view(RENDERER *renderer, NriBuffer *buffer, NriBufferV
     return renderer->gpu->core.CreateBufferView(&view, descriptor) == NriResult_SUCCESS;
 }
 
-static void destroy_trace_buffer(RENDERER *renderer, TRACE_BUFFER *buffer) {
-    if (buffer->uav) renderer->gpu->core.DestroyDescriptor(buffer->uav);
-
-    if (buffer->srv) renderer->gpu->core.DestroyDescriptor(buffer->srv);
-
-    if (buffer->buffer) gpu_destroy_buffer(renderer->gpu, buffer->buffer);
-    memset(buffer, 0, sizeof(*buffer));
-}
-
-static bool create_trace_buffer(RENDERER *renderer, uint32_t capacity) {
-    destroy_trace_buffer(renderer, &renderer->trace_hits);
-    renderer->trace_hits.capacity = capacity;
-
-    const uint64_t size = (uint64_t)capacity * sizeof(TRACE_HIT);
-
+static bool create_storage_uav(
+    RENDERER *renderer,
+    uint64_t size,
+    uint32_t stride,
+    NriBufferUsageBits extra_usage,
+    NriBuffer **buffer,
+    NriDescriptor **uav
+) {
     const NriBufferDesc desc = {
         .size = size,
-        .structureStride = sizeof(TRACE_HIT),
-        .usage = NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE
+        .structureStride = stride,
+        .usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE | extra_usage
     };
-
-    if (!gpu_create_buffer(renderer->gpu, &desc, NriMemoryLocation_DEVICE, &renderer->trace_hits.buffer)) return false;
-
-    if (!create_buffer_view(renderer, renderer->trace_hits.buffer, NriBufferView_STRUCTURED_BUFFER, size, sizeof(TRACE_HIT), &renderer->trace_hits.srv)) return false;
-
-    if (!create_buffer_view(renderer, renderer->trace_hits.buffer, NriBufferView_STORAGE_STRUCTURED_BUFFER, size, sizeof(TRACE_HIT), &renderer->trace_hits.uav)) return false;
-
+    if (!gpu_create_buffer(renderer->gpu, &desc, NriMemoryLocation_DEVICE, buffer)) return false;
+    if (!create_buffer_view(renderer, *buffer, NriBufferView_STORAGE_STRUCTURED_BUFFER, size, stride, uav)) {
+        gpu_destroy_buffer(renderer->gpu, *buffer);
+        *buffer = NULL;
+        return false;
+    }
     return true;
 }
 
-static void destroy_trace_queue(RENDERER *renderer) {
-    TRACE_QUEUE *queue = &renderer->miss_queue;
-
-    if (queue->rays_uav) renderer->gpu->core.DestroyDescriptor(queue->rays_uav);
-
-    if (queue->count_uav) renderer->gpu->core.DestroyDescriptor(queue->count_uav);
-
-    if (queue->dispatch_args_uav) renderer->gpu->core.DestroyDescriptor(queue->dispatch_args_uav);
-
-    if (queue->rays) gpu_destroy_buffer(renderer->gpu, queue->rays);
-
-    if (queue->count) gpu_destroy_buffer(renderer->gpu, queue->count);
-
-    if (queue->dispatch_args) gpu_destroy_buffer(renderer->gpu, queue->dispatch_args);
-    memset(queue, 0, sizeof(*queue));
+static void destroy_storage_uav(RENDERER *renderer, NriBuffer **buffer, NriDescriptor **uav) {
+    if (*uav) renderer->gpu->core.DestroyDescriptor(*uav);
+    if (*buffer) gpu_destroy_buffer(renderer->gpu, *buffer);
+    *uav = NULL;
+    *buffer = NULL;
 }
 
-static bool create_trace_queue(RENDERER *renderer, uint32_t capacity) {
-    destroy_trace_queue(renderer);
+static void destroy_wavefront(RENDERER *renderer) {
+    RADIANCE_WAVEFRONT *w = &renderer->wavefront;
+    destroy_storage_uav(renderer, &w->queue_a, &w->queue_a_uav);
+    destroy_storage_uav(renderer, &w->queue_b, &w->queue_b_uav);
+    destroy_storage_uav(renderer, &w->surface_hits, &w->surface_hits_uav);
+    destroy_storage_uav(renderer, &w->counters, &w->counters_uav);
+    destroy_storage_uav(renderer, &w->dispatch_args, &w->dispatch_args_uav);
+    destroy_storage_uav(renderer, &w->budgets, &w->budgets_uav);
+    destroy_storage_uav(renderer, &w->update_list, &w->update_list_uav);
+    destroy_storage_uav(renderer, &w->radiance, &w->radiance_uav);
+    destroy_storage_uav(renderer, &w->flags, &w->flags_uav);
+    memset(w, 0, sizeof(*w));
+}
 
-    TRACE_QUEUE *queue = &renderer->miss_queue;
-    queue->capacity = capacity;
+static bool create_wavefront(RENDERER *renderer, uint32_t probe_capacity) {
+    destroy_wavefront(renderer);
+    RADIANCE_WAVEFRONT *w = &renderer->wavefront;
+    if (!probe_capacity || probe_capacity > UINT32_MAX / SCREEN_PROBE_DIRECTION_COUNT) return false;
+    w->probe_capacity = probe_capacity;
+    w->ray_capacity = probe_capacity * SCREEN_PROBE_DIRECTION_COUNT;
 
-    const NriBufferDesc rays_desc = {
-        .size = (uint64_t)capacity * sizeof(TRACE_RAY),
-        .structureStride = sizeof(TRACE_RAY),
-        .usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE
-    };
-
-    const NriBufferDesc count_desc = {
-        .size = sizeof(uint32_t),
-        .structureStride = sizeof(uint32_t),
-        .usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE
-    };
-
-    const NriBufferDesc args_desc = {
-        .size = 3u * sizeof(uint32_t),
-        .structureStride = sizeof(uint32_t),
-        .usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE | NriBufferUsageBits_ARGUMENT
-    };
-
-    if (!gpu_create_buffer(renderer->gpu, &rays_desc, NriMemoryLocation_DEVICE, &queue->rays) ||
-        !gpu_create_buffer(renderer->gpu, &count_desc, NriMemoryLocation_DEVICE, &queue->count) ||
-        !gpu_create_buffer(renderer->gpu, &args_desc, NriMemoryLocation_DEVICE, &queue->dispatch_args))
+    if (!create_storage_uav(renderer, (uint64_t)w->ray_capacity * sizeof(TRACE_RAY), sizeof(TRACE_RAY), 0, &w->queue_a, &w->queue_a_uav) ||
+        !create_storage_uav(renderer, (uint64_t)w->ray_capacity * sizeof(TRACE_RAY), sizeof(TRACE_RAY), 0, &w->queue_b, &w->queue_b_uav) ||
+        !create_storage_uav(renderer, (uint64_t)w->ray_capacity * sizeof(SURFACE_HIT), sizeof(SURFACE_HIT), 0, &w->surface_hits, &w->surface_hits_uav) ||
+        !create_storage_uav(renderer, 4u * sizeof(uint32_t), sizeof(uint32_t), 0, &w->counters, &w->counters_uav) ||
+        !create_storage_uav(renderer, 3u * sizeof(uint32_t), sizeof(uint32_t), NriBufferUsageBits_ARGUMENT, &w->dispatch_args, &w->dispatch_args_uav) ||
+        !create_storage_uav(renderer, (uint64_t)probe_capacity * sizeof(RAY_BUDGET), sizeof(RAY_BUDGET), 0, &w->budgets, &w->budgets_uav) ||
+        !create_storage_uav(renderer, (uint64_t)probe_capacity * sizeof(uint32_t), sizeof(uint32_t), 0, &w->update_list, &w->update_list_uav) ||
+        !create_storage_uav(renderer, (uint64_t)w->ray_capacity * 4u * sizeof(float), 4u * sizeof(float), 0, &w->radiance, &w->radiance_uav) ||
+        !create_storage_uav(renderer, (uint64_t)w->ray_capacity * sizeof(uint32_t), sizeof(uint32_t), 0, &w->flags, &w->flags_uav)) {
+        destroy_wavefront(renderer);
         return false;
-
-    if (!create_buffer_view(renderer, queue->rays, NriBufferView_STORAGE_STRUCTURED_BUFFER, rays_desc.size, sizeof(TRACE_RAY), &queue->rays_uav) ||
-        !create_buffer_view(renderer, queue->count, NriBufferView_STORAGE_STRUCTURED_BUFFER, count_desc.size, sizeof(uint32_t), &queue->count_uav) ||
-        !create_buffer_view(renderer, queue->dispatch_args, NriBufferView_STORAGE_STRUCTURED_BUFFER, args_desc.size, sizeof(uint32_t), &queue->dispatch_args_uav))
-        return false;
-
+    }
     return true;
 }
 
-static void destroy_surface_cache(RENDERER *renderer) {
-    SURFACE_CACHE *cache = &renderer->surface_cache;
-
-    if (cache->keys_uav) renderer->gpu->core.DestroyDescriptor(cache->keys_uav);
-
-    if (cache->entries_uav) renderer->gpu->core.DestroyDescriptor(cache->entries_uav);
-
-    if (cache->keys) gpu_destroy_buffer(renderer->gpu, cache->keys);
-
-    if (cache->entries) gpu_destroy_buffer(renderer->gpu, cache->entries);
-    memset(cache, 0, sizeof(*cache));
+static void destroy_world_radiance_resources(RENDERER *renderer) {
+    RADIANCE_WORLD_RESOURCES *w = &renderer->world_radiance;
+    destroy_storage_uav(renderer, &w->probes, &w->probes_uav);
+    destroy_storage_uav(renderer, &w->radiance, &w->radiance_uav);
+    destroy_storage_uav(renderer, &w->keys, &w->keys_uav);
+    destroy_storage_uav(renderer, &w->invalidation_queue, &w->invalidation_queue_uav);
+    memset(w, 0, sizeof(*w));
 }
 
-static bool create_surface_cache(RENDERER *renderer) {
-    destroy_surface_cache(renderer);
-
-    SURFACE_CACHE *cache = &renderer->surface_cache;
-    cache->capacity = SURFACE_CACHE_CAPACITY;
-
-    const NriBufferDesc keys_desc = {
-        .size = (uint64_t)cache->capacity * sizeof(uint32_t),
-        .structureStride = sizeof(uint32_t),
-        .usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE
-    };
-
-    const NriBufferDesc entries_desc = {
-        .size = (uint64_t)cache->capacity * sizeof(SURFACE_CACHE_ENTRY),
-        .structureStride = sizeof(SURFACE_CACHE_ENTRY),
-        .usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE
-    };
-
-    if (!gpu_create_buffer(renderer->gpu, &keys_desc, NriMemoryLocation_DEVICE, &cache->keys) ||
-        !gpu_create_buffer(renderer->gpu, &entries_desc, NriMemoryLocation_DEVICE, &cache->entries))
+static bool create_world_radiance_resources(RENDERER *renderer) {
+    destroy_world_radiance_resources(renderer);
+    RADIANCE_WORLD_RESOURCES *w = &renderer->world_radiance;
+    if (!create_storage_uav(renderer, sizeof(WORLD_PROBE_STATE), sizeof(WORLD_PROBE_STATE), 0, &w->probes, &w->probes_uav) ||
+        !create_storage_uav(renderer, 4u * sizeof(float), 4u * sizeof(float), 0, &w->radiance, &w->radiance_uav) ||
+        !create_storage_uav(renderer, sizeof(uint32_t), sizeof(uint32_t), 0, &w->keys, &w->keys_uav) ||
+        !create_storage_uav(renderer, sizeof(uint32_t), sizeof(uint32_t), 0, &w->invalidation_queue, &w->invalidation_queue_uav)) {
+        destroy_world_radiance_resources(renderer);
         return false;
+    }
+    return true;
+}
 
-    if (!create_buffer_view(renderer, cache->keys, NriBufferView_STORAGE_STRUCTURED_BUFFER, keys_desc.size, sizeof(uint32_t), &cache->keys_uav) ||
-        !create_buffer_view(renderer, cache->entries, NriBufferView_STORAGE_STRUCTURED_BUFFER, entries_desc.size, sizeof(SURFACE_CACHE_ENTRY), &cache->entries_uav))
-        return false;
+static void destroy_radiance_probes(RENDERER *renderer) {
+    RADIANCE_PROBES *p = &renderer->probes;
+    destroy_compute_texture(renderer, &p->current_radiance);
+    destroy_compute_texture(renderer, &p->current_meta);
+    destroy_compute_texture(renderer, &p->history_radiance);
+    destroy_compute_texture(renderer, &p->history_meta);
+    destroy_compute_texture(renderer, &p->previous_irradiance);
+    destroy_compute_texture(renderer, &p->history_depth);
+    destroy_compute_texture(renderer, &p->history_normal);
+}
 
-    return clear_surface_cache(renderer);
+static bool create_radiance_probes(RENDERER *renderer, uint32_t probe_width, uint32_t probe_height) {
+    destroy_radiance_probes(renderer);
+    const uint32_t atlas_width = probe_width * SCREEN_PROBE_DIRECTION_SIZE;
+    const uint32_t atlas_height = probe_height * SCREEN_PROBE_DIRECTION_SIZE;
+    RADIANCE_PROBES *p = &renderer->probes;
+    return create_compute_texture(renderer, &p->current_radiance, atlas_width, atlas_height, NriFormat_RGBA16_SFLOAT) &&
+           create_compute_texture(renderer, &p->current_meta, probe_width, probe_height, NriFormat_RGBA16_SFLOAT) &&
+           create_compute_texture(renderer, &p->history_radiance, atlas_width, atlas_height, NriFormat_RGBA16_SFLOAT) &&
+           create_compute_texture(renderer, &p->history_meta, probe_width, probe_height, NriFormat_RGBA16_SFLOAT) &&
+           create_compute_texture(renderer, &p->previous_irradiance, probe_width, probe_height, NriFormat_RGBA16_SFLOAT) &&
+           create_compute_texture(renderer, &p->history_depth, probe_width, probe_height, NriFormat_R32_SFLOAT) &&
+           create_compute_texture(renderer, &p->history_normal, probe_width, probe_height, NriFormat_RGBA16_SFLOAT);
 }
 
 static bool clear_radiance_surface_cache(RENDERER *renderer) {
@@ -1816,8 +1777,9 @@ static bool update_radiance_constants(RENDERER *renderer) {
     constants.feature_flags[0] = RADIANCE_FEATURE_SURFACE_CACHE;
     if (renderer->radiance_scene.emissive_triangle_count) constants.feature_flags[0] |= RADIANCE_FEATURE_EMISSIVE;
     constants.feature_flags[1] = 1u;
-    constants.feature_flags[2] = RADIANCE_DEBUG_FINAL_GI;
+    constants.feature_flags[2] = renderer->wavefront.ray_capacity;
     constants.feature_flags[3] = 0u;
+    constants.reserved[0] = RADIANCE_DEBUG_FINAL_GI;
     constants.global_sdf_params[2] = 1.0e-4f;
 
     renderer->radiance_constants = constants;
@@ -1943,60 +1905,15 @@ static bool create_pipeline_layouts(RENDERER *renderer) {
     if (renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &hzb_layout, &renderer->hzb_layout) != NriResult_SUCCESS) return false;
 
     const NriDescriptorRangeDesc trace_ranges[] = {
-        {
-            .baseRegisterIndex = 0,
-            .descriptorNum = 7,
-            .descriptorType = NriDescriptorType_TEXTURE,
-            .shaderStages = NriStageBits_COMPUTE_SHADER
-        },
-        {
-            .baseRegisterIndex = 7,
-            .descriptorNum = 1,
-            .descriptorType = NriDescriptorType_CONSTANT_BUFFER,
-            .shaderStages = NriStageBits_COMPUTE_SHADER
-        },
-        {
-            .baseRegisterIndex = 8,
-            .descriptorNum = 1,
-            .descriptorType = NriDescriptorType_STORAGE_TEXTURE,
-            .shaderStages = NriStageBits_COMPUTE_SHADER
-        },
-        {
-            .baseRegisterIndex = 9,
-            .descriptorNum = 4,
-            .descriptorType = NriDescriptorType_STORAGE_STRUCTURED_BUFFER,
-            .shaderStages = NriStageBits_COMPUTE_SHADER
-        },
-        {
-            .baseRegisterIndex = 13,
-            .descriptorNum = 3,
-            .descriptorType = NriDescriptorType_STRUCTURED_BUFFER,
-            .shaderStages = NriStageBits_COMPUTE_SHADER
-        },
-        {
-            .baseRegisterIndex = 16,
-            .descriptorNum = 1,
-            .descriptorType = NriDescriptorType_STORAGE_TEXTURE,
-            .shaderStages = NriStageBits_COMPUTE_SHADER
-        },
-        {
-            .baseRegisterIndex = 17,
-            .descriptorNum = 2,
-            .descriptorType = NriDescriptorType_STORAGE_STRUCTURED_BUFFER,
-            .shaderStages = NriStageBits_COMPUTE_SHADER
-        },
-        {
-            .baseRegisterIndex = 19,
-            .descriptorNum = 2,
-            .descriptorType = NriDescriptorType_STORAGE_TEXTURE,
-            .shaderStages = NriStageBits_COMPUTE_SHADER
-        }
+        {.baseRegisterIndex = 0, .descriptorNum = 7, .descriptorType = NriDescriptorType_TEXTURE, .shaderStages = NriStageBits_COMPUTE_SHADER},
+        {.baseRegisterIndex = 7, .descriptorNum = 1, .descriptorType = NriDescriptorType_CONSTANT_BUFFER, .shaderStages = NriStageBits_COMPUTE_SHADER},
+        {.baseRegisterIndex = 16, .descriptorNum = 1, .descriptorType = NriDescriptorType_STORAGE_TEXTURE, .shaderStages = NriStageBits_COMPUTE_SHADER}
     };
 
     const NriDescriptorSetDesc trace_set = {
         .registerSpace = 3,
         .ranges = trace_ranges,
-        .rangeNum = 8
+        .rangeNum = 3
     };
 
     const NriPipelineLayoutDesc trace_layout = {
@@ -2024,72 +1941,67 @@ static bool create_pipeline_layouts(RENDERER *renderer) {
         .rangeNum = sizeof(radiance_scene_ranges) / sizeof(radiance_scene_ranges[0])
     };
 
-    const NriPipelineLayoutDesc radiance_scene_layout = {
-        .descriptorSets = &radiance_scene_set,
-        .descriptorSetNum = 1,
-        .shaderStages = radiance_stages,
-        .flags = NriPipelineLayoutBits_IGNORE_GLOBAL_SPIRV_OFFSETS
+    const NriDescriptorRangeDesc wavefront_trace_ranges[] = {
+        {.baseRegisterIndex = 0, .descriptorNum = 7, .descriptorType = NriDescriptorType_TEXTURE, .shaderStages = NriStageBits_COMPUTE_SHADER},
+        {.baseRegisterIndex = 7, .descriptorNum = 1, .descriptorType = NriDescriptorType_CONSTANT_BUFFER, .shaderStages = NriStageBits_COMPUTE_SHADER}
+    };
+    const NriDescriptorSetDesc wavefront_trace_set = {
+        .registerSpace = 3,
+        .ranges = wavefront_trace_ranges,
+        .rangeNum = 2
     };
 
-    if (renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &radiance_scene_layout, &renderer->radiance_scene_layout) != NriResult_SUCCESS) return false;
-
-    const NriDescriptorRangeDesc radiance_direct_cache_range = {
-        .baseRegisterIndex = 0,
-        .descriptorNum = 2,
+    const NriDescriptorRangeDesc wavefront_queue_range = {
+        .baseRegisterIndex = 0, .descriptorNum = 9,
         .descriptorType = NriDescriptorType_STORAGE_STRUCTURED_BUFFER,
         .shaderStages = NriStageBits_COMPUTE_SHADER
     };
-
-    const NriDescriptorSetDesc radiance_direct_cache_set = {
-        .registerSpace = 6,
-        .ranges = &radiance_direct_cache_range,
-        .rangeNum = 1
+    const NriDescriptorSetDesc wavefront_queue_set = {
+        .registerSpace = 5, .ranges = &wavefront_queue_range, .rangeNum = 1
     };
 
-    const NriDescriptorSetDesc radiance_direct_sets[] = {trace_set, radiance_scene_set, radiance_direct_cache_set};
-
-    const NriPipelineLayoutDesc radiance_direct_layout = {
-        .descriptorSets = radiance_direct_sets,
-        .descriptorSetNum = 3,
-        .shaderStages = NriStageBits_COMPUTE_SHADER,
-        .flags = NriPipelineLayoutBits_IGNORE_GLOBAL_SPIRV_OFFSETS
-    };
-
-    if (renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &radiance_direct_layout, &renderer->radiance_direct_layout) != NriResult_SUCCESS) return false;
-
-    const NriDescriptorRangeDesc emissive_probe_range = {
-        .baseRegisterIndex = 7,
-        .descriptorNum = 1,
-        .descriptorType = NriDescriptorType_STORAGE_TEXTURE,
+    const NriDescriptorRangeDesc wavefront_cache_range = {
+        .baseRegisterIndex = 0, .descriptorNum = 6,
+        .descriptorType = NriDescriptorType_STORAGE_STRUCTURED_BUFFER,
         .shaderStages = NriStageBits_COMPUTE_SHADER
     };
-
-    const NriDescriptorSetDesc emissive_probe_set = {
-        .registerSpace = 7,
-        .ranges = &emissive_probe_range,
-        .rangeNum = 1
+    const NriDescriptorSetDesc wavefront_cache_set = {
+        .registerSpace = 6, .ranges = &wavefront_cache_range, .rangeNum = 1
     };
 
-    const NriDescriptorSetDesc emissive_sets[] = {trace_set, radiance_scene_set, emissive_probe_set};
+    const NriDescriptorRangeDesc wavefront_probe_ranges[] = {
+        {.baseRegisterIndex = 0, .descriptorNum = 5, .descriptorType = NriDescriptorType_TEXTURE, .shaderStages = NriStageBits_COMPUTE_SHADER},
+        {.baseRegisterIndex = 5, .descriptorNum = 3, .descriptorType = NriDescriptorType_STORAGE_TEXTURE, .shaderStages = NriStageBits_COMPUTE_SHADER}
+    };
+    const NriDescriptorSetDesc wavefront_probe_set = {
+        .registerSpace = 7, .ranges = wavefront_probe_ranges, .rangeNum = 2
+    };
 
-    const NriPipelineLayoutDesc emissive_layout = {
-        .descriptorSets = emissive_sets,
-        .descriptorSetNum = 3,
+    const NriDescriptorSetDesc wavefront_sets[] = {
+        wavefront_trace_set,
+        radiance_scene_set,
+        wavefront_queue_set,
+        wavefront_cache_set,
+        wavefront_probe_set
+    };
+    const NriPipelineLayoutDesc wavefront_layout = {
+        .descriptorSets = wavefront_sets,
+        .descriptorSetNum = 5,
         .shaderStages = NriStageBits_COMPUTE_SHADER,
         .flags = NriPipelineLayoutBits_IGNORE_GLOBAL_SPIRV_OFFSETS
     };
 
-    return renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &emissive_layout, &renderer->emissive_layout) == NriResult_SUCCESS;
+    return renderer->gpu->core.CreatePipelineLayout(renderer->gpu->device, &wavefront_layout, &renderer->wavefront_layout) == NriResult_SUCCESS;
 }
 
 static bool create_descriptor_pool(RENDERER *renderer) {
     const NriDescriptorPoolDesc desc = {
-        .descriptorSetMaxNum = 10 + HZB_MAX_MIPS,
+        .descriptorSetMaxNum = 8 + HZB_MAX_MIPS,
         .constantBufferMaxNum = 12,
-        .textureMaxNum = 80,
+        .textureMaxNum = 96,
         .storageTextureMaxNum = HZB_MAX_MIPS + 16,
         .structuredBufferMaxNum = 64,
-        .storageStructuredBufferMaxNum = 24
+        .storageStructuredBufferMaxNum = 32
     };
 
     if (renderer->gpu->core.CreateDescriptorPool(renderer->gpu->device, &desc, &renderer->descriptor_pool) != NriResult_SUCCESS) return false;
@@ -2098,13 +2010,11 @@ static bool create_descriptor_pool(RENDERER *renderer) {
            renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->present_layout, 0, &renderer->present_set, 1, 0) == NriResult_SUCCESS &&
            renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->hzb_layout, 0, renderer->hzb_sets, HZB_MAX_MIPS, 0) == NriResult_SUCCESS &&
            renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->trace_layout, 0, &renderer->trace_set, 1, 0) == NriResult_SUCCESS &&
-           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->radiance_scene_layout, 0, &renderer->radiance_scene_set, 1, 0) == NriResult_SUCCESS &&
-           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->radiance_direct_layout, 0, &renderer->radiance_direct_trace_set, 1, 0) == NriResult_SUCCESS &&
-           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->radiance_direct_layout, 1, &renderer->radiance_direct_scene_set, 1, 0) == NriResult_SUCCESS &&
-           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->radiance_direct_layout, 2, &renderer->radiance_direct_cache_set, 1, 0) == NriResult_SUCCESS &&
-           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->emissive_layout, 0, &renderer->emissive_trace_set, 1, 0) == NriResult_SUCCESS &&
-           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->emissive_layout, 1, &renderer->emissive_scene_set, 1, 0) == NriResult_SUCCESS &&
-           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->emissive_layout, 2, &renderer->emissive_probe_set, 1, 0) == NriResult_SUCCESS;
+           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->wavefront_layout, 0, &renderer->wavefront_trace_set, 1, 0) == NriResult_SUCCESS &&
+           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->wavefront_layout, 1, &renderer->wavefront_scene_set, 1, 0) == NriResult_SUCCESS &&
+           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->wavefront_layout, 2, &renderer->wavefront_queue_set, 1, 0) == NriResult_SUCCESS &&
+           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->wavefront_layout, 3, &renderer->wavefront_cache_set, 1, 0) == NriResult_SUCCESS &&
+           renderer->gpu->core.AllocateDescriptorSets(renderer->descriptor_pool, renderer->wavefront_layout, 4, &renderer->wavefront_probe_set, 1, 0) == NriResult_SUCCESS;
 }
 
 static bool create_compute_pipeline(RENDERER *renderer, const char *path, NriPipelineLayout *layout, NriPipeline **pipeline) {
@@ -2341,14 +2251,14 @@ static bool create_pipelines(RENDERER *renderer) {
 
     return create_compute_pipeline(renderer, "build/shaders/hzb.cs.spv", renderer->hzb_layout, &renderer->hzb_pipeline) &&
            create_compute_pipeline(renderer, "build/shaders/radiance_direct.cs.spv", renderer->trace_layout, &renderer->direct_radiance_pipeline) &&
-           create_compute_pipeline(renderer, "build/shaders/surface_cache.cs.spv", renderer->trace_layout, &renderer->surface_cache_pipeline) &&
-           create_compute_pipeline(renderer, "build/shaders/screen_trace.cs.spv", renderer->trace_layout, &renderer->screen_trace_pipeline) &&
-           create_compute_pipeline(renderer, "build/shaders/trace_reset.cs.spv", renderer->trace_layout, &renderer->trace_reset_pipeline) &&
-           create_compute_pipeline(renderer, "build/shaders/trace_compact.cs.spv", renderer->trace_layout, &renderer->trace_compact_pipeline) &&
-           create_compute_pipeline(renderer, "build/shaders/trace_args.cs.spv", renderer->trace_layout, &renderer->trace_args_pipeline) &&
-           create_compute_pipeline(renderer, "build/shaders/sdf_trace.cs.spv", renderer->radiance_direct_layout, &renderer->sdf_trace_pipeline) &&
-           create_compute_pipeline(renderer, "build/shaders/screen_probes.cs.spv", renderer->trace_layout, &renderer->screen_probes_pipeline) &&
-           create_compute_pipeline(renderer, "build/shaders/radiance_emissive.cs.spv", renderer->emissive_layout, &renderer->emissive_pipeline);
+           create_compute_pipeline(renderer, "build/shaders/radiance_wave_reset.cs.spv", renderer->wavefront_layout, &renderer->wavefront_reset_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_budget.cs.spv", renderer->wavefront_layout, &renderer->wavefront_budget_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_generate.cs.spv", renderer->wavefront_layout, &renderer->wavefront_generate_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_screen.cs.spv", renderer->wavefront_layout, &renderer->wavefront_screen_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_local.cs.spv", renderer->wavefront_layout, &renderer->wavefront_local_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_shade.cs.spv", renderer->wavefront_layout, &renderer->wavefront_shade_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_probe_resolve.cs.spv", renderer->wavefront_layout, &renderer->wavefront_resolve_pipeline) &&
+           create_compute_pipeline(renderer, "build/shaders/radiance_emissive.cs.spv", renderer->wavefront_layout, &renderer->emissive_pipeline);
 }
 
 static void update_gbuffer_descriptors(RENDERER *renderer) {
@@ -2437,170 +2347,133 @@ static void update_present_descriptors(RENDERER *renderer) {
     renderer->gpu->core.UpdateDescriptorRanges(&update, 1);
 }
 
-static bool update_trace_descriptor_set(RENDERER *renderer, NriDescriptorSet *descriptor_set) {
-    if (!descriptor_set || !renderer->depth.srv || !renderer->normal_roughness.srv || !renderer->albedo_metallic.srv || !renderer->emissive.srv || !renderer->hzb.srv ||
-        !renderer->object_id.srv || !renderer->direct_radiance.srv || !renderer->frame_srv || !renderer->screen_trace.uav || !renderer->trace_hits.uav ||
-        !renderer->miss_queue.rays_uav || !renderer->miss_queue.count_uav || !renderer->miss_queue.dispatch_args_uav || !renderer->sdf.models_srv || !renderer->sdf.voxels_srv ||
-        !renderer->light_srv || !renderer->direct_radiance.uav || !renderer->surface_cache.keys_uav || !renderer->surface_cache.entries_uav || !renderer->screen_probes.uav ||
-        !renderer->screen_probe_radiance.uav) {
+static bool update_trace_descriptors(RENDERER *renderer) {
+    if (!renderer->trace_set || !renderer->depth.srv || !renderer->normal_roughness.srv || !renderer->albedo_metallic.srv || !renderer->emissive.srv ||
+        !renderer->hzb.srv || !renderer->object_id.srv || !renderer->direct_radiance.srv || !renderer->frame_srv || !renderer->direct_radiance.uav)
         return false;
-    }
 
     const NriDescriptor *textures[] = {
-        renderer->depth.srv,
-        renderer->normal_roughness.srv,
-        renderer->albedo_metallic.srv,
-        renderer->emissive.srv,
-        renderer->hzb.srv,
-        renderer->object_id.srv,
-        renderer->direct_radiance.srv
+        renderer->depth.srv, renderer->normal_roughness.srv, renderer->albedo_metallic.srv,
+        renderer->emissive.srv, renderer->hzb.srv, renderer->object_id.srv, renderer->direct_radiance.srv
     };
-
     const NriDescriptor *frame[] = {renderer->frame_srv};
-    const NriDescriptor *screen_output[] = {renderer->screen_trace.uav};
-    const NriDescriptor *trace_storage[] = {renderer->trace_hits.uav, renderer->miss_queue.rays_uav, renderer->miss_queue.count_uav, renderer->miss_queue.dispatch_args_uav};
-    const NriDescriptor *scene[] = {renderer->sdf.models_srv, renderer->sdf.voxels_srv, renderer->light_srv};
-    const NriDescriptor *radiance_output[] = {renderer->direct_radiance.uav};
-    const NriDescriptor *cache[] = {renderer->surface_cache.keys_uav, renderer->surface_cache.entries_uav};
-    const NriDescriptor *probes[] = {renderer->screen_probe_radiance.uav, renderer->screen_probes.uav};
-
+    const NriDescriptor *output[] = {renderer->direct_radiance.uav};
     const NriUpdateDescriptorRangeDesc updates[] = {
-        {.descriptorSet = descriptor_set, .rangeIndex = 0, .descriptors = textures, .descriptorNum = 7},
-        {.descriptorSet = descriptor_set, .rangeIndex = 1, .descriptors = frame, .descriptorNum = 1},
-        {.descriptorSet = descriptor_set, .rangeIndex = 2, .descriptors = screen_output, .descriptorNum = 1},
-        {.descriptorSet = descriptor_set, .rangeIndex = 3, .descriptors = trace_storage, .descriptorNum = 4},
-        {.descriptorSet = descriptor_set, .rangeIndex = 4, .descriptors = scene, .descriptorNum = 3},
-        {.descriptorSet = descriptor_set, .rangeIndex = 5, .descriptors = radiance_output, .descriptorNum = 1},
-        {.descriptorSet = descriptor_set, .rangeIndex = 6, .descriptors = cache, .descriptorNum = 2},
-        {.descriptorSet = descriptor_set, .rangeIndex = 7, .descriptors = probes, .descriptorNum = 2}
+        {.descriptorSet = renderer->trace_set, .rangeIndex = 0, .descriptors = textures, .descriptorNum = 7},
+        {.descriptorSet = renderer->trace_set, .rangeIndex = 1, .descriptors = frame, .descriptorNum = 1},
+        {.descriptorSet = renderer->trace_set, .rangeIndex = 2, .descriptors = output, .descriptorNum = 1}
     };
-
-    renderer->gpu->core.UpdateDescriptorRanges(updates, sizeof(updates) / sizeof(updates[0]));
+    renderer->gpu->core.UpdateDescriptorRanges(updates, 3);
     return true;
 }
 
-static void update_trace_descriptors(RENDERER *renderer) {
-    if (renderer->trace_set) update_trace_descriptor_set(renderer, renderer->trace_set);
-    if (renderer->radiance_direct_trace_set) update_trace_descriptor_set(renderer, renderer->radiance_direct_trace_set);
-    if (renderer->emissive_trace_set) update_trace_descriptor_set(renderer, renderer->emissive_trace_set);
-}
-
-static bool update_radiance_scene_descriptor_set(RENDERER *renderer, NriDescriptorSet *descriptor_set) {
-    if (!renderer || !descriptor_set || !renderer->radiance_constants_srv || !renderer->pass_constants_srv || !renderer->object_srv || !renderer->material_srv ||
-        !renderer->radiance_scene.triangles_srv || !renderer->radiance_scene.emissive_triangles_srv || !renderer->sdf.models_srv || !renderer->sdf.voxels_srv ||
-        !renderer->sdf.surface_ids_srv || !renderer->radiance_fallbacks.dynamic_grid_cells_srv || !renderer->radiance_fallbacks.dynamic_grid_indices_srv ||
-        !renderer->radiance_fallbacks.global_sdf_clipmaps_srv || !renderer->radiance_fallbacks.global_sdf_page_table_srv || !renderer->radiance_fallbacks.global_sdf_bricks_srv ||
-        !renderer->radiance_fallbacks.global_sdf_surface_ids_srv || !renderer->light_srv || !renderer->material_id.srv || !renderer->primitive_id.srv) {
+static bool update_wavefront_trace_descriptors(RENDERER *renderer) {
+    if (!renderer->wavefront_trace_set || !renderer->depth.srv || !renderer->normal_roughness.srv || !renderer->albedo_metallic.srv || !renderer->emissive.srv ||
+        !renderer->hzb.srv || !renderer->object_id.srv || !renderer->direct_radiance.srv || !renderer->frame_srv)
         return false;
-    }
-
-    const NriDescriptor *constants[] = {renderer->radiance_constants_srv, renderer->pass_constants_srv};
-    const NriDescriptor *scene_core[] = {
-        renderer->object_srv,
-        renderer->material_srv,
-        renderer->radiance_scene.triangles_srv,
-        renderer->radiance_scene.emissive_triangles_srv,
-        renderer->sdf.models_srv,
-        renderer->sdf.voxels_srv
+    const NriDescriptor *textures[] = {
+        renderer->depth.srv, renderer->normal_roughness.srv, renderer->albedo_metallic.srv,
+        renderer->emissive.srv, renderer->hzb.srv, renderer->object_id.srv, renderer->direct_radiance.srv
     };
-    const NriDescriptor *future_scene[] = {
-        renderer->sdf.surface_ids_srv,
-        renderer->radiance_fallbacks.dynamic_grid_cells_srv,
-        renderer->radiance_fallbacks.dynamic_grid_indices_srv,
-        renderer->radiance_fallbacks.global_sdf_clipmaps_srv,
-        renderer->radiance_fallbacks.global_sdf_page_table_srv,
-        renderer->radiance_fallbacks.global_sdf_bricks_srv,
-        renderer->radiance_fallbacks.global_sdf_surface_ids_srv
-    };
-    const NriDescriptor *lights[] = {renderer->light_srv};
-    const NriDescriptor *identity_textures[] = {renderer->material_id.srv, renderer->primitive_id.srv};
-
+    const NriDescriptor *frame[] = {renderer->frame_srv};
     const NriUpdateDescriptorRangeDesc updates[] = {
-        {.descriptorSet = descriptor_set, .rangeIndex = 0, .descriptors = constants, .descriptorNum = 2},
-        {.descriptorSet = descriptor_set, .rangeIndex = 1, .descriptors = scene_core, .descriptorNum = 6},
-        {.descriptorSet = descriptor_set, .rangeIndex = 2, .descriptors = future_scene, .descriptorNum = 7},
-        {.descriptorSet = descriptor_set, .rangeIndex = 3, .descriptors = lights, .descriptorNum = 1},
-        {.descriptorSet = descriptor_set, .rangeIndex = 4, .descriptors = identity_textures, .descriptorNum = 2}
+        {.descriptorSet = renderer->wavefront_trace_set, .rangeIndex = 0, .descriptors = textures, .descriptorNum = 7},
+        {.descriptorSet = renderer->wavefront_trace_set, .rangeIndex = 1, .descriptors = frame, .descriptorNum = 1}
     };
-
-    renderer->gpu->core.UpdateDescriptorRanges(updates, sizeof(updates) / sizeof(updates[0]));
+    renderer->gpu->core.UpdateDescriptorRanges(updates, 2);
     return true;
 }
 
 static bool update_radiance_scene_descriptors(RENDERER *renderer) {
-    if (!update_radiance_scene_descriptor_set(renderer, renderer->radiance_scene_set)) return false;
-    if (renderer->radiance_direct_scene_set && !update_radiance_scene_descriptor_set(renderer, renderer->radiance_direct_scene_set)) return false;
-    if (renderer->emissive_scene_set && !update_radiance_scene_descriptor_set(renderer, renderer->emissive_scene_set)) return false;
+    if (!renderer || !renderer->wavefront_scene_set || !renderer->radiance_constants_srv || !renderer->pass_constants_srv || !renderer->object_srv || !renderer->material_srv ||
+        !renderer->radiance_scene.triangles_srv || !renderer->radiance_scene.emissive_triangles_srv || !renderer->sdf.models_srv || !renderer->sdf.voxels_srv ||
+        !renderer->sdf.surface_ids_srv || !renderer->radiance_fallbacks.dynamic_grid_cells_srv || !renderer->radiance_fallbacks.dynamic_grid_indices_srv ||
+        !renderer->radiance_fallbacks.global_sdf_clipmaps_srv || !renderer->radiance_fallbacks.global_sdf_page_table_srv || !renderer->radiance_fallbacks.global_sdf_bricks_srv ||
+        !renderer->radiance_fallbacks.global_sdf_surface_ids_srv || !renderer->light_srv || !renderer->material_id.srv || !renderer->primitive_id.srv)
+        return false;
+
+    const NriDescriptor *constants[] = {renderer->radiance_constants_srv, renderer->pass_constants_srv};
+    const NriDescriptor *scene_core[] = {
+        renderer->object_srv, renderer->material_srv, renderer->radiance_scene.triangles_srv,
+        renderer->radiance_scene.emissive_triangles_srv, renderer->sdf.models_srv, renderer->sdf.voxels_srv
+    };
+    const NriDescriptor *future_scene[] = {
+        renderer->sdf.surface_ids_srv, renderer->radiance_fallbacks.dynamic_grid_cells_srv,
+        renderer->radiance_fallbacks.dynamic_grid_indices_srv, renderer->radiance_fallbacks.global_sdf_clipmaps_srv,
+        renderer->radiance_fallbacks.global_sdf_page_table_srv, renderer->radiance_fallbacks.global_sdf_bricks_srv,
+        renderer->radiance_fallbacks.global_sdf_surface_ids_srv
+    };
+    const NriDescriptor *lights[] = {renderer->light_srv};
+    const NriDescriptor *identity[] = {renderer->material_id.srv, renderer->primitive_id.srv};
+    const NriUpdateDescriptorRangeDesc updates[] = {
+        {.descriptorSet = renderer->wavefront_scene_set, .rangeIndex = 0, .descriptors = constants, .descriptorNum = 2},
+        {.descriptorSet = renderer->wavefront_scene_set, .rangeIndex = 1, .descriptors = scene_core, .descriptorNum = 6},
+        {.descriptorSet = renderer->wavefront_scene_set, .rangeIndex = 2, .descriptors = future_scene, .descriptorNum = 7},
+        {.descriptorSet = renderer->wavefront_scene_set, .rangeIndex = 3, .descriptors = lights, .descriptorNum = 1},
+        {.descriptorSet = renderer->wavefront_scene_set, .rangeIndex = 4, .descriptors = identity, .descriptorNum = 2}
+    };
+    renderer->gpu->core.UpdateDescriptorRanges(updates, 5);
     return true;
 }
 
-static bool update_radiance_direct_cache_descriptors(RENDERER *renderer) {
-    if (!renderer || !renderer->radiance_direct_cache_set || !renderer->radiance_surface_cache.keys_uav || !renderer->radiance_surface_cache.entries_uav) return false;
+static bool update_wavefront_descriptors(RENDERER *renderer) {
+    RADIANCE_WAVEFRONT *w = &renderer->wavefront;
+    RADIANCE_WORLD_RESOURCES *world = &renderer->world_radiance;
+    RADIANCE_PROBES *p = &renderer->probes;
+    if (!update_wavefront_trace_descriptors(renderer)) return false;
 
-    const NriDescriptor *descriptors[] = {renderer->radiance_surface_cache.keys_uav, renderer->radiance_surface_cache.entries_uav};
-    const NriUpdateDescriptorRangeDesc update = {
-        .descriptorSet = renderer->radiance_direct_cache_set,
-        .rangeIndex = 0,
-        .descriptors = descriptors,
-        .descriptorNum = 2
+    const NriDescriptor *queues[] = {
+        w->queue_a_uav, w->queue_b_uav, w->surface_hits_uav, w->counters_uav, w->dispatch_args_uav,
+        w->budgets_uav, w->update_list_uav, w->radiance_uav, w->flags_uav
     };
-
-    renderer->gpu->core.UpdateDescriptorRanges(&update, 1);
-    return true;
-}
-
-static bool update_emissive_probe_descriptors(RENDERER *renderer) {
-    if (!renderer || !renderer->emissive_probe_set || !renderer->screen_probes.uav) return false;
-
-    const NriDescriptor *probe[] = {renderer->screen_probes.uav};
-    const NriUpdateDescriptorRangeDesc update = {
-        .descriptorSet = renderer->emissive_probe_set,
-        .rangeIndex = 0,
-        .descriptors = probe,
-        .descriptorNum = 1
+    const NriDescriptor *cache[] = {
+        renderer->radiance_surface_cache.keys_uav, renderer->radiance_surface_cache.entries_uav,
+        world->probes_uav, world->radiance_uav, world->keys_uav, world->invalidation_queue_uav
     };
+    const NriDescriptor *history[] = {
+        p->history_radiance.srv, p->history_meta.srv, p->previous_irradiance.srv,
+        p->history_depth.srv, p->history_normal.srv
+    };
+    const NriDescriptor *current[] = {p->current_radiance.uav, p->current_meta.uav, renderer->screen_probes.uav};
+    for (uint32_t i = 0; i < 9; ++i) if (!queues[i]) return false;
+    for (uint32_t i = 0; i < 6; ++i) if (!cache[i]) return false;
+    for (uint32_t i = 0; i < 5; ++i) if (!history[i]) return false;
+    for (uint32_t i = 0; i < 3; ++i) if (!current[i]) return false;
 
-    renderer->gpu->core.UpdateDescriptorRanges(&update, 1);
+    const NriUpdateDescriptorRangeDesc updates[] = {
+        {.descriptorSet = renderer->wavefront_queue_set, .rangeIndex = 0, .descriptors = queues, .descriptorNum = 9},
+        {.descriptorSet = renderer->wavefront_cache_set, .rangeIndex = 0, .descriptors = cache, .descriptorNum = 6},
+        {.descriptorSet = renderer->wavefront_probe_set, .rangeIndex = 0, .descriptors = history, .descriptorNum = 5},
+        {.descriptorSet = renderer->wavefront_probe_set, .rangeIndex = 1, .descriptors = current, .descriptorNum = 3}
+    };
+    renderer->gpu->core.UpdateDescriptorRanges(updates, 4);
     return true;
 }
 
 static bool create_size_dependent_resources(RENDERER *renderer, uint32_t width, uint32_t height) {
     destroy_compute_texture(renderer, &renderer->direct_radiance);
-    destroy_compute_texture(renderer, &renderer->screen_probe_radiance);
     destroy_compute_texture(renderer, &renderer->screen_probes);
+    destroy_radiance_probes(renderer);
+    destroy_wavefront(renderer);
 
     const uint32_t probe_width = (width + SCREEN_PROBE_TILE_SIZE - 1u) / SCREEN_PROBE_TILE_SIZE;
-
     const uint32_t probe_height = (height + SCREEN_PROBE_TILE_SIZE - 1u) / SCREEN_PROBE_TILE_SIZE;
+    const uint32_t probe_count = probe_width * probe_height;
+    const uint32_t atlas_width = probe_width * SCREEN_PROBE_DIRECTION_SIZE;
+    const uint32_t atlas_height = probe_height * SCREEN_PROBE_DIRECTION_SIZE;
 
-    const uint32_t ray_width = probe_width * SCREEN_PROBE_DIRECTION_SIZE;
-
-    const uint32_t ray_height = probe_height * SCREEN_PROBE_DIRECTION_SIZE;
-
-    const uint32_t ray_count = ray_width * ray_height;
-
-    if (!create_gbuffer(renderer, width, height) || !create_hzb(renderer, width, height) || !create_screen_trace(renderer, ray_width, ray_height) ||
-
-        /* full-resolution direct lighting */
-        !create_compute_texture(renderer, &renderer->direct_radiance, width, height) ||
-
-        /* 4x4 storage slots per 8x8 probe; only 8 rays are active */
-        !create_compute_texture(renderer, &renderer->screen_probe_radiance, ray_width, ray_height) ||
-
-        /* one resolved value per screen probe */
-        !create_compute_texture(renderer, &renderer->screen_probes, probe_width, probe_height) ||
-
-        !create_trace_buffer(renderer, ray_count) || !create_trace_queue(renderer, ray_count)) {
+    if (!create_gbuffer(renderer, width, height) || !create_hzb(renderer, width, height) ||
+        !create_screen_trace(renderer, atlas_width, atlas_height) ||
+        !create_compute_texture(renderer, &renderer->direct_radiance, width, height, NriFormat_RGBA16_SFLOAT) ||
+        !create_compute_texture(renderer, &renderer->screen_probes, probe_width, probe_height, NriFormat_RGBA16_SFLOAT) ||
+        !create_radiance_probes(renderer, probe_width, probe_height) ||
+        !create_wavefront(renderer, probe_count))
         return false;
-    }
 
     update_hzb_descriptors(renderer);
     update_present_descriptors(renderer);
-    update_trace_descriptors(renderer);
-
-    if (!update_emissive_probe_descriptors(renderer)) return false;
+    if (!update_trace_descriptors(renderer) || !update_wavefront_descriptors(renderer)) return false;
     if (renderer->radiance_scene.triangles_srv && !update_radiance_scene_descriptors(renderer)) return false;
-
     return true;
 }
 
@@ -3062,16 +2935,16 @@ static void bind_trace(RENDERER *renderer, NriCommandBuffer *command_buffer, Nri
     renderer->gpu->core.CmdSetDescriptorSet(command_buffer, &set);
 }
 
-static void bind_radiance_world(RENDERER *renderer, NriCommandBuffer *command_buffer, NriPipeline *pipeline) {
-    renderer->gpu->core.CmdSetPipelineLayout(command_buffer, NriBindPoint_COMPUTE, renderer->radiance_direct_layout);
+static void bind_wavefront(RENDERER *renderer, NriCommandBuffer *command_buffer, NriPipeline *pipeline) {
+    renderer->gpu->core.CmdSetPipelineLayout(command_buffer, NriBindPoint_COMPUTE, renderer->wavefront_layout);
     renderer->gpu->core.CmdSetPipeline(command_buffer, pipeline);
-
     const NriSetDescriptorSetDesc sets[] = {
-        {.setIndex = 0, .descriptorSet = renderer->radiance_direct_trace_set, .bindPoint = NriBindPoint_COMPUTE},
-        {.setIndex = 1, .descriptorSet = renderer->radiance_direct_scene_set, .bindPoint = NriBindPoint_COMPUTE},
-        {.setIndex = 2, .descriptorSet = renderer->radiance_direct_cache_set, .bindPoint = NriBindPoint_COMPUTE}
+        {.setIndex = 0, .descriptorSet = renderer->wavefront_trace_set, .bindPoint = NriBindPoint_COMPUTE},
+        {.setIndex = 1, .descriptorSet = renderer->wavefront_scene_set, .bindPoint = NriBindPoint_COMPUTE},
+        {.setIndex = 2, .descriptorSet = renderer->wavefront_queue_set, .bindPoint = NriBindPoint_COMPUTE},
+        {.setIndex = 3, .descriptorSet = renderer->wavefront_cache_set, .bindPoint = NriBindPoint_COMPUTE},
+        {.setIndex = 4, .descriptorSet = renderer->wavefront_probe_set, .bindPoint = NriBindPoint_COMPUTE}
     };
-
     for (uint32_t i = 0; i < sizeof(sets) / sizeof(sets[0]); ++i)
         renderer->gpu->core.CmdSetDescriptorSet(command_buffer, &sets[i]);
 }
@@ -3194,422 +3067,190 @@ static void build_direct_radiance(RENDERER *renderer, NriCommandBuffer *command_
     renderer->direct_radiance.state = read;
 }
 
-static void build_surface_cache(RENDERER *renderer, NriCommandBuffer *command_buffer) {
+static void barrier_wavefront_buffers(RENDERER *renderer, NriCommandBuffer *command_buffer, NriAccessStage state) {
+    RADIANCE_WAVEFRONT *w = &renderer->wavefront;
+    NriBufferBarrierDesc barriers[] = {
+        {.buffer = w->queue_a, .before = w->state, .after = state},
+        {.buffer = w->queue_b, .before = w->state, .after = state},
+        {.buffer = w->surface_hits, .before = w->state, .after = state},
+        {.buffer = w->counters, .before = w->state, .after = state},
+        {.buffer = w->dispatch_args, .before = w->state, .after = state},
+        {.buffer = w->budgets, .before = w->state, .after = state},
+        {.buffer = w->update_list, .before = w->state, .after = state},
+        {.buffer = w->radiance, .before = w->state, .after = state},
+        {.buffer = w->flags, .before = w->state, .after = state}
+    };
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.buffers = barriers, .bufferNum = 9});
+    w->state = state;
+}
+
+static void build_wavefront_screen_probes(RENDERER *renderer, NriCommandBuffer *command_buffer) {
     const NriAccessStage storage = {
         .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
         .stages = NriStageBits_COMPUTE_SHADER
     };
-
-    const NriBufferBarrierDesc barriers[] = {
-        {
-            .buffer = renderer->surface_cache.keys,
-            .before = renderer->surface_cache.keys_state,
-            .after = storage
-        },
-        {
-            .buffer = renderer->surface_cache.entries,
-            .before = renderer->surface_cache.entries_state,
-            .after = storage
-        }
-    };
-
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .buffers = barriers,
-        .bufferNum = 2
-    });
-    renderer->surface_cache.keys_state = storage;
-    renderer->surface_cache.entries_state = storage;
-    bind_trace(renderer, command_buffer, renderer->surface_cache_pipeline);
-    renderer->gpu->core.CmdDispatch(
-        command_buffer, &(NriDispatchDesc){
-            .workGroupNumX = (renderer->width + 7u) / 8u,
-            .workGroupNumY = (renderer->height + 7u) / 8u,
-            .workGroupNumZ = 1
-        }
-    );
-}
-
-static void build_screen_trace(RENDERER *renderer, NriCommandBuffer *command_buffer) {
-    const NriAccessLayoutStage texture_write = {
-        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
-        .layout = NriLayout_SHADER_RESOURCE_STORAGE,
-        .stages = NriStageBits_COMPUTE_SHADER
-    };
-
-    const NriAccessStage buffer_write = {
-        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
-        .stages = NriStageBits_COMPUTE_SHADER
-    };
-
-    const NriTextureBarrierDesc texture_barriers[] = {
-        {
-            .texture = renderer->screen_trace.texture,
-            .before = renderer->screen_trace.state,
-            .after = texture_write,
-            .mipNum = 1,
-            .layerNum = 1,
-            .planes = NriPlaneBits_COLOR
-        },
-        {
-            .texture = renderer->screen_probe_radiance.texture,
-            .before = renderer->screen_probe_radiance.state,
-            .after = texture_write,
-            .mipNum = 1,
-            .layerNum = 1,
-            .planes = NriPlaneBits_COLOR
-        }
-    };
-
-    const NriBufferBarrierDesc buffer_barrier = {
-        .buffer = renderer->trace_hits.buffer,
-        .before = renderer->trace_hits.state,
-        .after = buffer_write
-    };
-
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .textures = texture_barriers,
-        .textureNum = 2,
-        .buffers = &buffer_barrier,
-        .bufferNum = 1
-    });
-
-    renderer->screen_trace.state = texture_write;
-    renderer->screen_probe_radiance.state = texture_write;
-    renderer->trace_hits.state = buffer_write;
-
-    bind_trace(renderer, command_buffer, renderer->screen_trace_pipeline);
-    renderer->gpu->core.CmdDispatch(
-        command_buffer,
-        &(NriDispatchDesc){
-            .workGroupNumX = (renderer->screen_probe_radiance.width + 7u) / 8u,
-            .workGroupNumY = (renderer->screen_probe_radiance.height + 7u) / 8u,
-            .workGroupNumZ = 1
-        }
-    );
-}
-
-static void build_miss_queue(RENDERER *renderer, NriCommandBuffer *command_buffer) {
-    const NriAccessStage storage = {
-        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
-        .stages = NriStageBits_COMPUTE_SHADER
-    };
-
-    const NriBufferBarrierDesc to_storage[] = {
-        {
-            .buffer = renderer->miss_queue.rays,
-            .before = renderer->miss_queue.rays_state,
-            .after = storage
-        },
-        {
-            .buffer = renderer->miss_queue.count,
-            .before = renderer->miss_queue.count_state,
-            .after = storage
-        },
-        {
-            .buffer = renderer->miss_queue.dispatch_args,
-            .before = renderer->miss_queue.dispatch_args_state,
-            .after = storage
-        },
-        {
-            .buffer = renderer->trace_hits.buffer,
-            .before = renderer->trace_hits.state,
-            .after = storage
-        }
-    };
-
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .buffers = to_storage,
-        .bufferNum = 4
-    });
-    renderer->miss_queue.rays_state = storage;
-    renderer->miss_queue.count_state = storage;
-    renderer->miss_queue.dispatch_args_state = storage;
-    renderer->trace_hits.state = storage;
-
-    bind_trace(renderer, command_buffer, renderer->trace_reset_pipeline);
-    renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){
-        .workGroupNumX = 1,
-        .workGroupNumY = 1,
-        .workGroupNumZ = 1
-    });
-    const NriBufferBarrierDesc sync_reset[] = {
-        {
-            .buffer = renderer->miss_queue.count,
-            .before = storage,
-            .after = storage
-        }, {
-            .buffer = renderer->miss_queue.dispatch_args,
-            .before = storage,
-            .after = storage
-        }
-    };
-
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .buffers = sync_reset,
-        .bufferNum = 2
-    });
-
-    bind_trace(renderer, command_buffer, renderer->trace_compact_pipeline);
-    renderer->gpu->core.CmdDispatch(
-        command_buffer,
-        &(NriDispatchDesc){
-            .workGroupNumX = (renderer->screen_probe_radiance.width + 7u) / 8u,
-            .workGroupNumY = (renderer->screen_probe_radiance.height + 7u) / 8u,
-            .workGroupNumZ = 1
-        }
-    );
-    const NriBufferBarrierDesc sync_compact[] = {
-        {
-            .buffer = renderer->miss_queue.count,
-            .before = storage,
-            .after = storage
-        }, {
-            .buffer = renderer->miss_queue.rays,
-            .before = storage,
-            .after = storage
-        }
-    };
-
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .buffers = sync_compact,
-        .bufferNum = 2
-    });
-
-    bind_trace(renderer, command_buffer, renderer->trace_args_pipeline);
-    renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){
-        .workGroupNumX = 1,
-        .workGroupNumY = 1,
-        .workGroupNumZ = 1
-    });
-    const NriAccessStage argument = {
-        .access = NriAccessBits_ARGUMENT_BUFFER,
-        .stages = NriStageBits_INDIRECT
-    };
-
-    const NriBufferBarrierDesc args_barrier = {
-        .buffer = renderer->miss_queue.dispatch_args,
-        .before = storage,
-        .after = argument
-    };
-
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .buffers = &args_barrier,
-        .bufferNum = 1
-    });
-    renderer->miss_queue.dispatch_args_state = argument;
-}
-
-static void build_sdf_trace(RENDERER *renderer, NriCommandBuffer *command_buffer) {
-    const NriAccessStage storage = {
-        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
-        .stages = NriStageBits_COMPUTE_SHADER
-    };
-
+    const NriAccessStage cache_storage = storage;
     const NriAccessLayoutStage texture_storage = {
         .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
         .layout = NriLayout_SHADER_RESOURCE_STORAGE,
+        .stages = NriStageBits_COMPUTE_SHADER | NriStageBits_CLEAR_STORAGE
+    };
+    const NriAccessLayoutStage history_read = {
+        .access = NriAccessBits_SHADER_RESOURCE,
+        .layout = NriLayout_SHADER_RESOURCE,
         .stages = NriStageBits_COMPUTE_SHADER
     };
 
-    const NriBufferBarrierDesc cache_sync[] = {
-        {
-            .buffer = renderer->radiance_surface_cache.keys,
-            .before = renderer->radiance_surface_cache.keys_state,
-            .after = storage
-        },
-        {
-            .buffer = renderer->radiance_surface_cache.entries,
-            .before = renderer->radiance_surface_cache.entries_state,
-            .after = storage
-        }
+    RADIANCE_PROBES *p = &renderer->probes;
+    NriTextureBarrierDesc output_barriers[] = {
+        {.texture = p->current_radiance.texture, .before = p->current_radiance.state, .after = texture_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = p->current_meta.texture, .before = p->current_meta.state, .after = texture_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = renderer->screen_probes.texture, .before = renderer->screen_probes.state, .after = texture_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR}
     };
-
-    const NriTextureBarrierDesc probe_sync = {
-        .texture = renderer->screen_probe_radiance.texture,
-        .before = renderer->screen_probe_radiance.state,
-        .after = texture_storage,
-        .mipNum = 1,
-        .layerNum = 1,
-        .planes = NriPlaneBits_COLOR
+    NriTextureBarrierDesc history_barriers[] = {
+        {.texture = p->history_radiance.texture, .before = p->history_radiance.state, .after = history_read, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = p->history_meta.texture, .before = p->history_meta.state, .after = history_read, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = p->previous_irradiance.texture, .before = p->previous_irradiance.state, .after = history_read, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = p->history_depth.texture, .before = p->history_depth.state, .after = history_read, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = p->history_normal.texture, .before = p->history_normal.state, .after = history_read, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR}
     };
-
     renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .buffers = cache_sync,
-        .bufferNum = 2,
-        .textures = &probe_sync,
-        .textureNum = 1
+        .textures = output_barriers, .textureNum = 3
     });
-
-    renderer->screen_probe_radiance.state = texture_storage;
-    renderer->radiance_surface_cache.keys_state = storage;
-    renderer->radiance_surface_cache.entries_state = storage;
-
-    bind_radiance_world(renderer, command_buffer, renderer->sdf_trace_pipeline);
-    renderer->gpu->core.CmdDispatchIndirect(command_buffer, renderer->miss_queue.dispatch_args, 0u);
-}
-
-static void finish_screen_trace(RENDERER *renderer, NriCommandBuffer *command_buffer) {
-    const NriAccessLayoutStage read = {
-        .access = NriAccessBits_SHADER_RESOURCE,
-        .layout = NriLayout_SHADER_RESOURCE,
-        .stages = NriStageBits_FRAGMENT_SHADER
-    };
-
-    const NriTextureBarrierDesc barrier = {
-        .texture = renderer->screen_trace.texture,
-        .before = renderer->screen_trace.state,
-        .after = read,
-        .mipNum = 1,
-        .layerNum = 1,
-        .planes = NriPlaneBits_COLOR
-    };
-
     renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .textures = &barrier,
-        .textureNum = 1
+        .textures = history_barriers, .textureNum = 5
     });
-    renderer->screen_trace.state = read;
-}
+    p->current_radiance.state = texture_storage;
+    p->current_meta.state = texture_storage;
+    renderer->screen_probes.state = texture_storage;
+    p->history_radiance.state = history_read;
+    p->history_meta.state = history_read;
+    p->previous_irradiance.state = history_read;
+    p->history_depth.state = history_read;
+    p->history_normal.state = history_read;
 
-static void build_screen_probes(RENDERER *renderer, NriCommandBuffer *command_buffer) {
+    barrier_wavefront_buffers(renderer, command_buffer, storage);
 
-    const NriAccessLayoutStage storage = {
+    NriBufferBarrierDesc cache_barriers[] = {
+        {.buffer = renderer->radiance_surface_cache.keys, .before = renderer->radiance_surface_cache.keys_state, .after = cache_storage},
+        {.buffer = renderer->radiance_surface_cache.entries, .before = renderer->radiance_surface_cache.entries_state, .after = cache_storage},
+        {.buffer = renderer->world_radiance.probes, .before = renderer->world_radiance.state, .after = cache_storage},
+        {.buffer = renderer->world_radiance.radiance, .before = renderer->world_radiance.state, .after = cache_storage},
+        {.buffer = renderer->world_radiance.keys, .before = renderer->world_radiance.state, .after = cache_storage},
+        {.buffer = renderer->world_radiance.invalidation_queue, .before = renderer->world_radiance.state, .after = cache_storage}
+    };
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.buffers = cache_barriers, .bufferNum = 6});
+    renderer->radiance_surface_cache.keys_state = cache_storage;
+    renderer->radiance_surface_cache.entries_state = cache_storage;
+    renderer->world_radiance.state = cache_storage;
+
+    bind_wavefront(renderer, command_buffer, renderer->wavefront_reset_pipeline);
+    const NriClearStorageDesc zero_current = {
+        .descriptor = p->current_radiance.uav,
+        .value = {.f = {.x = 0.0f, .y = 0.0f, .z = 0.0f, .w = 0.0f}},
+        .setIndex = 4
+    };
+    const NriClearStorageDesc zero_meta = {
+        .descriptor = p->current_meta.uav,
+        .value = {.f = {.x = 0.0f, .y = 0.0f, .z = 0.0f, .w = 0.0f}},
+        .setIndex = 4
+    };
+    const NriClearStorageDesc zero_irradiance = {
+        .descriptor = renderer->screen_probes.uav,
+        .value = {.f = {.x = 0.0f, .y = 0.0f, .z = 0.0f, .w = 0.0f}},
+        .setIndex = 4
+    };
+    renderer->gpu->core.CmdClearStorage(command_buffer, &zero_current);
+    renderer->gpu->core.CmdClearStorage(command_buffer, &zero_meta);
+    renderer->gpu->core.CmdClearStorage(command_buffer, &zero_irradiance);
+
+    const NriAccessLayoutStage compute_storage = {
         .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
         .layout = NriLayout_SHADER_RESOURCE_STORAGE,
         .stages = NriStageBits_COMPUTE_SHADER
     };
-
-    const NriTextureBarrierDesc barriers[] = {
-        {
-            .texture = renderer->screen_probe_radiance.texture,
-            .before = renderer->screen_probe_radiance.state,
-            .after = storage,
-            .mipNum = 1,
-            .layerNum = 1,
-            .planes = NriPlaneBits_COLOR
-        },
-        {
-            .texture = renderer->screen_probes.texture,
-            .before = renderer->screen_probes.state,
-            .after = storage,
-            .mipNum = 1,
-            .layerNum = 1,
-            .planes = NriPlaneBits_COLOR
-        }
+    NriTextureBarrierDesc clear_sync[] = {
+        {.texture = p->current_radiance.texture, .before = texture_storage, .after = compute_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = p->current_meta.texture, .before = texture_storage, .after = compute_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR},
+        {.texture = renderer->screen_probes.texture, .before = texture_storage, .after = compute_storage, .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR}
     };
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = clear_sync, .textureNum = 3});
+    p->current_radiance.state = compute_storage;
+    p->current_meta.state = compute_storage;
+    renderer->screen_probes.state = compute_storage;
 
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .textures = barriers,
-        .textureNum = 2
+    renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){.workGroupNumX = 1, .workGroupNumY = 1, .workGroupNumZ = 1});
+    barrier_wavefront_buffers(renderer, command_buffer, storage);
+
+    bind_wavefront(renderer, command_buffer, renderer->wavefront_budget_pipeline);
+    renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){
+        .workGroupNumX = (renderer->screen_probes.width + 7u) / 8u,
+        .workGroupNumY = (renderer->screen_probes.height + 7u) / 8u,
+        .workGroupNumZ = 1
     });
+    barrier_wavefront_buffers(renderer, command_buffer, storage);
 
-    renderer->screen_probe_radiance.state = storage;
-    renderer->screen_probes.state = storage;
-
-    bind_trace(renderer, command_buffer, renderer->screen_probes_pipeline);
-
-    renderer->gpu->core.CmdDispatch(
-        command_buffer,
-        &(NriDispatchDesc){
-            .workGroupNumX = (renderer->screen_probes.width + 7u) / 8u,
-            .workGroupNumY = (renderer->screen_probes.height + 7u) / 8u,
-            .workGroupNumZ = 1
-        }
-    );
-
-    const NriAccessLayoutStage read = {
-        .access = NriAccessBits_SHADER_RESOURCE,
-        .layout = NriLayout_SHADER_RESOURCE,
-        .stages = NriStageBits_FRAGMENT_SHADER
-    };
-
-    const NriTextureBarrierDesc to_read = {
-        .texture = renderer->screen_probes.texture,
-        .before = storage,
-        .after = read,
-        .mipNum = 1,
-        .layerNum = 1,
-        .planes = NriPlaneBits_COLOR
-    };
-
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .textures = &to_read,
-        .textureNum = 1
+    bind_wavefront(renderer, command_buffer, renderer->wavefront_generate_pipeline);
+    renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){
+        .workGroupNumX = (renderer->screen_probes.width + 7u) / 8u,
+        .workGroupNumY = (renderer->screen_probes.height + 7u) / 8u,
+        .workGroupNumZ = 1
     });
-    renderer->screen_probes.state = read;
-}
+    barrier_wavefront_buffers(renderer, command_buffer, storage);
 
+    const uint32_t ray_groups = (renderer->wavefront.ray_capacity + 63u) / 64u;
+    bind_wavefront(renderer, command_buffer, renderer->wavefront_screen_pipeline);
+    renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){.workGroupNumX = ray_groups, .workGroupNumY = 1, .workGroupNumZ = 1});
+    barrier_wavefront_buffers(renderer, command_buffer, storage);
 
-static void bind_emissive(RENDERER *renderer, NriCommandBuffer *command_buffer) {
-    renderer->gpu->core.CmdSetPipelineLayout(command_buffer, NriBindPoint_COMPUTE, renderer->emissive_layout);
-    renderer->gpu->core.CmdSetPipeline(command_buffer, renderer->emissive_pipeline);
+    bind_wavefront(renderer, command_buffer, renderer->wavefront_local_pipeline);
+    renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){.workGroupNumX = ray_groups, .workGroupNumY = 1, .workGroupNumZ = 1});
+    barrier_wavefront_buffers(renderer, command_buffer, storage);
 
-    const NriSetDescriptorSetDesc sets[] = {
-        {.setIndex = 0, .descriptorSet = renderer->emissive_trace_set, .bindPoint = NriBindPoint_COMPUTE},
-        {.setIndex = 1, .descriptorSet = renderer->emissive_scene_set, .bindPoint = NriBindPoint_COMPUTE},
-        {.setIndex = 2, .descriptorSet = renderer->emissive_probe_set, .bindPoint = NriBindPoint_COMPUTE}
+    bind_wavefront(renderer, command_buffer, renderer->wavefront_shade_pipeline);
+    renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){.workGroupNumX = ray_groups, .workGroupNumY = 1, .workGroupNumZ = 1});
+    barrier_wavefront_buffers(renderer, command_buffer, storage);
+
+    const NriTextureBarrierDesc probe_sync = {
+        .texture = p->current_radiance.texture,
+        .before = p->current_radiance.state,
+        .after = compute_storage,
+        .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR
     };
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = &probe_sync, .textureNum = 1});
 
-    for (uint32_t i = 0; i < sizeof(sets) / sizeof(sets[0]); ++i)
-        renderer->gpu->core.CmdSetDescriptorSet(command_buffer, &sets[i]);
+    bind_wavefront(renderer, command_buffer, renderer->wavefront_resolve_pipeline);
+    renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){
+        .workGroupNumX = (renderer->screen_probes.width + 7u) / 8u,
+        .workGroupNumY = (renderer->screen_probes.height + 7u) / 8u,
+        .workGroupNumZ = 1
+    });
 }
 
 static void build_emissive_gather(RENDERER *renderer, NriCommandBuffer *command_buffer) {
-    if (!renderer->radiance_scene.emissive_triangle_count ||
-        !(renderer->radiance_constants.feature_flags[0] & RADIANCE_FEATURE_EMISSIVE)) {
-        return;
-    }
-
-    const NriAccessLayoutStage storage = {
-        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
-        .layout = NriLayout_SHADER_RESOURCE_STORAGE,
-        .stages = NriStageBits_COMPUTE_SHADER
-    };
-
-    const NriTextureBarrierDesc to_storage = {
-        .texture = renderer->screen_probes.texture,
-        .before = renderer->screen_probes.state,
-        .after = storage,
-        .mipNum = 1,
-        .layerNum = 1,
-        .planes = NriPlaneBits_COLOR
-    };
-
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .textures = &to_storage,
-        .textureNum = 1
-    });
-    renderer->screen_probes.state = storage;
-
-    bind_emissive(renderer, command_buffer);
-    renderer->gpu->core.CmdDispatch(
-        command_buffer,
-        &(NriDispatchDesc){
+    const bool enabled = renderer->radiance_scene.emissive_triangle_count &&
+                         (renderer->radiance_constants.feature_flags[0] & RADIANCE_FEATURE_EMISSIVE);
+    if (enabled) {
+        bind_wavefront(renderer, command_buffer, renderer->emissive_pipeline);
+        renderer->gpu->core.CmdDispatch(command_buffer, &(NriDispatchDesc){
             .workGroupNumX = (renderer->screen_probes.width + 7u) / 8u,
             .workGroupNumY = (renderer->screen_probes.height + 7u) / 8u,
             .workGroupNumZ = 1
-        }
-    );
+        });
+    }
 
     const NriAccessLayoutStage read = {
         .access = NriAccessBits_SHADER_RESOURCE,
         .layout = NriLayout_SHADER_RESOURCE,
         .stages = NriStageBits_FRAGMENT_SHADER
     };
-
     const NriTextureBarrierDesc to_read = {
         .texture = renderer->screen_probes.texture,
-        .before = storage,
+        .before = renderer->screen_probes.state,
         .after = read,
-        .mipNum = 1,
-        .layerNum = 1,
-        .planes = NriPlaneBits_COLOR
+        .mipNum = 1, .layerNum = 1, .planes = NriPlaneBits_COLOR
     };
-
-    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){
-        .textures = &to_read,
-        .textureNum = 1
-    });
+    renderer->gpu->core.CmdBarrier(command_buffer, &(NriBarrierDesc){.textures = &to_read, .textureNum = 1});
     renderer->screen_probes.state = read;
 }
 
@@ -3884,8 +3525,8 @@ bool renderer_init(RENDERER *renderer, GPU *gpu) {
     renderer->previous_view_projection = mat4_identity();
 
     if (!create_pipeline_layouts(renderer) || !create_descriptor_pool(renderer) || !create_frame_buffer(renderer) || !create_radiance_constant_buffers(renderer) ||
-        !create_radiance_scene_fallbacks(renderer) || !create_pipelines(renderer) || !create_surface_cache(renderer) ||
-        !create_radiance_surface_cache(renderer) || !update_radiance_direct_cache_descriptors(renderer) ||
+        !create_radiance_scene_fallbacks(renderer) || !create_world_radiance_resources(renderer) || !create_pipelines(renderer) ||
+        !create_radiance_surface_cache(renderer) ||
         !create_size_dependent_resources(renderer, gpu->swapchain_width, gpu->swapchain_height)) {
         renderer_deinit(renderer);
 
@@ -3905,14 +3546,14 @@ void renderer_deinit(RENDERER *renderer) {
             renderer->gbuffer_pipeline,
             renderer->present_pipeline,
             renderer->hzb_pipeline,
-            renderer->screen_trace_pipeline,
-            renderer->trace_reset_pipeline,
-            renderer->trace_compact_pipeline,
-            renderer->trace_args_pipeline,
-            renderer->sdf_trace_pipeline,
             renderer->direct_radiance_pipeline,
-            renderer->surface_cache_pipeline,
-            renderer->screen_probes_pipeline,
+            renderer->wavefront_reset_pipeline,
+            renderer->wavefront_budget_pipeline,
+            renderer->wavefront_generate_pipeline,
+            renderer->wavefront_screen_pipeline,
+            renderer->wavefront_local_pipeline,
+            renderer->wavefront_shade_pipeline,
+            renderer->wavefront_resolve_pipeline,
             renderer->emissive_pipeline
         };
 
@@ -3922,12 +3563,11 @@ void renderer_deinit(RENDERER *renderer) {
 
         destroy_scene_resources(renderer);
         destroy_radiance_scene_fallbacks(renderer);
-        destroy_trace_queue(renderer);
-        destroy_trace_buffer(renderer, &renderer->trace_hits);
-        destroy_surface_cache(renderer);
         destroy_radiance_surface_cache(renderer);
+        destroy_world_radiance_resources(renderer);
+        destroy_wavefront(renderer);
+        destroy_radiance_probes(renderer);
         destroy_compute_texture(renderer, &renderer->direct_radiance);
-        destroy_compute_texture(renderer, &renderer->screen_probe_radiance);
         destroy_compute_texture(renderer, &renderer->screen_probes);
         destroy_screen_trace(renderer);
         destroy_hzb(renderer);
@@ -3948,11 +3588,8 @@ void renderer_deinit(RENDERER *renderer) {
 
         if (renderer->trace_layout) renderer->gpu->core.DestroyPipelineLayout(renderer->trace_layout);
 
-        if (renderer->radiance_scene_layout) renderer->gpu->core.DestroyPipelineLayout(renderer->radiance_scene_layout);
+        if (renderer->wavefront_layout) renderer->gpu->core.DestroyPipelineLayout(renderer->wavefront_layout);
 
-        if (renderer->radiance_direct_layout) renderer->gpu->core.DestroyPipelineLayout(renderer->radiance_direct_layout);
-
-        if (renderer->emissive_layout) renderer->gpu->core.DestroyPipelineLayout(renderer->emissive_layout);
     }
 
     memset(renderer, 0, sizeof(*renderer));
@@ -3992,9 +3629,9 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
     renderer->previous_view_projection = mat4_identity();
     renderer->has_previous_frame = false;
 
-    if (!clear_surface_cache(renderer) || !clear_radiance_surface_cache(renderer)) return false;
+    if (!clear_radiance_surface_cache(renderer)) return false;
     update_gbuffer_descriptors(renderer);
-    update_trace_descriptors(renderer);
+    if (!update_trace_descriptors(renderer) || !update_wavefront_descriptors(renderer) || !update_radiance_scene_descriptors(renderer)) return false;
 
     return true;
 }
@@ -4117,11 +3754,7 @@ bool renderer_frame(RENDERER *renderer) {
     build_hzb(renderer, command_buffer);
     transition_gbuffer_for_read(renderer, command_buffer);
     build_direct_radiance(renderer, command_buffer);
-    build_screen_trace(renderer, command_buffer);
-    build_miss_queue(renderer, command_buffer);
-    build_sdf_trace(renderer, command_buffer);
-    finish_screen_trace(renderer, command_buffer);
-    build_screen_probes(renderer, command_buffer);
+    build_wavefront_screen_probes(renderer, command_buffer);
     build_emissive_gather(renderer, command_buffer);
     record_present_pass(renderer, command_buffer, swapchain_index);
 

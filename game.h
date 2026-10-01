@@ -537,30 +537,20 @@ typedef struct COMPUTE_TEXTURE {
     NriDescriptor *srv;
     NriDescriptor *uav;
     NriAccessLayoutStage state;
+    NriFormat format;
     uint32_t width;
     uint32_t height;
 } COMPUTE_TEXTURE;
 
-typedef struct TRACE_BUFFER {
-    NriBuffer *buffer;
-    NriDescriptor *srv;
-    NriDescriptor *uav;
-    NriAccessStage state;
-    uint32_t capacity;
-} TRACE_BUFFER;
-
-typedef struct TRACE_QUEUE {
-    NriBuffer *rays;
-    NriBuffer *count;
-    NriBuffer *dispatch_args;
-    NriDescriptor *rays_uav;
-    NriDescriptor *count_uav;
-    NriDescriptor *dispatch_args_uav;
-    NriAccessStage rays_state;
-    NriAccessStage count_state;
-    NriAccessStage dispatch_args_state;
-    uint32_t capacity;
-} TRACE_QUEUE;
+typedef struct RADIANCE_PROBES {
+    COMPUTE_TEXTURE current_radiance;
+    COMPUTE_TEXTURE current_meta;
+    COMPUTE_TEXTURE history_radiance;
+    COMPUTE_TEXTURE history_meta;
+    COMPUTE_TEXTURE previous_irradiance;
+    COMPUTE_TEXTURE history_depth;
+    COMPUTE_TEXTURE history_normal;
+} RADIANCE_PROBES;
 
 typedef struct SDF_GPU_SCENE {
     NriBuffer *models;
@@ -589,6 +579,47 @@ typedef struct SURFACE_CACHE {
     NriAccessStage entries_state;
     uint32_t capacity;
 } SURFACE_CACHE;
+
+
+typedef struct RADIANCE_WAVEFRONT {
+    NriBuffer *queue_a;
+    NriBuffer *queue_b;
+    NriBuffer *surface_hits;
+    NriBuffer *counters;
+    NriBuffer *dispatch_args;
+    NriBuffer *budgets;
+    NriBuffer *update_list;
+    NriBuffer *radiance;
+    NriBuffer *flags;
+
+    NriDescriptor *queue_a_uav;
+    NriDescriptor *queue_b_uav;
+    NriDescriptor *surface_hits_uav;
+    NriDescriptor *counters_uav;
+    NriDescriptor *dispatch_args_uav;
+    NriDescriptor *budgets_uav;
+    NriDescriptor *update_list_uav;
+    NriDescriptor *radiance_uav;
+    NriDescriptor *flags_uav;
+
+    NriAccessStage state;
+    uint32_t ray_capacity;
+    uint32_t probe_capacity;
+} RADIANCE_WAVEFRONT;
+
+typedef struct RADIANCE_WORLD_RESOURCES {
+    NriBuffer *probes;
+    NriBuffer *radiance;
+    NriBuffer *keys;
+    NriBuffer *invalidation_queue;
+
+    NriDescriptor *probes_uav;
+    NriDescriptor *radiance_uav;
+    NriDescriptor *keys_uav;
+    NriDescriptor *invalidation_queue_uav;
+
+    NriAccessStage state;
+} RADIANCE_WORLD_RESOURCES;
 
 typedef struct RENDER_TEXTURE {
     NriTexture *texture;
@@ -645,12 +676,11 @@ typedef struct RENDERER {
     HZB hzb;
     SCREEN_TRACE screen_trace;
     COMPUTE_TEXTURE direct_radiance;
-    COMPUTE_TEXTURE screen_probe_radiance;
     COMPUTE_TEXTURE screen_probes;
-    TRACE_BUFFER trace_hits;
-    TRACE_QUEUE miss_queue;
+    RADIANCE_PROBES probes;
+    RADIANCE_WAVEFRONT wavefront;
+    RADIANCE_WORLD_RESOURCES world_radiance;
     SDF_GPU_SCENE sdf;
-    SURFACE_CACHE surface_cache;
     SURFACE_CACHE radiance_surface_cache;
     RADIANCE_SCENE_DATA radiance_scene;
     RADIANCE_SCENE_FALLBACKS radiance_fallbacks;
@@ -660,33 +690,29 @@ typedef struct RENDERER {
     NriDescriptorSet *present_set;
     NriDescriptorSet *hzb_sets[HZB_MAX_MIPS];
     NriDescriptorSet *trace_set;
-    NriDescriptorSet *radiance_scene_set;
-    NriDescriptorSet *radiance_direct_trace_set;
-    NriDescriptorSet *radiance_direct_scene_set;
-    NriDescriptorSet *radiance_direct_cache_set;
-    NriDescriptorSet *emissive_trace_set;
-    NriDescriptorSet *emissive_scene_set;
-    NriDescriptorSet *emissive_probe_set;
+    NriDescriptorSet *wavefront_trace_set;
+    NriDescriptorSet *wavefront_scene_set;
+    NriDescriptorSet *wavefront_queue_set;
+    NriDescriptorSet *wavefront_cache_set;
+    NriDescriptorSet *wavefront_probe_set;
 
     NriPipelineLayout *gbuffer_layout;
     NriPipelineLayout *present_layout;
     NriPipelineLayout *hzb_layout;
     NriPipelineLayout *trace_layout;
-    NriPipelineLayout *radiance_scene_layout;
-    NriPipelineLayout *radiance_direct_layout;
-    NriPipelineLayout *emissive_layout;
+    NriPipelineLayout *wavefront_layout;
 
     NriPipeline *gbuffer_pipeline;
     NriPipeline *present_pipeline;
     NriPipeline *hzb_pipeline;
-    NriPipeline *screen_trace_pipeline;
-    NriPipeline *trace_reset_pipeline;
-    NriPipeline *trace_compact_pipeline;
-    NriPipeline *trace_args_pipeline;
-    NriPipeline *sdf_trace_pipeline;
     NriPipeline *direct_radiance_pipeline;
-    NriPipeline *surface_cache_pipeline;
-    NriPipeline *screen_probes_pipeline;
+    NriPipeline *wavefront_reset_pipeline;
+    NriPipeline *wavefront_budget_pipeline;
+    NriPipeline *wavefront_generate_pipeline;
+    NriPipeline *wavefront_screen_pipeline;
+    NriPipeline *wavefront_local_pipeline;
+    NriPipeline *wavefront_shade_pipeline;
+    NriPipeline *wavefront_resolve_pipeline;
     NriPipeline *emissive_pipeline;
 
     uint32_t width;
