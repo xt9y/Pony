@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
+import re
 import subprocess
 
 BASE = "0ae0e70364210ec302c8b076ea5513d0dd716612"
@@ -22,6 +23,13 @@ def forbid(path: str, *needles: str) -> None:
     present = [needle for needle in needles if needle in source]
     if present:
         raise AssertionError(f"{path}: forbidden {present}")
+
+
+def forbid_symbols(path: str, *names: str) -> None:
+    source = text(path)
+    present = [name for name in names if re.search(rf"\b{re.escape(name)}\s*\(", source)]
+    if present:
+        raise AssertionError(f"{path}: forbidden symbols {present}")
 
 
 def main() -> None:
@@ -76,7 +84,7 @@ def main() -> None:
         "void renderer_deinit(",
     )
 
-    forbid("main.c", "r_init(", "r_build_scene(", "r_event(", "r_draw(", "r_deinit(")
+    forbid_symbols("main.c", "r_init", "r_build_scene", "r_event", "r_draw", "r_deinit")
     require("main.c", "GPU gpu", "RENDERER renderer", "renderer_init(", "renderer_set_scene(", "renderer_frame(")
 
     # build.c is frozen, therefore the existing shader/source paths stay valid.
