@@ -1,0 +1,210 @@
+name: stage11 native implementation
+
+on:
+  push:
+    branches: [radiance-stage11-work]
+
+permissions:
+  contents: write
+
+jobs:
+  stage11:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: radiance-stage11-work
+          fetch-depth: 50
+
+      - name: Prepare verification environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/libsdl-org/SDL.git /tmp/SDL >/dev/null 2>&1
+          git clone --depth 1 https://github.com/NVIDIA-RTX/NRI.git /tmp/NRI >/dev/null 2>&1
+          echo 'FLAGS=-I. -I/tmp/SDL/include -I/tmp/NRI/Include -I/tmp/NRI/Include/Extensions' >> "$GITHUB_ENV"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 -m py_compile .github/stage11_apply.py .github/stage11_arch_test.py
+
+      - name: Task 1 RED - deterministic source-order tie-break absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 .github/stage11_arch_test.py --task 1 >/tmp/task1-red.log 2>&1; then
+            echo 'Task 1 unexpectedly green'
+            exit 1
+          fi
+          echo 'Task 1 RED confirmed'
+          cat /tmp/task1-red.log
+
+      - name: Task 1 GREEN - stabilize Stage 10 placement order
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/stage11_apply.py 1
+          python3 .github/stage11_arch_test.py --task 1
+          clang -std=c11 $FLAGS tests/stage10_world_cache.c sdf.c -lm -o /tmp/stage10_world_cache_test
+          /tmp/stage10_world_cache_test
+          clang -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer $FLAGS tests/stage10_world_cache.c sdf.c -lm -o /tmp/stage10_world_cache_asan
+          /tmp/stage10_world_cache_asan
+          clang -std=c11 -fsyntax-only $FLAGS sdf.c
+          git diff --check
+          git add sdf.c tests/stage10_world_cache.c
+          git commit -m 's10 stabilize world probe placement order'
+          git push origin HEAD:radiance-stage11-work
+
+      - name: Install Slang
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 -o /tmp/slang.tar.gz https://github.com/shader-slang/slang/releases/download/v2026.18.3/slang-2026.18.3-linux-x86_64-glibc-2.27.tar.gz
+          mkdir -p /tmp/slang
+          tar -xzf /tmp/slang.tar.gz -C /tmp/slang
+          SLANGC="$(find /tmp/slang -type f -name slangc | head -n1)"
+          test -n "$SLANGC"
+          chmod +x "$SLANGC"
+          echo "SLANGC=$SLANGC" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$(dirname "$SLANGC")/../lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Task 2 RED - adaptive selector and residual absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 .github/stage11_arch_test.py --task 2 >/tmp/task2-red.log 2>&1; then
+            echo 'Task 2 unexpectedly green'
+            exit 1
+          fi
+          echo 'Task 2 RED confirmed'
+          cat /tmp/task2-red.log
+
+      - name: Task 2 GREEN - select adaptive world probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/stage11_apply.py 2
+          python3 .github/stage11_arch_test.py --task 2
+          compile() {
+            entry="$1"; stage="$2"; shift 2
+            "$SLANGC" shader.hlsl -entry "$entry" -stage "$stage" -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 "$@" -o "/tmp/${entry}.spv"
+            test -s "/tmp/${entry}.spv"
+          }
+          compile CS_SelectWorldProbeUpdates compute
+          compile CS_UpdateWorldRadianceCache compute
+          compile CS_InvalidateRadiance compute
+          git diff --check
+          git add shader.hlsl build.c
+          git commit -m 's11 select adaptive world probes'
+          git push origin HEAD:radiance-stage11-work
+
+      - name: Task 3 RED - CPU scheduler still owns update list
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 .github/stage11_arch_test.py --task 3 >/tmp/task3-red.log 2>&1; then
+            echo 'Task 3 unexpectedly green'
+            exit 1
+          fi
+          echo 'Task 3 RED confirmed'
+          cat /tmp/task3-red.log
+
+      - name: Task 3 GREEN - schedule world cache on GPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/stage11_apply.py 3
+          python3 .github/stage11_arch_test.py
+          for f in init.c glb.c gltf.c scene.c sdf.c gpu.c render.c main.c; do
+            echo "syntax $f"
+            clang -std=c11 -fsyntax-only $FLAGS "$f"
+          done
+          compile() {
+            entry="$1"; stage="$2"; shift 2
+            "$SLANGC" shader.hlsl -entry "$entry" -stage "$stage" -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 "$@" -o "/tmp/${entry}.spv"
+            test -s "/tmp/${entry}.spv"
+          }
+          compile CS_ResetWavefront compute
+          compile CS_SelectWorldProbeUpdates compute
+          compile CS_UpdateWorldRadianceCache compute
+          compile CS_ClassifyRayBudgets compute
+          git diff --check
+          git add game.h render.c shader.hlsl
+          git commit -m 's11 schedule world cache on gpu'
+          git push origin HEAD:radiance-stage11-work
+          echo "STAGE11_PRODUCTION_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Full Stage 10 CPU regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 $FLAGS tests/stage10_world_cache.c sdf.c -lm -o /tmp/stage10_world_cache_test
+          /tmp/stage10_world_cache_test
+          clang -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer $FLAGS tests/stage10_world_cache.c sdf.c -lm -o /tmp/stage10_world_cache_asan
+          /tmp/stage10_world_cache_asan
+          python3 .github/stage11_arch_test.py
+
+      - name: Syntax compile all renderer C translation units
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in init.c glb.c gltf.c scene.c sdf.c gpu.c render.c main.c; do
+            clang -std=c11 -fsyntax-only $FLAGS "$f"
+          done
+          git diff --check
+
+      - name: Compile every normal shader job
+        shell: bash
+        run: |
+          set -euo pipefail
+          compile() {
+            entry="$1"; stage="$2"; shift 2
+            "$SLANGC" shader.hlsl -entry "$entry" -stage "$stage" -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 "$@" -o "/tmp/all-${entry}.spv"
+            test -s "/tmp/all-${entry}.spv"
+          }
+          compile VS_GBuffer vertex
+          compile PS_GBuffer fragment
+          compile PS_GBufferFull fragment
+          compile VS_Present vertex
+          compile PS_Present fragment -DFINAL_GI
+          compile PS_PresentRuntime fragment
+          compile CS_HZB compute
+          compile CS_RadianceDirect compute
+          compile CS_ResetWavefront compute
+          compile CS_ClassifyRayBudgets compute
+          compile CS_GenerateProbeRays compute
+          compile CS_WavefrontScreenTrace compute
+          compile CS_WavefrontDynamicTrace compute
+          compile CS_WavefrontLocalTrace compute
+          compile CS_WavefrontGlobalTrace compute
+          compile CS_ShadeRayHits compute
+          compile CS_EmissiveGather compute
+          compile CS_ResolveDirectionalProbes compute
+          compile CS_ReprojectScreenProbes compute
+          compile CS_SpatialReuseScreenProbes compute
+          compile CS_CommitScreenProbeHistory compute
+          compile CS_SelectWorldProbeUpdates compute
+          compile CS_UpdateWorldRadianceCache compute
+          compile CS_InvalidateRadiance compute
+          compile CS_ReflectionTrace compute
+          test "$(grep -c 'CS_SelectWorldProbeUpdates' build.c)" -eq 1
+          test "$(grep -c 'CS_UpdateWorldRadianceCache' build.c)" -eq 1
+          echo 'Stage 11 full verification PASS'
+
+      - name: Cleanup execution-only Stage 11 files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/stage11_apply.py .github/stage11_arch_test.py .github/workflows/stage11-native.yml
+          git add -A .github
+          git commit -m 'remove stage11 verification helpers'
+          git push origin HEAD:radiance-stage11-work
+          changed="$(git diff --name-only "$STAGE11_PRODUCTION_COMMIT" HEAD)"
+          printf '%s\n' "$changed"
+          test "$(printf '%s\n' "$changed" | grep -vc '^$')" -eq 3
+          printf '%s\n' "$changed" | grep -Fxq '.github/stage11_apply.py'
+          printf '%s\n' "$changed" | grep -Fxq '.github/stage11_arch_test.py'
+          printf '%s\n' "$changed" | grep -Fxq '.github/workflows/stage11-native.yml'
+          test -f docs/superpowers/specs/2026-10-01-adaptive-world-cache-scheduling-design.md
+          test -f docs/superpowers/plans/2026-10-01-adaptive-world-cache-scheduling.md
+          test -f tests/stage10_world_cache.c
