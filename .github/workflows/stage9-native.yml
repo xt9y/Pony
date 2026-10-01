@@ -17,42 +17,16 @@ jobs:
           ref: radiance
           fetch-depth: 20
 
-      - name: Prepare C headers
+      - name: Prepare verification environment
         shell: bash
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/libsdl-org/SDL.git /tmp/SDL >/dev/null 2>&1
           git clone --depth 1 https://github.com/NVIDIA-RTX/NRI.git /tmp/NRI >/dev/null 2>&1
           echo 'FLAGS=-I. -I/tmp/SDL/include -I/tmp/NRI/Include -I/tmp/NRI/Include/Extensions' >> "$GITHUB_ENV"
-
-      - name: Task 1 RED - ownership absent
-        run: python3 .github/stage9_arch_test.py --red-task 1
-
-      - name: Task 1 GREEN - add ownership interfaces
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 .github/stage9_apply.py 1
-          python3 .github/stage9_arch_test.py --task 1
-          clang -std=c11 -fsyntax-only $FLAGS sdf.c
-          git diff --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add game.h
-          git commit -m 's9 global sdf interfaces'
-          git push origin HEAD:radiance
-
-      - name: Task 2 RED - builder missing
-        shell: bash
-        run: |
-          set -euo pipefail
-          if clang -std=c11 $FLAGS .github/stage9_sdf_test.c sdf.c -lm -o /tmp/stage9_sdf_test >/tmp/stage9-red.log 2>&1; then
-            echo 'Task 2 RED unexpectedly linked'
-            cat /tmp/stage9-red.log
-            exit 1
-          fi
-          grep -Eq 'sdf_build_global_clipmaps|sdf_free_global_clipmaps|undefined' /tmp/stage9-red.log
-          echo 'RED task2 confirmed: global builder is declared but not implemented'
+          python3 .github/stage9_arch_test.py --task 1
 
       - name: Task 2 GREEN - build conservative clipmaps
         shell: bash
