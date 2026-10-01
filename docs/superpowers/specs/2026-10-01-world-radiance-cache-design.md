@@ -28,11 +28,13 @@ Stage 10 does not implement adaptive scheduling or reflections. Stage 11 changes
 - Reuse Stage 9 static/global-SDF data and canonical triangle identity; do not create a second persistent world acceleration structure.
 - Maximum active probes: 8192.
 - Hash table capacity: 16384, power-of-two.
+- Hash lookup/insertion probe bound: 8 slots, matching the existing `MAX_CACHE_PROBES` limit.
 - Direction map: 4x4 octahedral = 16 directions per probe.
 - Two directional history banks are stored inside the existing `WorldProbeRadiance` buffer.
 - Placement spacing: 0.75 world units.
 - Influence radius: 1.125 world units.
-- Placement surface offset/clearance target: 0.075 world units.
+- Placement surface offset: 0.075 world units.
+- Minimum accepted exact static-geometry clearance: 0.0375 world units.
 - Fixed update budget: 64 probes/frame = 1024 primary world-probe rays/frame.
 - Established texels blend 20 percent new sample / 80 percent previous value.
 - New/invalid probes receive a full first update.
@@ -49,13 +51,11 @@ Rejected alternatives:
 
 - Uniform scene-volume grid: wastes most probes in empty space.
 - Camera-following probe clipmaps: violate camera-independent offscreen GI and can change lighting when the camera moves.
-- Independent world BVH/cache-placement structure: duplicates Stage 9 responsibilities.
+- Independent persistent world BVH/cache-placement structure: duplicates Stage 9 responsibilities.
 
 The world cache is derived from Stage 9 static geometry/global-SDF coverage and remains fixed in world coordinates for the lifetime of that static scene.
 
 ## Fixed capacities and constants
-
-The shared renderer constants are:
 
 ```text
 WORLD_PROBE_CAPACITY        = 8192
@@ -67,10 +67,11 @@ WORLD_PROBE_UPDATES_FRAME   = 64
 WORLD_PROBE_SPACING         = 0.75
 WORLD_PROBE_RADIUS          = 1.125
 WORLD_PROBE_CLEARANCE       = 0.075
+WORLD_PROBE_MIN_CLEARANCE   = 0.0375
 WORLD_PROBE_BLEND           = 0.20
 ```
 
-The existing `RadianceConstants` fields are assigned as follows:
+Existing `RadianceConstants` fields are assigned exactly as follows:
 
 ```text
 cache_counts.x = surface-cache capacity
@@ -86,7 +87,7 @@ world_probe_config.w = 0 reserved
 world_probe_params.x = 0.75 placement/hash spacing
 world_probe_params.y = 0.20 temporal update blend
 world_probe_params.z = 1.125 influence radius
-world_probe_params.w = 0.075 placement clearance
+world_probe_params.w = 0.075 placement offset
 ```
 
 No new constant-buffer layout is introduced.
@@ -107,13 +108,11 @@ It owns:
 
 The two radiance banks use about 4 MiB at full capacity.
 
-When the scene has zero valid static probe candidates, minimal valid dummy descriptors remain bound while active world-probe count is zero and the feature flags remain disabled.
+When a scene has zero valid static probe candidates, minimal valid dummy descriptors remain bound while active world-probe count is zero and the feature flags remain disabled.
 
 ## WorldProbeState semantics
 
 The existing 64-byte `WorldProbeState` ABI is retained exactly.
-
-Stage 10 assigns its fields as follows:
 
 ```text
 position_radius.xyz = probe world position
@@ -130,40 +129,44 @@ statistics.z = age in completed probe updates
 statistics.w = reserved
 
 state.x = last update frame index
-state.y = lighting/scene revision used for published radiance
+state.y = Radiance.feature_flags.y lighting/scene revision
 state.z = active radiance bank (0 or 1)
 state.w = flags
 ```
 
-`state.w` flag bits:
+`state.w` flags:
 
 ```text
 bit 0 = valid published radiance
-bit 1 = dirty / confidence-reduced and should be refreshed
+bit 1 = dirty / confidence-reduced
 ```
 
-The existing invalidation shader must mark the dirty flag; it must not overwrite `state.z`, because `state.z` is the active-bank selector in Stage 10.
+The frozen invalidation entry point is corrected so world-probe invalidation sets the dirty flag/reduces confidence and never overwrites `state.z`.
+
+Stage 10 does not add a new spatial dynamic-invalidation scheduler. Dynamic objects affect world-probe visibility naturally when probes are refreshed. Targeted dirty-probe scheduling can be layered on later without changing this state layout.
 
 ## Probe placement
 
 Placement is deterministic, static-only and camera-independent.
 
-The builder uses Stage 9 fine/medium static coverage as its candidate domain. For every relevant global-SDF sample with a valid canonical surface ID:
+The CPU builder uses Stage 9 fine and medium static global-SDF coverage as its candidate domain. For each relevant SDF sample with a valid canonical surface ID:
 
-1. Reject the sample if its canonical triangle owner is not `STATIC`.
+1. Reject it unless the canonical triangle owner is `STATIC`.
 2. Reconstruct the sample world position and canonical world-space triangle.
-3. Compute the closest point on that triangle and its geometric normal from canonical winding.
-4. Try a probe candidate at `closest_point + normal * 0.075`.
-5. If that side fails finite/bounds/clearance validation, try `closest_point - normal * 0.075`.
-6. If neither side is usable, discard the candidate.
-7. Convert the candidate position into an integer 0.75-unit placement cell.
-8. Keep at most one candidate per placement cell.
+3. Compute the closest point on that triangle and geometric normal from canonical winding.
+4. First candidate: `closest_point + normal * 0.075`.
+5. Compute exact nearest distance from that candidate to all static triangles through a temporary nearest-distance/BVH helper shared/refactored from the Stage 9 builder.
+6. Accept that side only if the candidate is finite, lies in the Stage 9 static scene domain, and exact nearest distance is at least 0.0375.
+7. If `+normal` fails, test `closest_point - normal * 0.075` with the same rules.
+8. If neither side passes, discard the source sample.
+9. Convert the accepted world position to `floor(position / 0.75)` integer placement-cell coordinates.
+10. Keep at most one candidate per placement cell.
 
-Clearance validation may use a temporary/static-scene nearest-distance helper shared with the Stage 9 CPU SDF builder. It must not leave a second persistent BVH in the renderer. A candidate is accepted only when it has non-degenerate usable clearance from static geometry; this prevents placing the world probe directly inside/against another surface.
+The clearance helper/BVH is temporary CPU build state and is freed after placement; Stage 10 must not leave a second persistent acceleration structure in the renderer.
 
-If both +/- candidates are valid, canonical triangle winding (`+normal`) wins. If several source samples map to one placement cell, choose the candidate with greatest validated clearance; break equal-clearance ties by smaller canonical surface ID, then deterministic traversal order.
+If both +/- sides are valid, canonical `+normal` wins. If several accepted source samples map to one placement cell, choose the candidate with greatest exact clearance; break equal-clearance ties by smaller canonical surface ID, then deterministic source traversal order.
 
-Candidates are emitted in deterministic cell order and capped at 8192. Rebuilding the same unchanged static scene must produce identical probe positions, identities and hash contents.
+Candidates are emitted in deterministic integer-cell order and capped at 8192. Rebuilding the same unchanged static scene must produce identical probe positions, identities and hash contents.
 
 Dynamic geometry never creates, removes or relocates these persistent placement anchors.
 
@@ -171,53 +174,51 @@ Dynamic geometry never creates, removes or relocates these persistent placement 
 
 `WorldProbeKeys` is a 16384-entry open-addressed table with zero as the empty sentinel.
 
-The CPU and shader use the same hash from integer placement-cell coordinates. `WorldProbeState.identity.x` stores the resulting non-zero key. The table stores `probe_index + 1`.
+CPU and shader use the same hash from signed integer placement-cell coordinates. The final key is forced non-zero (`hash | 1`). `WorldProbeState.identity.x` stores that key. Hash slots store `probe_index + 1`.
 
-Insertion uses the existing bounded cache-probe limit. If a candidate cannot be inserted within that bounded search, the candidate is omitted rather than creating an unreachable probe. Because the table is at most 50 percent full, this is exceptional but deterministic.
+Placement-cell deduplication prevents two probes for the same cell. Different cells may still have the same 32-bit hash key; this is legal. Such probes occupy separate linear-probe slots, and runtime distance/surface filtering disambiguates them.
 
-Verification requires every active probe to be reachable through the final table and every occupied slot to decode to a valid active probe with a matching key.
+Insertion examines at most 8 consecutive slots. If a candidate cannot be inserted within 8 slots, omit that candidate before finalizing active indices. Every emitted active probe therefore has a reachable table entry.
 
 ## Runtime lookup
 
-World-cache lookup searches the 3x3x3 neighborhood around the query's 0.75-unit placement cell.
+World-cache lookup searches the 3x3x3 neighborhood around the query's `floor(position / 0.75)` cell.
 
-For each neighboring cell:
+For each of the 27 neighboring cells:
 
-1. compute its key;
-2. perform the bounded open-addressing lookup;
-3. validate decoded index/key/valid flag;
-4. reject probes farther than their 1.125-unit radius;
-5. choose the closest remaining probe.
+1. compute its non-zero key;
+2. scan at most 8 linear-probe slots;
+3. for each occupied slot, decode `probe_index + 1` and validate index/key/valid bit;
+4. reject probes farther than 1.125 from the query;
+5. keep the closest valid candidate.
 
-For diffuse surface queries, candidates must also be on the usable side of the hit surface:
+The scan cannot stop merely because another decoded probe has the same hash key: distinct cells can hash-collide. It stops on an empty table slot or after 8 probes.
+
+Diffuse surface queries additionally require:
 
 ```text
-dot(probe.position - surface.position, surface.normal) > small_positive_epsilon
+dot(probe.position - surface.position, surface.normal) > 1e-4
 ```
 
-This prevents a thin wall from freely using a close probe on its opposite side. If no candidate survives, world-cache contribution is zero.
+This prevents a thin wall from freely using a nearby probe on its opposite side. If no candidate survives, world-cache contribution is zero.
 
-Directional reflection-oriented lookup may retain a non-surface-filtered helper for Stage 12, but Stage 10 diffuse GI uses the surface-aware query.
+A non-surface-filtered directional helper may remain for Stage 12 reflections, but Stage 10 diffuse GI uses the surface-aware query.
 
 ## Directional radiance addressing
 
 Each probe has 16 logical directional texels in each of two physical banks.
 
-The physical address is:
-
 ```text
-bank_base = bank * cache_counts.w * 16
+bank_base  = bank * cache_counts.w * 16
 probe_base = probe_index * 16
-address = bank_base + probe_base + direction_texel
+address    = bank_base + probe_base + direction_texel
 ```
 
-`cache_counts.w` is the fixed physical capacity (8192), not active count, so bank addressing never changes when scenes contain fewer probes.
+`cache_counts.w` is the fixed physical capacity 8192, not active count. Bank addressing therefore never changes with scene probe count.
 
-All address helpers validate against active probe count for probe identity and against physical capacity for buffer addressing.
+Helpers reject probe indices outside `cache_counts.y` and bank values outside `[0,1]` before accessing radiance.
 
 ## Stable double-bank iteration
-
-The two banks prevent same-frame feedback and GPU-order-dependent multi-bounce.
 
 For a selected probe:
 
@@ -225,10 +226,10 @@ For a selected probe:
 2. `new_bank = old_bank ^ 1`.
 3. Trace all 16 directions.
 4. Read indirect lighting from a stable previous-iteration view of neighboring probes.
-5. Blend/write the 16 new values into `new_bank`.
-6. After all 16 texels for that probe are written, set `state.z = new_bank` and mark the probe valid.
+5. Blend/write the 16 values into `new_bank`.
+6. After those writes, publish `state.z = new_bank` and mark the probe valid.
 
-A world-cache update that samples another probe chooses its stable read bank as follows:
+A world-cache update sampling another probe selects the stable read bank by:
 
 ```text
 if source.state.x == current_frame:
@@ -237,84 +238,80 @@ else:
     read source.state.z
 ```
 
-Therefore a probe already published earlier in the same frame is read from its previous bank, while a probe not yet updated this frame is read from its currently published bank. Every update in frame N therefore consumes the coherent state from before frame N's update sweep.
+A probe already published earlier in the same frame is therefore read from its previous bank; a not-yet-updated probe is read from its current published bank. All updates in frame N consume the coherent cache state from before frame N's sweep regardless of GPU execution order.
 
-Normal renderer consumers outside the world-cache iteration always read `state.z`, the newest published bank.
+Normal rendering consumers outside the world-cache update read `state.z`, the newest published bank.
 
 ## Scheduling
 
 Stage 10 uses CPU-owned fixed round-robin scheduling.
 
-Each frame:
-
 ```text
 update_count = min(64, active_probe_count)
 ```
 
-The renderer writes those wrapped probe indices into the existing `RadianceUpdateList`, writes the update count expected by `CS_UpdateWorldRadianceCache`, then advances the cursor.
+Each frame the renderer writes the wrapped probe indices into existing `RadianceUpdateList`, uploads/writes `RayCounters[3] = update_count` for the world-cache dispatch, and advances the cursor. The later normal screen-wavefront reset may clear that counter after the world update.
 
 A full 8192-probe cache completes one sweep in 128 frames. Smaller scenes sweep proportionally faster.
 
-Stage 10 does not add variance/priority scheduling. Stage 11 replaces only the selection policy.
+Stage 11 replaces this selection policy with adaptive scheduling without changing cache representation.
 
 ## World-probe ray tracing
 
-Each selected probe traces 16 deterministic/oct-directional rays using the existing unified world tracer with screen tracing disabled:
+Each selected probe traces 16 octahedral directions using the existing unified world tracer with screen tracing disabled:
 
 ```text
-probe ray
+world probe
   -> dynamic-object grid
   -> static global SDF
   -> static local-SDF fallback if unresolved
   -> SurfaceHit
 ```
 
-This preserves dynamic occlusion while keeping persistent cache placement static.
+This keeps placement static while still allowing moving geometry to occlude/refine subsequent probe updates.
 
 A miss returns existing sky radiance.
 
 ## World-hit bounce operator
 
-A world-probe surface hit evaluates outgoing radiance from exactly these terms:
+A world-probe surface hit evaluates outgoing radiance from exactly:
 
-1. material emission;
-2. existing analytic diffuse direct-light evaluation;
-3. one explicit emissive-area-light NEE sample using the existing emitter CDF/barycentric sampler and visibility query;
-4. diffuse indirect radiance integrated from the stable previous world-cache view.
+1. `material.emissive`;
+2. existing `EvaluateSurfaceReflectedDirect(hit)` analytic direct contribution;
+3. explicit emissive-area-light NEE;
+4. stable previous-world-cache diffuse indirect contribution.
 
-The explicit emissive sample is skipped on an emissive source material by the existing emitter helper, avoiding self-light double counting.
+The existing `EvaluateEmissiveSampleForMaterial` returns the emitter transport term including cosine/geometry/PDF and `1/pi`, but not receiver albedo. Stage 10 multiplies that term by the current receiver `material.base_color.rgb`, matching the renderer's existing diffuse analytic-light convention. It does not introduce a new metallic/BRDF rule in this stage.
 
-The NEE term is converted through the renderer's existing diffuse material convention before being added to outgoing reflected radiance. Stage 10 does not change the renderer-wide BRDF model.
+The existing emitter helper already returns zero on an emissive source material, avoiding obvious self-emitter double counting.
 
-No term recursively launches another indirect bounce. Previous-cache sampling is the only multi-bounce input.
+No term recursively launches another bounce. Previous-cache sampling is the only multi-bounce input.
 
 ## Diffuse world-cache integration
 
-Diffuse GI is hemisphere integration, not a single directional lookup.
+Diffuse GI uses hemisphere integration, not one arbitrary directional lookup.
 
-For the selected nearby world probe:
+For the selected nearby probe and requested bank:
 
-1. read all 16 octahedral directions from the requested stable/latest bank;
-2. compute cosine weight against the hit surface normal;
-3. accumulate only positive-hemisphere directions;
-4. normalize consistently with Pony's existing probe integration convention;
-5. apply the hit material's current diffuse convention.
+1. read all 16 octahedral directions;
+2. compute `weight = max(dot(surface_normal, direction), 0)`;
+3. accumulate `radiance * weight` and `weight_sum`;
+4. return `sum / weight_sum` when `weight_sum > 0`, exactly matching Pony's existing screen-probe directional integration convention;
+5. multiply by receiver `material.base_color.rgb` to produce the current renderer's diffuse reflected indirect term.
 
-The result is the surface's world-cache indirect reflected-radiance term.
-
-A single directional world-cache sample remains available for the later reflection hierarchy, but Stage 10 diffuse propagation always uses the integrated hemisphere result.
+A directional single-texel sample remains available for Stage 12, but Stage 10 diffuse propagation uses the 16-direction integrated value.
 
 ## Surface-cache interaction
 
 The geometry-addressed surface cache remains separate from the persistent world field.
 
-Stage 10 changes surface evaluation so a stale cached indirect value cannot permanently mask newer world GI:
+Stage 10 prevents stale cached indirect values from masking newer world GI:
 
-- cached direct radiance may be reused when its existing identity/revision checks succeed;
-- when world cache is enabled, indirect radiance is evaluated from the currently requested world-cache view (latest for screen rendering, stable previous view during world updates);
-- the surface cache may then store/update that evaluated indirect term for memoization/debugging, but lookup does not treat an old indirect field as more authoritative than the world cache.
+- valid cached direct radiance may be reused under the existing identity/revision checks;
+- with world cache enabled, indirect is evaluated from the requested world-cache view: latest bank for normal screen rendering, stable previous view during world-cache updates;
+- surface-cache storage may be refreshed with that evaluated indirect value for memoization/debugging, but an old cached indirect value is not authoritative over the world cache.
 
-There is one diffuse indirect evaluator, shared by world-hit and screen/offscreen hit shading; there is not a second competing GI implementation.
+There is one world-cache diffuse evaluator shared by world-hit and screen/offscreen hit shading.
 
 Subsystem roles remain:
 
@@ -326,9 +323,14 @@ screen probes = camera-visible directional sampling/reuse
 
 ## Screen-probe integration
 
-Stage 10 does not replace the screen-probe system.
+Stage 10 does not replace screen probes.
 
-When a screen-probe ray resolves to a real world surface, the surface reflected-radiance evaluation can add the newest published world-cache indirect term. Existing camera-visible direct and screen-probe emissive-gather paths remain intact.
+Two hit cases must consume latest world-cache indirect:
+
+1. Offscreen/SDF/global hits already reach common `SurfaceHit` shading and add latest world-cache diffuse indirect there.
+2. Screen/HZB hits currently use `ReflectedDirectAtPixel` and bypass common `SurfaceHit` shading. Stage 10 adds one shared pixel-surface reflected-radiance helper that reconstructs the visible hit position/normal/material, reuses the existing direct radiance, adds latest world-cache diffuse indirect, and is used by `CS_WavefrontScreenTrace` instead of direct-only reuse.
+
+The existing screen-probe `CS_EmissiveGather` remains the current camera-visible explicit-emitter NEE path. Stage 10 does not add a second screen-emitter gather.
 
 The intended energy flow is:
 
@@ -339,44 +341,45 @@ emissive panel
   -> persistent directional world radiance
   -> later world-probe update
   -> second/later diffuse bounce
-  -> screen-probe world hit
+  -> screen-probe screen/world hit
   -> visible GI
 ```
 
 ## Temporal update behavior
 
-For an established valid probe texel:
+Established valid texels use:
 
 ```text
 new_value = lerp(old_value, traced_sample, 0.20)
 ```
 
-For a new/invalid probe, `new_value = traced_sample`.
+New/invalid probes use `new_value = traced_sample`.
 
-After update:
+After a probe update:
 
-- confidence increases toward valid/stable;
+- confidence moves toward valid/stable;
 - age increments;
-- last update frame is set;
-- lighting/scene revision is stored;
-- dirty flag is cleared;
-- new bank is published.
+- `state.x` becomes current frame;
+- `state.y` becomes current lighting/scene revision;
+- dirty bit clears;
+- new bank publishes through `state.z`;
+- valid bit sets.
 
 Camera movement changes none of this state.
 
-Static scene replacement destroys/rebuilds world placement and resets both radiance banks.
+Static scene replacement destroys/rebuilds world placement and clears both radiance banks.
 
-Dynamic movement can alter subsequent traced visibility and may mark affected probes dirty through the existing invalidation mechanism, but never rebuilds static placement.
+Dynamic movement does not rebuild placement. Stage 10 does not add targeted spatial invalidation scheduling; changed dynamic visibility is incorporated as round-robin probe updates revisit affected directions.
 
-Lighting revision changes reduce confidence/mark affected probes dirty consistently with existing invalidation rather than forcing a per-frame global clear.
+If the existing/future invalidation pass is dispatched, it may decay confidence/set dirty state but must preserve the bank bit.
 
 ## Feature flags
 
-`RADIANCE_FEATURE_WORLD_CACHE` is enabled only when all world-cache GPU resources are valid and `cache_counts.y > 0`.
+`RADIANCE_FEATURE_WORLD_CACHE` is enabled only when all real world-cache GPU resources are valid and `cache_counts.y > 0`.
 
-`RADIANCE_FEATURE_MULTIBOUNCE` is enabled only with the active world cache and stable previous-bank indirect evaluation.
+`RADIANCE_FEATURE_MULTIBOUNCE` is enabled only with active world cache and stable previous-bank indirect evaluation.
 
-For zero active probes:
+Zero active probes use:
 
 ```text
 cache_counts.y = 0
@@ -388,48 +391,39 @@ The Stage 9 image path then remains valid with zero world-cache contribution.
 
 ## GPU synchronization
 
-Before `CS_UpdateWorldRadianceCache`, the renderer ensures compute visibility/state for:
+Before `CS_UpdateWorldRadianceCache`, compute visibility/state is established for world probes, radiance, keys, update list/counter, and all scene tracing resources.
 
-- `WorldProbes`
-- `WorldProbeRadiance`
-- `WorldProbeKeys`
-- `RadianceUpdateList`
-- update counter
-- scene/global-SDF/dynamic-grid resources required by tracing
-
-The update pass performs storage writes to probe state and the inactive radiance bank. A storage/UAV barrier after the world-cache dispatch makes published banks/state visible before subsequent screen-probe shading consumes latest world radiance.
+The update writes probe state and inactive radiance-bank values. A storage/UAV barrier after the dispatch makes those writes visible before current-frame screen-probe shading samples latest published world radiance.
 
 No per-frame CPU/GPU readback is used.
 
 ## Frame order
 
-The Stage 10 frame order is:
+Semantic ordering is:
 
 ```text
-stream scene/dynamic updates
-  -> update dynamic grid if needed
-  -> fill fixed world-probe update list
-  -> world-radiance-cache update
-  -> barrier world cache
-  -> normal direct/screen-probe wavefront path
-  -> temporal/spatial screen-probe reuse
-  -> screen-probe emissive gather/history
+stream scene/dynamic data
+  -> refresh dynamic grid if needed
+  -> upload fixed world-probe update list/count
+  -> CS_UpdateWorldRadianceCache
+  -> world-cache UAV barrier
+  -> normal direct + screen-probe wavefront path
+  -> screen temporal/spatial reuse
+  -> existing screen emissive gather/history
   -> present
 ```
 
-World-cache update runs before current screen-probe shading so the visible frame can consume newly published world radiance while the world update itself still consumes the stable previous iteration.
-
-If actual current render ordering requires shared-buffer reset to happen first, the implementation plan may place the update immediately after the reset/setup required for `RadianceUpdateList`/counter ownership, but it must preserve the semantic ordering above: world-cache update before screen-probe world-radiance consumption and with stable previous-bank reads.
+If shared wavefront bookkeeping requires a small setup/reset immediately before the world-cache dispatch, the implementation plan may do so, but it must not clear `RayCounters[3]` between writing the world update count and dispatching `CS_UpdateWorldRadianceCache`. The normal screen-wavefront reset occurs after the world update.
 
 ## Failure behavior
 
-Allocation, placement or hash construction failure must not leave partially enabled world-cache flags or dangling descriptors.
+Allocation, placement or hash construction failure must not leave partially enabled flags or dangling descriptors.
 
-Scene setup either produces:
+Scene setup produces one of:
 
-- valid real world-cache resources and zero-or-more active probes; or
-- valid dummy/minimal resources with world-cache features disabled; or
-- a clean renderer scene-setup failure if mandatory allocation itself fails.
+- valid real world-cache resources plus zero-or-more active probes;
+- valid minimal dummy bindings with world-cache features disabled; or
+- a clean scene-setup failure if required allocation itself cannot be established.
 
 No partial feature enablement is allowed.
 
@@ -438,37 +432,38 @@ No partial feature enablement is allowed.
 ### `game.h`
 
 - Stage 10 fixed constants
-- real `RADIANCE_WORLD_RESOURCES` CPU/GPU ownership, counts, capacities and update cursor
+- real `RADIANCE_WORLD_RESOURCES` CPU/GPU ownership, counts/capacities/update cursor
 - world-cache update pipeline handle if absent
-- unchanged GPU ABI struct sizes
+- unchanged permanent GPU ABI struct sizes
 
 ### `sdf.c`
 
-- reuse/refactor static triangle/BVH/closest-point helpers only as needed for deterministic surface candidate placement/clearance
+- refactor/reuse static-triangle nearest-distance/BVH/closest-point helpers for deterministic probe placement clearance
 - no second persistent acceleration structure
 
 ### `render.c`
 
-- build deterministic static world-probe placement after Stage 9 scene data is available
-- allocate/upload real world-probe, radiance, key and invalidation resources
-- construct 16384-slot hash table
-- initialize two radiance banks
-- set world-cache constants/flags
-- populate fixed round-robin update list/count each frame
-- create/bind/dispatch `radiance_world_cache.cs.spv`
-- add required storage barriers
-- rebuild on scene replacement, not camera movement
-- retain valid zero-probe dummy binding behavior
+- build deterministic static world-probe placement after Stage 9 static data exists
+- allocate/upload real world-probe/radiance/key/invalidation resources
+- construct bounded 16384-slot table
+- initialize both banks
+- set cache constants/feature flags
+- populate round-robin update list/count each frame
+- create/bind/dispatch existing `radiance_world_cache.cs.spv`
+- add storage barriers
+- rebuild on static scene replacement, not camera movement
+- retain valid zero-probe dummy behavior
 
 ### `shader.hlsl`
 
 - preserve permanent space-6 bindings and `CS_UpdateWorldRadianceCache`
 - two-bank addressing and stable read-bank selection
-- 3x3x3 neighboring-cell lookup
+- 3x3x3/8-slot bounded lookup
 - surface-side filtering
-- 4x4 diffuse hemisphere integration
-- world-hit emission + analytic direct + emissive NEE + stable previous world indirect
-- correct invalidation dirty-bit behavior
+- 16-direction diffuse hemisphere integration
+- world-hit emission + analytic direct + albedo-weighted emissive NEE + stable previous world indirect
+- latest world indirect for screen/HZB hit reuse
+- invalidation dirty-bit correction
 - inactive-bank publish semantics
 
 ### `build.c`
@@ -477,30 +472,32 @@ No new world-cache entry point is added. `CS_UpdateWorldRadianceCache` already c
 
 ## Verification
 
-Stage 10 is complete only when all of these are demonstrated:
+Stage 10 is complete only when all are demonstrated:
 
-1. unchanged scenes produce deterministic world-probe placement;
+1. unchanged scenes produce deterministic placement;
 2. only static canonical surfaces anchor persistent probes;
-3. active count never exceeds 8192;
-4. hash capacity is exactly 16384;
-5. every active probe is reachable by its hash and every occupied hash slot decodes to a matching active probe;
-6. zero-probe scenes keep valid descriptors and both world-cache feature flags disabled;
-7. physical radiance addressing is bounded for 8192 * 16 * 2 entries;
-8. each update traces at most 64 * 16 = 1024 primary world-probe rays;
-9. same-frame update order cannot expose newly written bank data as previous-iteration input;
-10. first updates do not blend uninitialized history;
-11. established updates use 0.20 blend;
-12. diffuse queries use 16-direction hemisphere integration;
-13. explicit emissive NEE participates in world-hit updates;
-14. screen/offscreen surface shading can consume newest published world indirect;
-15. camera movement alone does not rebuild/clear/re-key the cache;
-16. scene replacement rebuilds and resets cleanly;
-17. invalidation marks dirty/confidence state without corrupting active-bank state;
-18. all active Slang entry points compile;
-19. all renderer C translation units syntax-compile;
-20. `git diff --check` passes;
-21. temporary Stage 10 verification helpers/workflows are removed after verification;
-22. M2 runtime testing renders the Cornell scene without descriptor/validation failure and exposes gradual multi-bounce convergence for visual/performance inspection.
+3. accepted placement candidates satisfy >= 0.0375 exact static clearance;
+4. active count never exceeds 8192;
+5. hash capacity is exactly 16384;
+6. insertion/lookup never examines more than 8 slots per requested cell;
+7. every active probe is reachable and every occupied hash slot decodes to a matching active probe;
+8. zero-probe scenes keep valid descriptors and both world-cache feature flags disabled;
+9. physical radiance addressing is bounded for exactly 8192 * 16 * 2 entries;
+10. each frame updates at most 64 probes / 1024 primary world-probe rays;
+11. same-frame update order cannot expose newly written bank data as previous-iteration input;
+12. first updates do not blend uninitialized history;
+13. established updates use 0.20 blend;
+14. diffuse queries use 16-direction weighted integration and receiver albedo;
+15. explicit emissive NEE participates in world-hit updates with receiver albedo;
+16. both screen/HZB and offscreen world hits can consume latest published world indirect;
+17. camera movement alone does not rebuild/clear/re-key world cache;
+18. static scene replacement rebuilds/resets cleanly;
+19. invalidation preserves `state.z` active-bank state;
+20. all active Slang entries compile;
+21. all renderer C translation units syntax-compile;
+22. `git diff --check` passes;
+23. temporary Stage 10 verification helpers/workflows are removed after verification;
+24. M2 Cornell runtime renders without descriptor/validation failure and exposes gradual multi-bounce convergence for visual/performance inspection.
 
 Compile/structural verification does not prove final lighting quality. Cornell convergence, emitter energy distribution, flicker and FPS remain runtime validation items after implementation is pushed.
 
@@ -514,5 +511,6 @@ Compile/structural verification does not prove final lighting quality. Cornell c
 - skinned-mesh persistent GI anchors
 - translucent GI
 - recursive path tracing
+- targeted dynamic-object spatial invalidation scheduling
 - renderer-wide BRDF/material redesign
-- replacing the screen-probe or surface-cache subsystems
+- replacing screen probes or the surface cache
