@@ -6,46 +6,7 @@ on:
       - dustmite-radiance-structure
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  apply-style:
-    if: github.event_name == 'push' && github.event.head_commit.message == 'run radiance style pass'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: verify behavior before formatting
-        run: |
-          python3 tests/structure_contract.py
-          python3 tests/behavior_contract.py
-      - name: format every engine source except frozen files
-        shell: bash
-        run: |
-          STYLE='{BasedOnStyle: LLVM, IndentWidth: 4, TabWidth: 4, UseTab: Never, ColumnLimit: 160, BreakBeforeBraces: Attach, PointerAlignment: Right, SortIncludes: Never, AllowShortEnumsOnASingleLine: true, AllowShortIfStatementsOnASingleLine: true, AllowShortLoopsOnASingleLine: true, AllowShortFunctionsOnASingleLine: Empty}'
-          clang-format -i --style="$STYLE" \
-            game.h gpu.h render_internal.h \
-            main.c init.c glb.c gltf.c bvh.c lmap.c gpu.c render.c bake.c cache.c beam.c
-          for shader in shaders/vertex.hlsl shaders/fragment.hlsl shaders/compute.hlsl shaders/compute_base.hlsl shaders/vision_compute.hlsl shaders/lightmap_queue.hlsl shaders/probe_wavefront.hlsl; do
-            clang-format -i --assume-filename=shader.cpp --style="$STYLE" "$shader"
-          done
-          git diff --check
-          git diff --exit-code 0ae0e70364210ec302c8b076ea5513d0dd716612 -- build.c felix-format
-      - name: verify behavior after formatting
-        run: |
-          python3 tests/structure_contract.py
-          python3 tests/behavior_contract.py
-      - name: publish style pass
-        run: |
-          git config user.name xt9y
-          git config user.email felix@xt9y.de
-          git add game.h gpu.h render_internal.h main.c init.c glb.c gltf.c bvh.c lmap.c gpu.c render.c bake.c cache.c beam.c shaders
-          git commit -m "normalize radiance code style"
-          git push origin HEAD:dustmite-radiance-structure
-
   structure:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -57,6 +18,12 @@ jobs:
         run: python3 tests/structure_contract.py
       - name: verify Dustmite behavior contract
         run: python3 tests/behavior_contract.py
+      - name: verify clean migration state
+        run: |
+          test ! -e tools/apply_gpu_split.py
+          test ! -e tools/fix_gpu_context_split.py
+          git diff --check
+          git diff --exit-code 0ae0e70364210ec302c8b076ea5513d0dd716612 -- build.c felix-format
 
   syntax:
     runs-on: ubuntu-latest
