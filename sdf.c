@@ -540,3 +540,245 @@ fail:
     sdf_free_global_clipmaps(out);
     return false;
 }
+
+typedef struct WORLD_PROBE_CANDIDATE {
+    int32_t cell[3];
+    VEC3 position;
+    float clearance;
+    uint32_t surface_id;
+    uint32_t object_index;
+    uint32_t revision;
+} WORLD_PROBE_CANDIDATE;
+
+static VEC3 cross3(VEC3 a, VEC3 b) {
+    return (VEC3){a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
+static VEC3 closest_point_triangle(VEC3 p, const SDF_TRIANGLE *triangle) {
+    const VEC3 ab = sub3(triangle->b, triangle->a);
+    const VEC3 ac = sub3(triangle->c, triangle->a);
+    const VEC3 ap = sub3(p, triangle->a);
+    const float d1 = dot3(ab, ap), d2 = dot3(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return triangle->a;
+    const VEC3 bp = sub3(p, triangle->b);
+    const float d3 = dot3(ab, bp), d4 = dot3(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return triangle->b;
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) return add3(triangle->a, scale3(ab, d1 / (d1 - d3)));
+    const VEC3 cp = sub3(p, triangle->c);
+    const float d5 = dot3(ab, cp), d6 = dot3(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return triangle->c;
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) return add3(triangle->a, scale3(ac, d2 / (d2 - d6)));
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && d4 - d3 >= 0.0f && d5 - d6 >= 0.0f) {
+        const VEC3 bc = sub3(triangle->c, triangle->b);
+        return add3(triangle->b, scale3(bc, (d4 - d3) / ((d4 - d3) + (d5 - d6))));
+    }
+    const float denom = 1.0f / (va + vb + vc);
+    return add3(triangle->a, add3(scale3(ab, vb * denom), scale3(ac, vc * denom)));
+}
+
+static uint32_t world_hash32(uint32_t x) {
+    x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u; return x;
+}
+
+static uint32_t world_hash_combine(uint32_t a, uint32_t b) {
+    return world_hash32(a ^ (b + 0x9e3779b9u + (a << 6u) + (a >> 2u)));
+}
+
+static uint32_t world_cell_key(const int32_t cell[3]) {
+    uint32_t h = world_hash_combine((uint32_t)cell[0], (uint32_t)cell[1]);
+    return world_hash_combine(h, (uint32_t)cell[2]) | 1u;
+}
+
+static int world_candidate_compare(const void *lhs, const void *rhs) {
+    const WORLD_PROBE_CANDIDATE *a = lhs, *b = rhs;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (a->cell[axis] < b->cell[axis]) return -1;
+        if (a->cell[axis] > b->cell[axis]) return 1;
+    }
+    if (a->clearance > b->clearance) return -1;
+    if (a->clearance < b->clearance) return 1;
+    if (a->surface_id < b->surface_id) return -1;
+    if (a->surface_id > b->surface_id) return 1;
+    return 0;
+}
+
+bool sdf_build_world_probes(
+    const GLOBAL_SDF_DATA *global_sdf,
+    const RADIANCE_SCENE_DATA *radiance_scene,
+    const GPU_OBJECT *objects,
+    uint32_t object_count,
+    WORLD_PROBE_STATE *out_probes,
+    uint32_t probe_capacity,
+    uint32_t *out_probe_count,
+    uint32_t *out_keys,
+    uint32_t key_capacity,
+    float spacing,
+    float radius,
+    float clearance,
+    float min_clearance
+) {
+    if (!global_sdf || !radiance_scene || !objects || !out_probes || !out_probe_count || !out_keys ||
+        !probe_capacity || !key_capacity || (key_capacity & (key_capacity - 1u)) || spacing <= 0.0f ||
+        radius <= 0.0f || clearance <= 0.0f || min_clearance < 0.0f)
+        return false;
+    *out_probe_count = 0u;
+    memset(out_keys, 0, (size_t)key_capacity * sizeof(*out_keys));
+    if (!global_sdf->valid || !global_sdf->clip_count || !global_sdf->cpu_clipmaps || !global_sdf->cpu_page_table ||
+        !global_sdf->cpu_bricks || !global_sdf->cpu_surface_ids || !radiance_scene->cpu_triangles)
+        return true;
+
+    uint32_t static_count = 0u;
+    for (uint32_t i = 0u; i < radiance_scene->triangle_count; ++i) {
+        uint32_t object_index = radiance_scene->cpu_triangles[i].meta[0];
+        if (object_index >= object_count) return false;
+        if (objects[object_index].state == (uint32_t)STATIC) ++static_count;
+    }
+    if (!static_count) return true;
+
+    SDF_BUILD build = {0};
+    build.triangle_count = static_count;
+    build.triangles = malloc((size_t)static_count * sizeof(*build.triangles));
+    build.nodes = calloc((size_t)static_count * 2u, sizeof(*build.nodes));
+    if (!build.triangles || !build.nodes) goto fail;
+    uint32_t cursor = 0u;
+    for (uint32_t i = 0u; i < radiance_scene->triangle_count; ++i) {
+        const GPU_SCENE_TRIANGLE *source = &radiance_scene->cpu_triangles[i];
+        uint32_t object_index = source->meta[0];
+        if (objects[object_index].state != (uint32_t)STATIC) continue;
+        SDF_TRIANGLE *triangle = &build.triangles[cursor++];
+        MAT4 world = objects[object_index].world;
+        triangle->a = sdf_transform_point(world, (VEC3){source->p0[0], source->p0[1], source->p0[2]});
+        triangle->b = sdf_transform_point(world, (VEC3){source->p1[0], source->p1[1], source->p1[2]});
+        triangle->c = sdf_transform_point(world, (VEC3){source->p2[0], source->p2[1], source->p2[2]});
+        triangle->centroid = scale3(add3(add3(triangle->a, triangle->b), triangle->c), 1.0f / 3.0f);
+        triangle->min = vmin3(triangle->a, vmin3(triangle->b, triangle->c));
+        triangle->max = vmax3(triangle->a, vmax3(triangle->b, triangle->c));
+        triangle->surface_id = i;
+    }
+    if (cursor != static_count) goto fail;
+    build_node(&build, 0u, static_count);
+
+    size_t candidate_capacity = 4096u, candidate_count = 0u;
+    WORLD_PROBE_CANDIDATE *candidates = malloc(candidate_capacity * sizeof(*candidates));
+    if (!candidates) goto fail;
+    uint32_t level_count = global_sdf->clip_count < 2u ? global_sdf->clip_count : 2u;
+    for (uint32_t level = 0u; level < level_count; ++level) {
+        const GPU_GLOBAL_SDF_CLIPMAP *clip = &global_sdf->cpu_clipmaps[level];
+        uint32_t dim_x = clip->grid[0], dim_y = clip->grid[1], dim_z = clip->grid[2];
+        uint32_t brick_res = clip->data[0], brick_stride = clip->data[1];
+        if (!dim_x || !dim_y || !dim_z || !brick_res || !brick_stride) continue;
+        float voxel = clip->voxel_brick[0], brick_world = clip->voxel_brick[1];
+        float extent = clip->center_extent[3];
+        VEC3 origin = {clip->center_extent[0] - extent, clip->center_extent[1] - extent, clip->center_extent[2] - extent};
+        uint64_t logical_count = (uint64_t)dim_x * dim_y * dim_z;
+        for (uint64_t logical = 0u; logical < logical_count; ++logical) {
+            uint64_t page = (uint64_t)clip->grid[3] + logical;
+            if (page >= global_sdf->page_table_count) goto fail_candidates;
+            uint32_t physical = global_sdf->cpu_page_table[page];
+            if (physical == UINT32_MAX) continue;
+            uint32_t bx = (uint32_t)(logical % dim_x);
+            uint32_t by = (uint32_t)((logical / dim_x) % dim_y);
+            uint32_t bz = (uint32_t)(logical / ((uint64_t)dim_x * dim_y));
+            for (uint32_t vz = 0u; vz < brick_res; ++vz)
+                for (uint32_t vy = 0u; vy < brick_res; ++vy)
+                    for (uint32_t vx = 0u; vx < brick_res; ++vx) {
+                        uint32_t local = vx + brick_res * (vy + brick_res * vz);
+                        uint64_t index64 = (uint64_t)clip->data[2] + (uint64_t)physical * brick_stride + local;
+                        if (index64 >= global_sdf->voxel_count) goto fail_candidates;
+                        uint32_t surface_id = global_sdf->cpu_surface_ids[index64];
+                        if (surface_id == UINT32_MAX || surface_id >= radiance_scene->triangle_count) continue;
+                        if (global_sdf->cpu_bricks[index64] > voxel * 1.5f) continue;
+                        const GPU_SCENE_TRIANGLE *source = &radiance_scene->cpu_triangles[surface_id];
+                        uint32_t object_index = source->meta[0];
+                        if (object_index >= object_count || objects[object_index].state != (uint32_t)STATIC) continue;
+                        SDF_TRIANGLE triangle = {0};
+                        MAT4 world = objects[object_index].world;
+                        triangle.a = sdf_transform_point(world, (VEC3){source->p0[0], source->p0[1], source->p0[2]});
+                        triangle.b = sdf_transform_point(world, (VEC3){source->p1[0], source->p1[1], source->p1[2]});
+                        triangle.c = sdf_transform_point(world, (VEC3){source->p2[0], source->p2[1], source->p2[2]});
+                        VEC3 sample = {origin.x + (float)bx * brick_world + ((float)vx + 0.5f) * voxel,
+                                       origin.y + (float)by * brick_world + ((float)vy + 0.5f) * voxel,
+                                       origin.z + (float)bz * brick_world + ((float)vz + 0.5f) * voxel};
+                        VEC3 closest = closest_point_triangle(sample, &triangle);
+                        VEC3 n = cross3(sub3(triangle.b, triangle.a), sub3(triangle.c, triangle.a));
+                        float n2 = length_sq3(n);
+                        if (n2 <= 1.0e-12f) continue;
+                        n = scale3(n, 1.0f / sqrtf(n2));
+                        WORLD_PROBE_CANDIDATE candidate = {0};
+                        bool accepted = false;
+                        for (uint32_t side = 0u; side < 2u && !accepted; ++side) {
+                            float sign = side ? -1.0f : 1.0f;
+                            VEC3 pos = add3(closest, scale3(n, clearance * sign));
+                            uint32_t nearest_surface = UINT32_MAX;
+                            float nearest_sq = nearest_distance_sq(&build, 0u, pos, FLT_MAX, &nearest_surface);
+                            float nearest = sqrtf(fmaxf(nearest_sq, 0.0f));
+                            if (!isfinite(pos.x) || !isfinite(pos.y) || !isfinite(pos.z) || !isfinite(nearest) || nearest + 1.0e-6f < min_clearance) continue;
+                            candidate.position = pos;
+                            candidate.clearance = nearest;
+                            candidate.surface_id = surface_id;
+                            candidate.object_index = object_index;
+                            candidate.revision = objects[object_index].revision;
+                            candidate.cell[0] = (int32_t)floorf(pos.x / spacing);
+                            candidate.cell[1] = (int32_t)floorf(pos.y / spacing);
+                            candidate.cell[2] = (int32_t)floorf(pos.z / spacing);
+                            accepted = true;
+                        }
+                        if (!accepted) continue;
+                        if (candidate_count == candidate_capacity) {
+                            if (candidate_capacity > SIZE_MAX / 2u / sizeof(*candidates)) goto fail_candidates;
+                            candidate_capacity *= 2u;
+                            WORLD_PROBE_CANDIDATE *grown = realloc(candidates, candidate_capacity * sizeof(*candidates));
+                            if (!grown) goto fail_candidates;
+                            candidates = grown;
+                        }
+                        candidates[candidate_count++] = candidate;
+                    }
+        }
+    }
+
+    qsort(candidates, candidate_count, sizeof(*candidates), world_candidate_compare);
+    uint32_t mask = key_capacity - 1u;
+    for (size_t i = 0u; i < candidate_count && *out_probe_count < probe_capacity;) {
+        size_t j = i + 1u;
+        while (j < candidate_count && candidates[j].cell[0] == candidates[i].cell[0] && candidates[j].cell[1] == candidates[i].cell[1] && candidates[j].cell[2] == candidates[i].cell[2]) ++j;
+        const WORLD_PROBE_CANDIDATE *candidate = &candidates[i];
+        uint32_t key = world_cell_key(candidate->cell);
+        uint32_t probe_index = *out_probe_count;
+        bool inserted = false;
+        for (uint32_t attempt = 0u; attempt < WORLD_PROBE_HASH_PROBE_LIMIT; ++attempt) {
+            uint32_t slot = (key + attempt) & mask;
+            if (out_keys[slot] != 0u) continue;
+            out_keys[slot] = probe_index + 1u;
+            inserted = true;
+            break;
+        }
+        if (inserted) {
+            WORLD_PROBE_STATE *state = &out_probes[probe_index];
+            memset(state, 0, sizeof(*state));
+            state->position_radius[0] = candidate->position.x;
+            state->position_radius[1] = candidate->position.y;
+            state->position_radius[2] = candidate->position.z;
+            state->position_radius[3] = radius;
+            state->identity[0] = key;
+            state->identity[1] = candidate->surface_id;
+            state->identity[2] = candidate->object_index;
+            state->identity[3] = candidate->revision;
+            ++*out_probe_count;
+        }
+        i = j;
+    }
+
+    free(candidates); free(build.triangles); free(build.nodes);
+    return true;
+
+fail_candidates:
+    free(candidates);
+fail:
+    free(build.triangles); free(build.nodes);
+    *out_probe_count = 0u;
+    memset(out_keys, 0, (size_t)key_capacity * sizeof(*out_keys));
+    return false;
+}
