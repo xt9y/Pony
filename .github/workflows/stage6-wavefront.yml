@@ -1,0 +1,169 @@
+name: stage6 wavefront
+
+on:
+  push:
+    branches: [radiance]
+
+permissions:
+  contents: write
+
+jobs:
+  stage6:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: radiance
+          fetch-depth: 2
+
+      - name: RED - confirm compatibility probe path is still active
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'TRACE_QUEUE miss_queue;' game.h
+          grep -Fq 'NriPipeline *screen_trace_pipeline;' game.h
+          grep -Fq 'build_screen_trace(renderer, command_buffer);' render.c
+          grep -Fq 'build_miss_queue(renderer, command_buffer);' render.c
+          grep -Fq 'build_sdf_trace(renderer, command_buffer);' render.c
+          grep -Fq 'build_screen_probes(renderer, command_buffer);' render.c
+          grep -Fq '{"CS_ScreenTrace", "compute", "screen_trace.cs.spv", NULL}' build.c
+          echo 'RED confirmed: compatibility queue is active'
+
+      - name: Apply chapter 6
+        run: python3 .github/stage6_wavefront.py
+
+      - name: GREEN - verify one wavefront radiance path
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'RADIANCE_WAVEFRONT wavefront;' game.h
+          grep -Fq 'RADIANCE_PROBES probes;' game.h
+          grep -Fq 'NriPipelineLayout *wavefront_layout;' game.h
+          grep -Fq 'wavefront_screen_pipeline' game.h
+          grep -Fq 'build_wavefront_screen_probes(renderer, command_buffer);' render.c
+          grep -Fq 'constants.feature_flags[2] = renderer->wavefront.ray_capacity;' render.c
+          grep -Fq 'CmdClearStorage(command_buffer, &zero_current);' render.c
+          grep -Fq 'create_compute_pipeline(renderer, "build/shaders/radiance_screen.cs.spv", renderer->wavefront_layout' render.c
+          grep -Fq 'create_compute_pipeline(renderer, "build/shaders/radiance_local.cs.spv", renderer->wavefront_layout' render.c
+          grep -Fq 'create_compute_pipeline(renderer, "build/shaders/radiance_shade.cs.spv", renderer->wavefront_layout' render.c
+          grep -Fq 'create_compute_pipeline(renderer, "build/shaders/radiance_probe_resolve.cs.spv", renderer->wavefront_layout' render.c
+          grep -Fq 'RayRadiance[index] = float4(ReflectedDirectAtPixel(hit_pixel), 1.0f);' shader.hlsl
+          grep -Fq 'else if (ray.type == TRACE_RAY_DIFFUSE) radiance = SurfaceReflectedRadiance(hit);' shader.hlsl
+
+          ! grep -Fq 'TRACE_QUEUE miss_queue;' game.h
+          ! grep -Fq 'TRACE_BUFFER trace_hits;' game.h
+          ! grep -Fq 'SURFACE_CACHE surface_cache;' game.h
+          ! grep -Fq 'screen_probe_radiance' game.h
+          ! grep -Fq 'screen_trace_pipeline' game.h
+          ! grep -Fq 'trace_compact_pipeline' game.h
+          ! grep -Fq 'surface_cache_pipeline' game.h
+          ! grep -Fq 'build_screen_trace(renderer, command_buffer);' render.c
+          ! grep -Fq 'build_miss_queue(renderer, command_buffer);' render.c
+          ! grep -Fq 'build_sdf_trace(renderer, command_buffer);' render.c
+          ! grep -Fq 'build_screen_probes(renderer, command_buffer);' render.c
+          ! grep -Fq '{"CS_ScreenTrace", "compute", "screen_trace.cs.spv", NULL}' build.c
+          ! grep -Fq '{"CS_SDFTrace", "compute", "sdf_trace.cs.spv", NULL}' build.c
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          r = Path('render.c').read_text()
+          h = Path('game.h').read_text()
+          s = Path('shader.hlsl').read_text()
+
+          frame = re.search(r'bool renderer_frame\([^)]*\) \{(.*)\n\}', r, re.S)
+          assert frame
+          body = frame.group(1)
+          expected = [
+              'record_gbuffer_pass(renderer, command_buffer);',
+              'build_hzb(renderer, command_buffer);',
+              'build_direct_radiance(renderer, command_buffer);',
+              'build_wavefront_screen_probes(renderer, command_buffer);',
+              'build_emissive_gather(renderer, command_buffer);',
+              'record_present_pass(renderer, command_buffer, swapchain_index);',
+          ]
+          positions = [body.index(x) for x in expected]
+          assert positions == sorted(positions)
+          for old in ['build_screen_trace(', 'build_miss_queue(', 'build_sdf_trace(', 'build_screen_probes(']:
+              assert old not in body
+
+          wave = re.search(r'static void build_wavefront_screen_probes\([^)]*\) \{(.*?)\n\}', r, re.S)
+          assert wave
+          wb = wave.group(1)
+          order = [
+              'wavefront_reset_pipeline',
+              'wavefront_budget_pipeline',
+              'wavefront_generate_pipeline',
+              'wavefront_screen_pipeline',
+              'wavefront_local_pipeline',
+              'wavefront_shade_pipeline',
+              'wavefront_resolve_pipeline',
+          ]
+          pos = [wb.index(x) for x in order]
+          assert pos == sorted(pos)
+
+          assert 'NriDescriptorSet *wavefront_queue_set;' in h
+          assert 'NriDescriptorSet *wavefront_cache_set;' in h
+          assert 'NriDescriptorSet *wavefront_probe_set;' in h
+          assert 'FeatureEnabled(RADIANCE_FEATURE_TEMPORAL_PROBES)' in s
+          print('stage6 wavefront architecture verified')
+          PY
+          git diff --check
+
+      - name: Compile active and frozen shader entries
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 \
+            -o /tmp/slang.tar.gz \
+            https://github.com/shader-slang/slang/releases/download/v2026.18.3/slang-2026.18.3-linux-x86_64-glibc-2.27.tar.gz
+          mkdir -p /tmp/slang
+          tar -xzf /tmp/slang.tar.gz -C /tmp/slang
+          SLANGC="$(find /tmp/slang -type f -name slangc | head -n1)"
+          test -n "$SLANGC"
+          chmod +x "$SLANGC"
+          export LD_LIBRARY_PATH="$(dirname "$SLANGC")/../lib:${LD_LIBRARY_PATH:-}"
+          compile() {
+            entry="$1"; stage="$2"; out="/tmp/${entry}.spv"
+            "$SLANGC" shader.hlsl -entry "$entry" -stage "$stage" -target spirv -profile sm_6_6 -capability spirv_1_5 -matrix-layout-row-major -fvk-use-dx-layout -O3 -o "$out"
+            test -s "$out"
+          }
+          compile VS_GBuffer vertex
+          compile PS_GBufferFull fragment
+          compile CS_HZB compute
+          compile CS_RadianceDirect compute
+          compile CS_ResetWavefront compute
+          compile CS_ClassifyRayBudgets compute
+          compile CS_GenerateProbeRays compute
+          compile CS_WavefrontScreenTrace compute
+          compile CS_WavefrontLocalTrace compute
+          compile CS_ShadeRayHits compute
+          compile CS_ResolveDirectionalProbes compute
+          compile CS_EmissiveGather compute
+          compile CS_ReprojectScreenProbes compute
+          compile CS_SpatialReuseScreenProbes compute
+          compile PS_Present fragment
+
+      - name: Syntax compile C sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/libsdl-org/SDL.git /tmp/SDL >/dev/null 2>&1
+          git clone --depth 1 https://github.com/NVIDIA-RTX/NRI.git /tmp/NRI >/dev/null 2>&1
+          FLAGS='-I. -I/tmp/SDL/include -I/tmp/NRI/Include -I/tmp/NRI/Include/Extensions'
+          for f in init.c glb.c gltf.c scene.c sdf.c gpu.c render.c main.c; do
+            echo "syntax $f"
+            clang -std=c11 -fsyntax-only $FLAGS "$f"
+          done
+
+      - name: Commit chapter 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add game.h render.c shader.hlsl build.c
+          git diff --cached --quiet && exit 1
+          git commit -m 's6 wavefront screen probes'
+          git push origin HEAD:radiance
