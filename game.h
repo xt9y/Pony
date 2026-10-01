@@ -389,6 +389,40 @@ typedef struct GPU_GLOBAL_SDF_CLIPMAP {
     uint32_t data[4];
 } GPU_GLOBAL_SDF_CLIPMAP;
 
+typedef struct GLOBAL_SDF_DATA {
+    GPU_GLOBAL_SDF_CLIPMAP *cpu_clipmaps;
+    uint32_t *cpu_page_table;
+    float *cpu_bricks;
+    uint32_t *cpu_surface_ids;
+
+    NriBuffer *clipmaps;
+    NriBuffer *page_table;
+    NriBuffer *bricks;
+    NriBuffer *surface_ids;
+
+    NriDescriptor *clipmaps_srv;
+    NriDescriptor *page_table_srv;
+    NriDescriptor *bricks_srv;
+    NriDescriptor *surface_ids_srv;
+
+    NriAccessStage state;
+    uint32_t clip_count;
+    uint32_t page_table_count;
+    uint32_t physical_brick_count;
+    uint32_t voxel_count;
+    float coarsest_voxel_size;
+    bool valid;
+} GLOBAL_SDF_DATA;
+
+bool sdf_build_global_clipmaps(
+    const SCENE *scene,
+    const RADIANCE_SCENE_DATA *radiance_scene,
+    const GPU_OBJECT *objects,
+    uint32_t object_count,
+    GLOBAL_SDF_DATA *out
+);
+void sdf_free_global_clipmaps(GLOBAL_SDF_DATA *data);
+
 typedef struct SURFACE_HIT {
     float position_distance[4];
     float normal_confidence[4];
@@ -704,6 +738,7 @@ typedef struct RENDERER {
     SURFACE_CACHE radiance_surface_cache;
     RADIANCE_SCENE_DATA radiance_scene;
     RADIANCE_DYNAMIC_GRID dynamic_grid;
+    GLOBAL_SDF_DATA global_sdf;
     RADIANCE_SCENE_FALLBACKS radiance_fallbacks;
 
     NriDescriptorPool *descriptor_pool;
@@ -732,6 +767,7 @@ typedef struct RENDERER {
     NriPipeline *wavefront_generate_pipeline;
     NriPipeline *wavefront_screen_pipeline;
     NriPipeline *wavefront_dynamic_pipeline;
+    NriPipeline *wavefront_global_pipeline;
     NriPipeline *wavefront_local_pipeline;
     NriPipeline *wavefront_shade_pipeline;
     NriPipeline *wavefront_temporal_pipeline;
