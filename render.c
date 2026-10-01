@@ -120,22 +120,20 @@ static bool reserve_vertices(RENDERER *renderer, uint32_t needed) {
 static bool push_surface(RENDERER *renderer, const GLTF_VERTEX *vertex, LMAP_UV uv) {
     if (!reserve_vertices(renderer, renderer->vertex_count + 1u)) return false;
 
-    renderer->vertices[renderer->vertex_count++] = (RENDER_VERTEX){
-        .x = vertex->position.x,
-        .y = vertex->position.y,
-        .z = vertex->position.z,
-        .nx = vertex->normal.x,
-        .ny = vertex->normal.y,
-        .nz = vertex->normal.z,
-        .u = vertex->u,
-        .v = vertex->v,
-        .lu = uv.u,
-        .lv = uv.v,
-        .r = 1.0f,
-        .g = 1.0f,
-        .b = 1.0f,
-        .a = 1.0f
-    };
+    renderer->vertices[renderer->vertex_count++] = (RENDER_VERTEX){.x = vertex->position.x,
+                                                                   .y = vertex->position.y,
+                                                                   .z = vertex->position.z,
+                                                                   .nx = vertex->normal.x,
+                                                                   .ny = vertex->normal.y,
+                                                                   .nz = vertex->normal.z,
+                                                                   .u = vertex->u,
+                                                                   .v = vertex->v,
+                                                                   .lu = uv.u,
+                                                                   .lv = uv.v,
+                                                                   .r = 1.0f,
+                                                                   .g = 1.0f,
+                                                                   .b = 1.0f,
+                                                                   .a = 1.0f};
 
     return true;
 }
@@ -143,15 +141,8 @@ static bool push_surface(RENDERER *renderer, const GLTF_VERTEX *vertex, LMAP_UV 
 static bool push_line_vertex(RENDERER *renderer, VEC3 position, COLOR4 color) {
     if (!reserve_vertices(renderer, renderer->vertex_count + 1u)) return false;
 
-    renderer->vertices[renderer->vertex_count++] = (RENDER_VERTEX){
-        .x = position.x,
-        .y = position.y,
-        .z = position.z,
-        .r = color.r,
-        .g = color.g,
-        .b = color.b,
-        .a = color.a
-    };
+    renderer->vertices[renderer->vertex_count++] =
+        (RENDER_VERTEX){.x = position.x, .y = position.y, .z = position.z, .r = color.r, .g = color.g, .b = color.b, .a = color.a};
 
     return true;
 }
@@ -210,15 +201,8 @@ static bool make_probe_grid(const MESH *mesh, float spacing, PROBE_GRID *grid) {
     return true;
 }
 
-bool renderer_load_cached_lightmap(
-    RENDERER *renderer,
-    const char *path,
-    uint64_t scene_hash,
-    uint64_t layout_hash,
-    uint64_t volume_hash,
-    uint64_t beam_hash,
-    const LIGHTMAP *lightmap
-) {
+bool renderer_load_cached_lightmap(RENDERER *renderer, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash,
+                                   const LIGHTMAP *lightmap) {
     if (!renderer || !renderer->gpu->device || !lightmap) return false;
 
     CACHED_LIGHTMAP cached = {0};
@@ -280,20 +264,9 @@ bool renderer_load_cached_lightmap(
     return good;
 }
 
-bool renderer_rebake_current_scene(
-    RENDERER *renderer,
-    const MESH *mesh,
-    const GLTF_SCENE *visual,
-    const LIGHTMAP *lightmap,
-    const struct LIGHT *light,
-    const SKY *sky,
-    const VOLUMETRICS_LIGHTING *volumetrics,
-    const char *path,
-    uint64_t scene_hash,
-    uint64_t layout_hash,
-    uint64_t volume_hash,
-    uint64_t beam_hash
-) {
+bool renderer_rebake_current_scene(RENDERER *renderer, const MESH *mesh, const GLTF_SCENE *visual, const LIGHTMAP *lightmap, const struct LIGHT *light,
+                                   const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const char *path, uint64_t scene_hash, uint64_t layout_hash,
+                                   uint64_t volume_hash, uint64_t beam_hash) {
     if (!renderer || !mesh || !lightmap || !renderer->gpu->device || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics) return false;
 
     renderer->sun = light->directional;
@@ -509,7 +482,8 @@ static bool renderer_build_scene(RENDERER *renderer, const MESH *mesh, const GLT
 
             const LMAP_UV *uv = &lightmap->uvs[triangle * 6u];
 
-            if (!push_surface(renderer, &vertices[0], uv[0]) || !push_surface(renderer, &vertices[1], uv[1]) || !push_surface(renderer, &vertices[2], uv[2])) return false;
+            if (!push_surface(renderer, &vertices[0], uv[0]) || !push_surface(renderer, &vertices[1], uv[1]) || !push_surface(renderer, &vertices[2], uv[2]))
+                return false;
         }
 
         const uint32_t count = renderer->vertex_count - first;
@@ -541,47 +515,48 @@ static void renderer_handle_event(RENDERER *renderer, const SDL_Event *event) {
     if (!renderer || !event) return;
 
     switch (event->type) {
-        case SDL_EVENT_MOUSE_BUTTON_DOWN:
-            if (event->button.button == SDL_BUTTON_LEFT) renderer->dragging = true;
-            break;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        if (event->button.button == SDL_BUTTON_LEFT) renderer->dragging = true;
+        break;
 
-        case SDL_EVENT_MOUSE_BUTTON_UP:
-            if (event->button.button == SDL_BUTTON_LEFT) renderer->dragging = false;
-            break;
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+        if (event->button.button == SDL_BUTTON_LEFT) renderer->dragging = false;
+        break;
 
-        case SDL_EVENT_MOUSE_MOTION:
-            if (renderer->dragging) {
-                renderer->yaw += event->motion.xrel * 0.0075f;
-                renderer->pitch += event->motion.yrel * 0.0075f;
+    case SDL_EVENT_MOUSE_MOTION:
+        if (renderer->dragging) {
+            renderer->yaw += event->motion.xrel * 0.0075f;
+            renderer->pitch += event->motion.yrel * 0.0075f;
 
-                if (renderer->pitch > 1.45f) renderer->pitch = 1.45f;
-                if (renderer->pitch < -1.45f) renderer->pitch = -1.45f;
-            }
-            break;
+            if (renderer->pitch > 1.45f) renderer->pitch = 1.45f;
+            if (renderer->pitch < -1.45f) renderer->pitch = -1.45f;
+        }
+        break;
 
-        case SDL_EVENT_MOUSE_WHEEL:
-            renderer->distance -= event->wheel.y * (renderer->distance * 0.08f);
+    case SDL_EVENT_MOUSE_WHEEL:
+        renderer->distance -= event->wheel.y * (renderer->distance * 0.08f);
 
-            if (renderer->distance < renderer->scene_radius * 0.05f) renderer->distance = renderer->scene_radius * 0.05f;
-            if (renderer->distance > renderer->scene_radius * 20.0f) renderer->distance = renderer->scene_radius * 20.0f;
-            break;
+        if (renderer->distance < renderer->scene_radius * 0.05f) renderer->distance = renderer->scene_radius * 0.05f;
+        if (renderer->distance > renderer->scene_radius * 20.0f) renderer->distance = renderer->scene_radius * 20.0f;
+        break;
 
-        case SDL_EVENT_KEY_DOWN:
-            if (!event->key.repeat && event->key.key == SDLK_TAB) renderer->show_debug = !renderer->show_debug;
-            if (!event->key.repeat && event->key.key == SDLK_F5) renderer->show_volume = !renderer->show_volume;
+    case SDL_EVENT_KEY_DOWN:
+        if (!event->key.repeat && event->key.key == SDLK_TAB) renderer->show_debug = !renderer->show_debug;
+        if (!event->key.repeat && event->key.key == SDLK_F5) renderer->show_volume = !renderer->show_volume;
 
-            if (!event->key.repeat && (event->key.key == SDLK_F1 || event->key.key == SDLK_F3 || event->key.key == SDLK_F4)) {
-                const uint32_t view = (uint32_t)(event->key.key - SDLK_F1) + 1u;
-                renderer->debug_view = renderer->debug_view == view ? 0u : view;
-            }
-            break;
+        if (!event->key.repeat && (event->key.key == SDLK_F1 || event->key.key == SDLK_F3 || event->key.key == SDLK_F4)) {
+            const uint32_t view = (uint32_t)(event->key.key - SDLK_F1) + 1u;
+            renderer->debug_view = renderer->debug_view == view ? 0u : view;
+        }
+        break;
 
-        default:
-            break;
+    default:
+        break;
     }
 }
 
-static bool renderer_draw(RENDERER *renderer, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const PERIPHERAL_VISION *vision) {
+static bool renderer_draw(RENDERER *renderer, const struct LIGHT *light, const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics,
+                          const PERIPHERAL_VISION *vision) {
     if (!renderer || !renderer->gpu->window || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics || !vision) return false;
 
     DIRECTIONAL_LIGHT sun = light->directional;
@@ -600,11 +575,8 @@ static bool renderer_draw(RENDERER *renderer, const struct LIGHT *light, const S
 
     const float fov = 62.0f * 3.14159265358979323846f / 180.0f;
     const float cp = cosf(renderer->pitch);
-    const VEC3 eye = v3(
-        renderer->target.x + renderer->distance * cp * cosf(renderer->yaw),
-        renderer->target.y + renderer->distance * sinf(renderer->pitch),
-        renderer->target.z + renderer->distance * cp * sinf(renderer->yaw)
-    );
+    const VEC3 eye = v3(renderer->target.x + renderer->distance * cp * cosf(renderer->yaw), renderer->target.y + renderer->distance * sinf(renderer->pitch),
+                        renderer->target.z + renderer->distance * cp * sinf(renderer->yaw));
     const VEC3 forward = v3_normalize(v3_sub(renderer->target, eye));
     const VEC3 right = v3_normalize(v3_cross(forward, v3(0.0f, 1.0f, 0.0f)));
     const VEC3 up = v3_cross(right, forward);
@@ -616,18 +588,16 @@ static bool renderer_draw(RENDERER *renderer, const struct LIGHT *light, const S
     const MAT4 projection = m4_perspective(fov, aspect, znear, zfar);
     const MAT4 mvp = m4_mul(projection, view);
 
-    RENDER_FRAME frame = {
-        .eye = eye,
-        .right = right,
-        .up = up,
-        .forward = forward,
-        .sun = sun,
-        .sky = *sky,
-        .volumetrics = *volumetrics,
-        .vision = *vision,
-        .tan_half_fov = tan_half,
-        .aspect = aspect
-    };
+    RENDER_FRAME frame = {.eye = eye,
+                          .right = right,
+                          .up = up,
+                          .forward = forward,
+                          .sun = sun,
+                          .sky = *sky,
+                          .volumetrics = *volumetrics,
+                          .vision = *vision,
+                          .tan_half_fov = tan_half,
+                          .aspect = aspect};
 
     memcpy(frame.mvp, mvp.m, sizeof(frame.mvp));
     memcpy(frame.view, view.m, sizeof(frame.view));
@@ -662,7 +632,6 @@ static struct LIGHT *scene_directional_light(const SCENE *scene) {
 
     return NULL;
 }
-
 
 bool renderer_init(RENDERER *renderer, GPU *gpu) {
     if (!renderer || !gpu || !gpu->device) return false;

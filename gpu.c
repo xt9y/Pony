@@ -202,7 +202,8 @@ static bool acquire_queues(RENDERER *r) {
 
     if (r->gpu->core.GetQueue(r->gpu->device, NriQueueType_GRAPHICS, 0, &r->gpu->graphics_queue) != NriResult_SUCCESS) return false;
 
-    if (r->gpu->core.GetQueue(r->gpu->device, NriQueueType_COMPUTE, 0, &r->gpu->compute_queue) != NriResult_SUCCESS) r->gpu->compute_queue = r->gpu->graphics_queue;
+    if (r->gpu->core.GetQueue(r->gpu->device, NriQueueType_COMPUTE, 0, &r->gpu->compute_queue) != NriResult_SUCCESS)
+        r->gpu->compute_queue = r->gpu->graphics_queue;
 
     if (r->gpu->core.GetQueue(r->gpu->device, NriQueueType_COPY, 0, &r->gpu->copy_queue) != NriResult_SUCCESS) r->gpu->copy_queue = r->gpu->graphics_queue;
 
@@ -233,7 +234,8 @@ static bool create_gpu_timestamps(RENDERER *r) {
 
     const NriBufferDesc readback_desc = {.size = (uint64_t)r->gpu->timestamp_query_size * TIMESTAMP_CAPACITY};
 
-    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_HOST_READBACK, 0.0f, &readback_desc, &r->gpu->timestamp_readback) != NriResult_SUCCESS) {
+    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_HOST_READBACK, 0.0f, &readback_desc, &r->gpu->timestamp_readback) !=
+        NriResult_SUCCESS) {
         r->gpu->core.DestroyQueryPool(r->gpu->timestamp_pool);
         r->gpu->timestamp_pool = NULL;
         r->gpu->timestamp_query_size = 0u;
@@ -312,12 +314,7 @@ static NriShaderDesc compile_shader(const char *path, const char *entrypoint, co
     Uint8 *spirv = load_spirv(define, &spirv_size);
     if (!spirv) return (NriShaderDesc){0};
 
-    return (NriShaderDesc){
-        .stage = stage,
-        .bytecode = spirv,
-        .size = spirv_size,
-        .entryPointName = entrypoint
-    };
+    return (NriShaderDesc){.stage = stage, .bytecode = spirv, .size = spirv_size, .entryPointName = entrypoint};
 }
 
 static NriPipeline *compile_compute(RENDERER *r, NriPipelineLayout *layout, const char *path, const char *entrypoint, const char *define) {
@@ -346,107 +343,59 @@ static NriPipeline *compile_compute(RENDERER *r, NriPipelineLayout *layout, cons
 
 static NriPipeline *make_surface_pipeline(RENDERER *r, NriCoreInterface *core, NriPipelineLayout *layout, const NriShaderDesc *vs, const NriShaderDesc *ps) {
 
-    const NriVertexStreamDesc vb = {
-        .bindingSlot = 0,
-        .stepRate = NriVertexStreamStepRate_PER_VERTEX,
-        .stride = (uint16_t)sizeof(RENDER_VERTEX)
-    };
+    const NriVertexStreamDesc vb = {.bindingSlot = 0, .stepRate = NriVertexStreamStepRate_PER_VERTEX, .stride = (uint16_t)sizeof(RENDER_VERTEX)};
 
-    const NriVertexAttributeDesc attrs[4] = {
-        {
-            .d3d = {
-                .semanticName = "TEXCOORD",
-                .semanticIndex = 0
-            },
-            .vk = {
-                .location = 0
-            },
-            .offset = (uint32_t)offsetof(RENDER_VERTEX, x),
-            .format = NriFormat_RGB32_SFLOAT,
-            .streamIndex = 0
-        },
-        {
-            .d3d = {
-                .semanticName = "TEXCOORD",
-                .semanticIndex = 1
-            },
-            .vk = {
-                .location = 1
-            },
-            .offset = (uint32_t)offsetof(RENDER_VERTEX, nx),
-            .format = NriFormat_RGB32_SFLOAT,
-            .streamIndex = 0
-        },
-        {
-            .d3d = {
-                .semanticName = "TEXCOORD",
-                .semanticIndex = 2
-            },
-            .vk = {
-                .location = 2
-            },
-            .offset = (uint32_t)offsetof(RENDER_VERTEX, u),
-            .format = NriFormat_RG32_SFLOAT,
-            .streamIndex = 0
-        },
-        {
-            .d3d = {
-                .semanticName = "TEXCOORD",
-                .semanticIndex = 3
-            },
-            .vk = {
-                .location = 3
-            },
-            .offset = (uint32_t)offsetof(RENDER_VERTEX, lu),
-            .format = NriFormat_RG32_SFLOAT,
-            .streamIndex = 0
-        }
-    };
+    const NriVertexAttributeDesc attrs[4] = {{.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 0},
+                                              .vk = {.location = 0},
+                                              .offset = (uint32_t)offsetof(RENDER_VERTEX, x),
+                                              .format = NriFormat_RGB32_SFLOAT,
+                                              .streamIndex = 0},
+                                             {.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 1},
+                                              .vk = {.location = 1},
+                                              .offset = (uint32_t)offsetof(RENDER_VERTEX, nx),
+                                              .format = NriFormat_RGB32_SFLOAT,
+                                              .streamIndex = 0},
+                                             {.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 2},
+                                              .vk = {.location = 2},
+                                              .offset = (uint32_t)offsetof(RENDER_VERTEX, u),
+                                              .format = NriFormat_RG32_SFLOAT,
+                                              .streamIndex = 0},
+                                             {.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 3},
+                                              .vk = {.location = 3},
+                                              .offset = (uint32_t)offsetof(RENDER_VERTEX, lu),
+                                              .format = NriFormat_RG32_SFLOAT,
+                                              .streamIndex = 0}};
 
-    const NriVertexInputDesc vertex_input = {
-        .attributes = attrs,
-        .attributeNum = 4,
-        .streams = &vb,
-        .streamNum = 1
-    };
+    const NriVertexInputDesc vertex_input = {.attributes = attrs, .attributeNum = 4, .streams = &vb, .streamNum = 1};
 
-    const NriColorAttachmentDesc targets[2] = {
-        {
-            .format = NriFormat_RGBA16_SFLOAT,
-            .colorWriteMask = NriColorWriteBits_RGBA
-        }, {
-            .format = NriFormat_RGBA16_SFLOAT,
-            .colorWriteMask = NriColorWriteBits_RGBA
-        }
-    };
+    const NriColorAttachmentDesc targets[2] = {{.format = NriFormat_RGBA16_SFLOAT, .colorWriteMask = NriColorWriteBits_RGBA},
+                                               {.format = NriFormat_RGBA16_SFLOAT, .colorWriteMask = NriColorWriteBits_RGBA}};
 
-    const NriMultisampleDesc multisample = {
-        .sampleMask = NRI_ALL,
-        .sampleNum = 1
-    };
+    const NriMultisampleDesc multisample = {.sampleMask = NRI_ALL, .sampleNum = 1};
 
     const NriShaderDesc shaders[2] = {*vs, *ps};
 
-    const NriGraphicsPipelineDesc desc = {.pipelineLayout = layout,
+    const NriGraphicsPipelineDesc desc = {
+        .pipelineLayout = layout,
 
-                                          .vertexInput = &vertex_input,
+        .vertexInput = &vertex_input,
 
-                                          .inputAssembly = {.topology = NriTopology_TRIANGLE_LIST},
+        .inputAssembly = {.topology = NriTopology_TRIANGLE_LIST},
 
-                                          .rasterization = {.fillMode = NriFillMode_SOLID, .cullMode = NriCullMode_NONE, .frontCounterClockwise = true, .depthClamp = false},
+        .rasterization = {.fillMode = NriFillMode_SOLID, .cullMode = NriCullMode_NONE, .frontCounterClockwise = true, .depthClamp = false},
 
-                                          .multisample = &multisample,
+        .multisample = &multisample,
 
-                                          .outputMerger = {.colors = targets,
-                                                           .colorNum = 2,
+        .outputMerger = {.colors = targets,
+                         .colorNum = 2,
 
-                                                           .depth = {.compareOp = NriCompareOp_LESS, .write = true},
+                         .depth = {.compareOp = NriCompareOp_LESS, .write = true},
 
-                                                           .depthStencilFormat = r->depth_format},
+                         .depthStencilFormat = r->depth_format},
 
-                                          .shaders = shaders,
-                                          .shaderNum = 2,
-                                          .cache = r->gpu->pipeline_cache};
+        .shaders = shaders,
+        .shaderNum = 2,
+        .cache = r->gpu->pipeline_cache};
 
     NriPipeline *pipeline = NULL;
 
@@ -504,21 +453,11 @@ static bool create_pipeline_layout(RENDERER *r, NriPipelineLayout **out, const N
                 if (previous == type || sampled_namespace || storage_namespace) ++reg;
             }
 
-            ranges[set][i] = (NriDescriptorRangeDesc){
-                .baseRegisterIndex = reg,
-                .descriptorNum = 1,
-                .descriptorType = type,
-                .shaderStages = stages
-            };
+            ranges[set][i] = (NriDescriptorRangeDesc){.baseRegisterIndex = reg, .descriptorNum = 1, .descriptorType = type, .shaderStages = stages};
         }
     }
 
-    const NriPipelineLayoutDesc desc = {
-        .descriptorSets = sets,
-        .descriptorSetNum = 4,
-        .rootRegisterSpace = 4,
-        .shaderStages = stages
-    };
+    const NriPipelineLayoutDesc desc = {.descriptorSets = sets, .descriptorSetNum = 4, .rootRegisterSpace = 4, .shaderStages = stages};
 
     return r->gpu->core.CreatePipelineLayout(r->gpu->device, &desc, out) == NriResult_SUCCESS;
 }
@@ -528,20 +467,9 @@ static bool create_pipeline_layouts(RENDERER *r);
 static bool create_surface_layout(RENDERER *r) {
     static const NriDescriptorType camera[] = {NriDescriptorType_CONSTANT_BUFFER};
 
-    static const NriDescriptorType material[] = {
-        NriDescriptorType_TEXTURE,
-        NriDescriptorType_TEXTURE,
-        NriDescriptorType_TEXTURE,
-        NriDescriptorType_TEXTURE,
-        NriDescriptorType_TEXTURE,
-        NriDescriptorType_TEXTURE,
-        NriDescriptorType_SAMPLER,
-        NriDescriptorType_SAMPLER,
-        NriDescriptorType_SAMPLER,
-        NriDescriptorType_SAMPLER,
-        NriDescriptorType_SAMPLER,
-        NriDescriptorType_SAMPLER
-    };
+    static const NriDescriptorType material[] = {NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
+                                                 NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER,
+                                                 NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
 
@@ -568,14 +496,16 @@ static bool create_sky_layout(RENDERER *r) {
     return create_pipeline_layout(r, &r->sky_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
 
-static bool create_compute_layout(RENDERER *r, NriPipelineLayout **out, const NriDescriptorType *sources, uint8_t source_num, NriDescriptorType output_type, bool has_uniform) {
+static bool create_compute_layout(RENDERER *r, NriPipelineLayout **out, const NriDescriptorType *sources, uint8_t source_num, NriDescriptorType output_type,
+                                  bool has_uniform) {
     static const NriDescriptorType output_texture[] = {NriDescriptorType_STORAGE_TEXTURE};
 
     static const NriDescriptorType output_buffer[] = {NriDescriptorType_STORAGE_STRUCTURED_BUFFER};
 
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
 
-    const NriDescriptorType *sets[4] = {sources, output_type == NriDescriptorType_STORAGE_TEXTURE ? output_texture : output_buffer, has_uniform ? uniform : NULL, NULL};
+    const NriDescriptorType *sets[4] = {sources, output_type == NriDescriptorType_STORAGE_TEXTURE ? output_texture : output_buffer,
+                                        has_uniform ? uniform : NULL, NULL};
 
     const uint8_t counts[4] = {source_num, 1, has_uniform ? 1 : 0, 0};
 
@@ -588,7 +518,8 @@ static bool create_bake_layout(RENDERER *r) {
                                             NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
                                             NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER};
 
-    static const NriDescriptorType dst[] = {NriDescriptorType_STORAGE_TEXTURE, NriDescriptorType_STORAGE_STRUCTURED_BUFFER, NriDescriptorType_STORAGE_STRUCTURED_BUFFER};
+    static const NriDescriptorType dst[] = {NriDescriptorType_STORAGE_TEXTURE, NriDescriptorType_STORAGE_STRUCTURED_BUFFER,
+                                            NriDescriptorType_STORAGE_STRUCTURED_BUFFER};
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
     const NriDescriptorType *sets[4] = {src, dst, uniform, NULL};
     const uint8_t counts[4] = {12, 3, 1, 0};
@@ -633,30 +564,22 @@ static bool create_grade_layout(RENDERER *r) {
 }
 
 static bool create_volume_layout(RENDERER *r) {
-    static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER};
+    static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_STRUCTURED_BUFFER,
+                                            NriDescriptorType_STRUCTURED_BUFFER};
 
     return create_compute_layout(r, &r->volume_layout, src, 4, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_volume_compose_layout(RENDERER *r) {
-    static const NriDescriptorType src[] = {
-        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER
-    };
+    static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
+                                            NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
     return create_compute_layout(r, &r->volume_compose_layout, src, 6, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_compose_layout(RENDERER *r) {
-    static const NriDescriptorType src[] = {
-        NriDescriptorType_TEXTURE,
-        NriDescriptorType_TEXTURE,
-        NriDescriptorType_TEXTURE,
-        NriDescriptorType_TEXTURE,
-        NriDescriptorType_SAMPLER,
-        NriDescriptorType_SAMPLER,
-        NriDescriptorType_SAMPLER,
-        NriDescriptorType_SAMPLER
-    };
+    static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
+                                            NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
 
@@ -667,15 +590,13 @@ static bool create_compose_layout(RENDERER *r) {
 }
 
 static bool create_descriptor_pool_object(RENDERER *r, NriDescriptorPool **pool) {
-    const NriDescriptorPoolDesc desc = {
-        .descriptorSetMaxNum = 8192,
-        .samplerMaxNum = 8192,
-        .textureMaxNum = 8192,
-        .storageTextureMaxNum = 8192,
-        .structuredBufferMaxNum = 8192,
-        .storageStructuredBufferMaxNum = 8192,
-        .constantBufferMaxNum = 8192
-    };
+    const NriDescriptorPoolDesc desc = {.descriptorSetMaxNum = 8192,
+                                        .samplerMaxNum = 8192,
+                                        .textureMaxNum = 8192,
+                                        .storageTextureMaxNum = 8192,
+                                        .structuredBufferMaxNum = 8192,
+                                        .storageStructuredBufferMaxNum = 8192,
+                                        .constantBufferMaxNum = 8192};
 
     return r->gpu->core.CreateDescriptorPool(r->gpu->device, &desc, pool) == NriResult_SUCCESS;
 }
@@ -747,11 +668,9 @@ static bool track_buffer(RENDERER *r, NriBuffer *buffer) {
 }
 
 static void clear_temporary(RENDERER *r) {
-    for (uint32_t i = 0; i < r->gpu->temporary_descriptor_num; ++i)
-        r->gpu->core.DestroyDescriptor(r->gpu->temporary_descriptors[i]);
+    for (uint32_t i = 0; i < r->gpu->temporary_descriptor_num; ++i) r->gpu->core.DestroyDescriptor(r->gpu->temporary_descriptors[i]);
 
-    for (uint32_t i = 0; i < r->gpu->temporary_buffer_num; ++i)
-        r->gpu->core.DestroyBuffer(r->gpu->temporary_buffers[i]);
+    for (uint32_t i = 0; i < r->gpu->temporary_buffer_num; ++i) r->gpu->core.DestroyBuffer(r->gpu->temporary_buffers[i]);
     r->gpu->temporary_descriptor_num = r->gpu->temporary_buffer_num = 0;
 
     if (r->gpu->descriptor_pool) r->gpu->core.ResetDescriptorPool(r->gpu->descriptor_pool);
@@ -760,11 +679,9 @@ static void clear_temporary(RENDERER *r) {
 static void clear_frame_temporary(RENDERER *r, FRAME_CONTEXT *frame) {
     if (!frame) return;
 
-    for (uint32_t i = 0; i < frame->temporary_descriptor_num; ++i)
-        r->gpu->core.DestroyDescriptor(frame->temporary_descriptors[i]);
+    for (uint32_t i = 0; i < frame->temporary_descriptor_num; ++i) r->gpu->core.DestroyDescriptor(frame->temporary_descriptors[i]);
 
-    for (uint32_t i = 0; i < frame->temporary_buffer_num; ++i)
-        r->gpu->core.DestroyBuffer(frame->temporary_buffers[i]);
+    for (uint32_t i = 0; i < frame->temporary_buffer_num; ++i) r->gpu->core.DestroyBuffer(frame->temporary_buffers[i]);
     frame->temporary_descriptor_num = 0;
     frame->temporary_buffer_num = 0;
     frame->uniform_offset = 0u;
@@ -923,7 +840,8 @@ static void abort_work_commands(RENDERER *r, NriCommandAllocator *allocator, Nri
     r->gpu->active_work = NULL;
     r->gpu->active_frame = NULL;
 
-    if (r->gpu->core.CreateCommandAllocator(r->gpu->work_queue, &work->allocator) == NriResult_SUCCESS) r->gpu->core.CreateCommandBuffer(work->allocator, &work->command_buffer);
+    if (r->gpu->core.CreateCommandAllocator(r->gpu->work_queue, &work->allocator) == NriResult_SUCCESS)
+        r->gpu->core.CreateCommandBuffer(work->allocator, &work->command_buffer);
 }
 
 static bool create_frame_contexts(RENDERER *r) {
@@ -1007,7 +925,8 @@ static void abort_frame_commands(RENDERER *r, FRAME_CONTEXT *frame) {
     r->gpu->active_frame = NULL;
     clear_frame_temporary(r, frame);
 
-    if (r->gpu->core.CreateCommandAllocator(r->gpu->graphics_queue, &frame->allocator) == NriResult_SUCCESS) r->gpu->core.CreateCommandBuffer(frame->allocator, &frame->command_buffer);
+    if (r->gpu->core.CreateCommandAllocator(r->gpu->graphics_queue, &frame->allocator) == NriResult_SUCCESS)
+        r->gpu->core.CreateCommandBuffer(frame->allocator, &frame->command_buffer);
 }
 
 static NriDescriptor *create_texture_view(RENDERER *r, NriTexture *texture, NriTextureView type) {
@@ -1016,13 +935,7 @@ static NriDescriptor *create_texture_view(RENDERER *r, NriTexture *texture, NriT
     NriDescriptor *view = NULL;
 
     const NriTextureViewDesc desc = {
-        .texture = texture,
-        .type = type,
-        .format = r->gpu->core.GetTextureDesc(texture)->format,
-        .mipNum = 1,
-        .layerNum = 1,
-        .sliceNum = 1
-    };
+        .texture = texture, .type = type, .format = r->gpu->core.GetTextureDesc(texture)->format, .mipNum = 1, .layerNum = 1, .sliceNum = 1};
 
     if (r->gpu->core.CreateTextureView(&desc, &view) != NriResult_SUCCESS) return NULL;
 
@@ -1034,13 +947,7 @@ static NriDescriptor *create_buffer_view(RENDERER *r, NriBuffer *buffer, NriBuff
 
     NriDescriptor *view = NULL;
 
-    const NriBufferViewDesc desc = {
-        .buffer = buffer,
-        .type = type,
-        .offset = 0,
-        .size = r->gpu->core.GetBufferDesc(buffer)->size,
-        .structureStride = stride
-    };
+    const NriBufferViewDesc desc = {.buffer = buffer, .type = type, .offset = 0, .size = r->gpu->core.GetBufferDesc(buffer)->size, .structureStride = stride};
 
     if (r->gpu->core.CreateBufferView(&desc, &view) != NriResult_SUCCESS) return NULL;
 
@@ -1098,8 +1005,8 @@ static NriDescriptor *uniform_view(RENDERER *r, const void *data, size_t size) {
     return create_buffer_view(r, buffer, NriBufferView_CONSTANT_BUFFER, 0);
 }
 
-static bool
-bind_descriptor_set(RENDERER *r, NriCommandBuffer *cmd, NriPipelineLayout *layout, NriBindPoint point, uint32_t set_index, NriDescriptor *const *descriptors, uint32_t count) {
+static bool bind_descriptor_set(RENDERER *r, NriCommandBuffer *cmd, NriPipelineLayout *layout, NriBindPoint point, uint32_t set_index,
+                                NriDescriptor *const *descriptors, uint32_t count) {
     NriDescriptorSet *set = NULL;
     NriDescriptorPool *pool = r->gpu->active_frame ? r->gpu->active_frame->descriptor_pool : r->gpu->descriptor_pool;
 
@@ -1110,12 +1017,7 @@ bind_descriptor_set(RENDERER *r, NriCommandBuffer *cmd, NriPipelineLayout *layou
 
         const NriDescriptor *d = descriptors[i];
 
-        const NriUpdateDescriptorRangeDesc update = {
-            .descriptorSet = set,
-            .rangeIndex = i,
-            .descriptors = &d,
-            .descriptorNum = 1
-        };
+        const NriUpdateDescriptorRangeDesc update = {.descriptorSet = set, .rangeIndex = i, .descriptors = &d, .descriptorNum = 1};
 
         r->gpu->core.UpdateDescriptorRanges(&update, 1);
     }
@@ -1127,11 +1029,7 @@ bind_descriptor_set(RENDERER *r, NriCommandBuffer *cmd, NriPipelineLayout *layou
         *current = layout;
     }
 
-    r->gpu->core.CmdSetDescriptorSet(cmd, &(NriSetDescriptorSetDesc){
-        .setIndex = set_index,
-        .descriptorSet = set,
-        .bindPoint = point
-    });
+    r->gpu->core.CmdSetDescriptorSet(cmd, &(NriSetDescriptorSetDesc){.setIndex = set_index, .descriptorSet = set, .bindPoint = point});
 
     return true;
 }
@@ -1144,8 +1042,8 @@ static bool bind_uniform_data(RENDERER *r, NriCommandBuffer *cmd, NriPipelineLay
 
 static bool transition_texture(RENDERER *r, NriCommandBuffer *cmd, NriTexture *texture, NriAccessBits access, NriLayout layout, NriStageBits stages);
 
-static bool bind_bake_resources_ex(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, NriBuffer *active_in, NriBuffer *active_count,
-                                   NriBuffer *active_out, NriBuffer *active_out_count, const BAKE_UNIFORMS *uniforms, size_t size) {
+static bool bind_bake_resources_ex(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, NriBuffer *active_in,
+                                   NriBuffer *active_count, NriBuffer *active_out, NriBuffer *active_out_count, const BAKE_UNIFORMS *uniforms, size_t size) {
     if (!r || !cmd || !source || !destination || !r->lightmap_sampler || !r->bvh_node_buffer || !r->bvh_triangle_buffer || !r->lightmap_sample_buffer ||
         !r->lightmap_probe_buffer || !active_in || !active_count || !active_out || !active_out_count)
         return false;
@@ -1178,41 +1076,36 @@ static bool bind_bake_resources_ex(RENDERER *r, NriCommandBuffer *cmd, NriTextur
                             create_buffer_view(r, active_out, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32)),
                             create_buffer_view(r, active_out_count, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32))};
 
-    return bind_descriptor_set(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 0, src, 12) && bind_descriptor_set(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 1, dst, 3) &&
+    return bind_descriptor_set(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 0, src, 12) &&
+           bind_descriptor_set(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 1, dst, 3) &&
            bind_uniform_data(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
 }
 
 static bool bind_bake_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, const BAKE_UNIFORMS *uniforms, size_t size) {
-    return bind_bake_resources_ex(r, cmd, source, destination, r->lightmap_active_buffer[0], r->lightmap_active_count[0], r->lightmap_active_buffer[1], r->lightmap_active_count[1],
-                                  uniforms, size);
+    return bind_bake_resources_ex(r, cmd, source, destination, r->lightmap_active_buffer[0], r->lightmap_active_count[0], r->lightmap_active_buffer[1],
+                                  r->lightmap_active_count[1], uniforms, size);
 }
 
-static bool bind_probe_resources(RENDERER *r, NriCommandBuffer *cmd, NriBuffer *input, NriBuffer *nodes, NriBuffer *triangles, NriBuffer *output, const BAKE_UNIFORMS *uniforms,
-                                 size_t size) {
+static bool bind_probe_resources(RENDERER *r, NriCommandBuffer *cmd, NriBuffer *input, NriBuffer *nodes, NriBuffer *triangles, NriBuffer *output,
+                                 const BAKE_UNIFORMS *uniforms, size_t size) {
     const NriBufferBarrierDesc barrier = {.buffer = output, .after = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER}};
     r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
 
-    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){
-        .buffers = &barrier,
-        .bufferNum = 1
-    });
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
 
-    NriDescriptor *src[] = {
-        create_buffer_view(r, input, NriBufferView_STRUCTURED_BUFFER, sizeof(float[4])),
-        create_buffer_view(r, nodes, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
-        create_buffer_view(r, triangles, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE))
-    };
+    NriDescriptor *src[] = {create_buffer_view(r, input, NriBufferView_STRUCTURED_BUFFER, sizeof(float[4])),
+                            create_buffer_view(r, nodes, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
+                            create_buffer_view(r, triangles, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE))};
 
     NriDescriptor *dst = create_buffer_view(r, output, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(float[4]));
 
-    return bind_descriptor_set(r, cmd, r->probe_layout, NriBindPoint_COMPUTE, 0, src, 3) && bind_descriptor_set(r, cmd, r->probe_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
+    return bind_descriptor_set(r, cmd, r->probe_layout, NriBindPoint_COMPUTE, 0, src, 3) &&
+           bind_descriptor_set(r, cmd, r->probe_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
            bind_uniform_data(r, cmd, r->probe_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
 }
 
 static bool read_buffer(RENDERER *r, NriBuffer *output, PROBE_GRID *grid, uint32_t bytes, uint32_t count) {
-    const NriBufferDesc desc = {
-        .size = bytes
-    };
+    const NriBufferDesc desc = {.size = bytes};
 
     NriBuffer *staging = NULL;
 
@@ -1223,36 +1116,24 @@ static bool read_buffer(RENDERER *r, NriBuffer *output, PROBE_GRID *grid, uint32
     bool good = false;
 
     if (begin_commands(r, &allocator, &cmd) == NriResult_SUCCESS) {
-        const NriBufferBarrierDesc barrier = {
-            .buffer = output,
-            .before = {
-                .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
-                .stages = NriStageBits_COMPUTE_SHADER
-            },
-            .after = {
-                .access = NriAccessBits_COPY_SOURCE,
-                .stages = NriStageBits_COPY
-            }
-        };
+        const NriBufferBarrierDesc barrier = {.buffer = output,
+                                              .before = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER},
+                                              .after = {.access = NriAccessBits_COPY_SOURCE, .stages = NriStageBits_COPY}};
 
-        r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){
-            .buffers = &barrier,
-            .bufferNum = 1
-        });
+        r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
         r->gpu->core.CmdCopyBuffer(cmd, staging, 0, output, 0, bytes);
 
         good = submit_commands(r, allocator, cmd);
     }
 
     if (good) {
-        const float (*values)[4] = r->gpu->core.MapBuffer(staging, 0, bytes);
+        const float(*values)[4] = r->gpu->core.MapBuffer(staging, 0, bytes);
 
         good = values != NULL;
 
         if (good) {
             for (uint32_t i = 0; i < count; ++i) {
-                for (uint32_t j = 0; j < 9; ++j)
-                    memcpy(grid->probes[i].coefficients[j], values[i * 9u + j], sizeof(float[4]));
+                for (uint32_t j = 0; j < 9; ++j) memcpy(grid->probes[i].coefficients[j], values[i * 9u + j], sizeof(float[4]));
                 grid->probes[i].position[3] = values[i * 9u][3];
             }
 
@@ -1265,9 +1146,8 @@ static bool read_buffer(RENDERER *r, NriBuffer *output, PROBE_GRID *grid, uint32
     return good;
 }
 
-static bool bind_fx_resources(
-    RENDERER *r, NriCommandBuffer *cmd, NriPipeline *pipeline, NriTexture *source, NriTexture *destination, NriDescriptor *sampler_desc, const void *uniforms, uint32_t size
-) {
+static bool bind_fx_resources(RENDERER *r, NriCommandBuffer *cmd, NriPipeline *pipeline, NriTexture *source, NriTexture *destination,
+                              NriDescriptor *sampler_desc, const void *uniforms, uint32_t size) {
     if ((source && !transition_texture(r, cmd, source, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER)) ||
         !transition_texture(r, cmd, destination, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER))
         return false;
@@ -1282,64 +1162,43 @@ static bool bind_fx_resources(
         if (!bind_descriptor_set(r, cmd, layout, NriBindPoint_COMPUTE, 0, src, 2)) return false;
     }
 
-    return bind_descriptor_set(r, cmd, layout, NriBindPoint_COMPUTE, 1, &dst, 1) && (!size || bind_uniform_data(r, cmd, layout, NriBindPoint_COMPUTE, 2, uniforms, size));
+    return bind_descriptor_set(r, cmd, layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
+           (!size || bind_uniform_data(r, cmd, layout, NriBindPoint_COMPUTE, 2, uniforms, size));
 }
 
-static bool bind_volume_resources(
-    RENDERER *r,
-    NriCommandBuffer *cmd,
-    NriTexture *normal,
-    NriDescriptor *sampler_desc,
-    NriBuffer *probes,
-    NriBuffer *beams,
-    NriTexture *output,
-    const void *uniforms,
-    uint32_t size
-) {
+static bool bind_volume_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *normal, NriDescriptor *sampler_desc, NriBuffer *probes, NriBuffer *beams,
+                                  NriTexture *output, const void *uniforms, uint32_t size) {
     if (!transition_texture(r, cmd, normal, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
         !transition_texture(r, cmd, output, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER))
         return false;
 
-    NriDescriptor *src[] = {
-        create_texture_view(r, normal, NriTextureView_TEXTURE),
-        sampler_desc,
-        create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
-        create_buffer_view(r, beams, NriBufferView_STRUCTURED_BUFFER, sizeof(float))
-    };
+    NriDescriptor *src[] = {create_texture_view(r, normal, NriTextureView_TEXTURE), sampler_desc,
+                            create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
+                            create_buffer_view(r, beams, NriBufferView_STRUCTURED_BUFFER, sizeof(float))};
 
     NriDescriptor *dst = create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
 
-    return bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 0, src, 4) && bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
+    return bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 0, src, 4) &&
+           bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
            bind_uniform_data(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
 }
 
-static bool bind_volume_compose_resources(
-    RENDERER *r,
-    NriCommandBuffer *cmd,
-    NriTexture *hdr,
-    NriTexture *volume,
-    NriTexture *normal,
-    NriDescriptor *sampler_desc,
-    NriDescriptor *depth_sampler,
-    NriTexture *output,
-    const void *uniforms,
-    uint32_t size
-) {
+static bool bind_volume_compose_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *hdr, NriTexture *volume, NriTexture *normal,
+                                          NriDescriptor *sampler_desc, NriDescriptor *depth_sampler, NriTexture *output, const void *uniforms, uint32_t size) {
     NriTexture *sources[] = {hdr, volume, normal};
 
     for (uint32_t i = 0; i < 3; ++i)
         if (!transition_texture(r, cmd, sources[i], NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER)) return false;
 
-    if (!transition_texture(r, cmd, output, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER)) return false;
+    if (!transition_texture(r, cmd, output, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER))
+        return false;
 
-    NriDescriptor *src[] = {
-        create_texture_view(r, hdr, NriTextureView_TEXTURE),
-        create_texture_view(r, volume, NriTextureView_TEXTURE),
-        create_texture_view(r, normal, NriTextureView_TEXTURE),
-        sampler_desc,
-        sampler_desc,
-        depth_sampler
-    };
+    NriDescriptor *src[] = {create_texture_view(r, hdr, NriTextureView_TEXTURE),
+                            create_texture_view(r, volume, NriTextureView_TEXTURE),
+                            create_texture_view(r, normal, NriTextureView_TEXTURE),
+                            sampler_desc,
+                            sampler_desc,
+                            depth_sampler};
 
     NriDescriptor *dst = create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
 
@@ -1356,30 +1215,20 @@ static bool bind_camera_resources(RENDERER *r, NriCommandBuffer *cmd, const void
     return bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 1, data, size);
 }
 
-static bool bind_surface_resources(
-    RENDERER *r,
-    NriCommandBuffer *cmd,
-    const RENDER_MATERIAL *material,
-    NriTexture *lightmap,
-    NriDescriptor *material_sampler,
-    NriDescriptor *lightmap_sampler,
-    const void *uniforms,
-    size_t size
-) {
-    NriDescriptor *src[] = {
-        create_texture_view(r, material->base_color, NriTextureView_TEXTURE),
-        create_texture_view(r, material->metallic_roughness, NriTextureView_TEXTURE),
-        create_texture_view(r, material->normal, NriTextureView_TEXTURE),
-        create_texture_view(r, material->occlusion, NriTextureView_TEXTURE),
-        create_texture_view(r, material->emissive, NriTextureView_TEXTURE),
-        create_texture_view(r, lightmap, NriTextureView_TEXTURE),
-        material_sampler,
-        material_sampler,
-        material_sampler,
-        material_sampler,
-        material_sampler,
-        lightmap_sampler
-    };
+static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const RENDER_MATERIAL *material, NriTexture *lightmap, NriDescriptor *material_sampler,
+                                   NriDescriptor *lightmap_sampler, const void *uniforms, size_t size) {
+    NriDescriptor *src[] = {create_texture_view(r, material->base_color, NriTextureView_TEXTURE),
+                            create_texture_view(r, material->metallic_roughness, NriTextureView_TEXTURE),
+                            create_texture_view(r, material->normal, NriTextureView_TEXTURE),
+                            create_texture_view(r, material->occlusion, NriTextureView_TEXTURE),
+                            create_texture_view(r, material->emissive, NriTextureView_TEXTURE),
+                            create_texture_view(r, lightmap, NriTextureView_TEXTURE),
+                            material_sampler,
+                            material_sampler,
+                            material_sampler,
+                            material_sampler,
+                            material_sampler,
+                            lightmap_sampler};
 
     return bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 12) &&
            bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
@@ -1422,16 +1271,14 @@ static bool create_swapchain(RENDERER *r, uint32_t width, uint32_t height) {
         if (!window.x11.dpy || !window.x11.window) return false;
     }
 #endif
-    const NriSwapChainDesc desc = {
-        .window = window,
-        .queue = r->gpu->graphics_queue,
-        .width = (NriDim_t)width,
-        .height = (NriDim_t)height,
-        .textureNum = FRAME_QUEUE_DEPTH + 1u,
-        .format = NriSwapChainFormat_BT709_G22_8BIT,
-        .flags = NriSwapChainBits_VSYNC,
-        .queuedFrameNum = FRAME_QUEUE_DEPTH
-    };
+    const NriSwapChainDesc desc = {.window = window,
+                                   .queue = r->gpu->graphics_queue,
+                                   .width = (NriDim_t)width,
+                                   .height = (NriDim_t)height,
+                                   .textureNum = FRAME_QUEUE_DEPTH + 1u,
+                                   .format = NriSwapChainFormat_BT709_G22_8BIT,
+                                   .flags = NriSwapChainBits_VSYNC,
+                                   .queuedFrameNum = FRAME_QUEUE_DEPTH};
 
     if (r->gpu->swapchain_api.CreateSwapChain(r->gpu->device, &desc, &r->gpu->swapchain) != NriResult_SUCCESS) return false;
 
@@ -1455,22 +1302,13 @@ static bool create_swapchain(RENDERER *r, uint32_t width, uint32_t height) {
         TEXTURE_STATE *state = find_texture_state(r, textures[i]);
 
         if (!state) return false;
-        state->state = (NriAccessLayoutStage){
-            .layout = NriLayout_UNDEFINED,
-            .stages = NriStageBits_NONE
-        };
+        state->state = (NriAccessLayoutStage){.layout = NriLayout_UNDEFINED, .stages = NriStageBits_NONE};
 
         SWAPCHAIN_TEXTURE *frame = &r->gpu->swapchain_frames[i];
         frame->texture = textures[i];
 
         const NriTextureViewDesc view = {
-            .texture = textures[i],
-            .type = NriTextureView_COLOR_ATTACHMENT,
-            .format = r->gpu->swapchain_format,
-            .mipNum = 1,
-            .layerNum = 1,
-            .sliceNum = 1
-        };
+            .texture = textures[i], .type = NriTextureView_COLOR_ATTACHMENT, .format = r->gpu->swapchain_format, .mipNum = 1, .layerNum = 1, .sliceNum = 1};
 
         if (r->gpu->core.CreateTextureView(&view, &frame->color_attachment) != NriResult_SUCCESS ||
             r->gpu->core.CreateFence(r->gpu->device, NRI_SWAPCHAIN_SEMAPHORE, &frame->acquire) != NriResult_SUCCESS ||
@@ -1531,9 +1369,7 @@ static TEXTURE_STATE *find_texture_state(RENDERER *r, NriTexture *texture) {
     }
 
     TEXTURE_STATE *item = &r->gpu->texture_states[r->gpu->texture_state_num++];
-    *item = (TEXTURE_STATE){
-        .texture = texture
-    };
+    *item = (TEXTURE_STATE){.texture = texture};
 
     return item;
 }
@@ -1545,18 +1381,9 @@ static bool texture_barrier(RENDERER *r, NriCommandBuffer *cmd, NriTexture *text
 
     if (item->state.layout) before = item->state;
 
-    const NriTextureBarrierDesc barrier = {
-        .texture = texture,
-        .before = before,
-        .after = after,
-        .mipNum = 1,
-        .layerNum = 1
-    };
+    const NriTextureBarrierDesc barrier = {.texture = texture, .before = before, .after = after, .mipNum = 1, .layerNum = 1};
 
-    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){
-        .textures = &barrier,
-        .textureNum = 1
-    });
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.textures = &barrier, .textureNum = 1});
     item->state = after;
 
     return true;
@@ -1565,11 +1392,7 @@ static bool texture_barrier(RENDERER *r, NriCommandBuffer *cmd, NriTexture *text
 static bool transition_texture(RENDERER *r, NriCommandBuffer *cmd, NriTexture *texture, NriAccessBits access, NriLayout layout, NriStageBits stages) {
     if (!texture) return false;
 
-    return texture_barrier(r, cmd, texture, (NriAccessLayoutStage){0}, (NriAccessLayoutStage){
-        .access = access,
-        .layout = layout,
-        .stages = stages
-    });
+    return texture_barrier(r, cmd, texture, (NriAccessLayoutStage){0}, (NriAccessLayoutStage){.access = access, .layout = layout, .stages = stages});
 }
 
 static bool begin_scene_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTexture *hdr, NriTexture *normal, NriTexture *depth, uint32_t width, uint32_t height) {
@@ -1583,111 +1406,57 @@ static bool begin_scene_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTexture
 
     const NriAccessLayoutStage color = {NriAccessBits_COLOR_ATTACHMENT, NriLayout_COLOR_ATTACHMENT, NriStageBits_COLOR_ATTACHMENT};
 
-    const NriAccessLayoutStage depth_state = {NriAccessBits_DEPTH_STENCIL_ATTACHMENT, NriLayout_DEPTH_STENCIL_ATTACHMENT, NriStageBits_DEPTH_STENCIL_ATTACHMENT};
+    const NriAccessLayoutStage depth_state = {NriAccessBits_DEPTH_STENCIL_ATTACHMENT, NriLayout_DEPTH_STENCIL_ATTACHMENT,
+                                              NriStageBits_DEPTH_STENCIL_ATTACHMENT};
 
     if (!texture_barrier(r, cmd, hdr, (NriAccessLayoutStage){0}, color) || !texture_barrier(r, cmd, normal, (NriAccessLayoutStage){0}, color) ||
         !texture_barrier(r, cmd, depth, (NriAccessLayoutStage){0}, depth_state))
         return false;
 
-    const NriAttachmentDesc colors[2] = {
-        {
-            .descriptor = hdr_view,
-            .loadOp = NriLoadOp_CLEAR,
-            .storeOp = NriStoreOp_STORE
-        }, {
-            .descriptor = normal_view,
-            .loadOp = NriLoadOp_CLEAR,
-            .storeOp = NriStoreOp_STORE
-        }
-    };
+    const NriAttachmentDesc colors[2] = {{.descriptor = hdr_view, .loadOp = NriLoadOp_CLEAR, .storeOp = NriStoreOp_STORE},
+                                         {.descriptor = normal_view, .loadOp = NriLoadOp_CLEAR, .storeOp = NriStoreOp_STORE}};
 
     const NriRenderingDesc desc = {
         .colors = colors,
         .colorNum = 2,
-        .depth = {
-            .descriptor = depth_view,
-            .loadOp = NriLoadOp_CLEAR,
-            .storeOp = NriStoreOp_STORE,
-            .clearValue = {
-                .depthStencil = {
-                    .depth = 1.0f
-                }
-            }
-        }
-    };
+        .depth = {.descriptor = depth_view, .loadOp = NriLoadOp_CLEAR, .storeOp = NriStoreOp_STORE, .clearValue = {.depthStencil = {.depth = 1.0f}}}};
 
-    r->gpu->core.CmdSetViewports(cmd, &(NriViewport){
-        .width = (float)width,
-        .height = (float)height,
-        .depthMax = 1.0f
-    }, 1);
-    r->gpu->core.CmdSetScissors(cmd, &(NriRect){
-        .width = (NriDim_t)width,
-        .height = (NriDim_t)height
-    }, 1);
+    r->gpu->core.CmdSetViewports(cmd, &(NriViewport){.width = (float)width, .height = (float)height, .depthMax = 1.0f}, 1);
+    r->gpu->core.CmdSetScissors(cmd, &(NriRect){.width = (NriDim_t)width, .height = (NriDim_t)height}, 1);
     r->gpu->core.CmdBeginRendering(cmd, &desc);
 
     return true;
 }
 
-static bool begin_compose_rendering(
-    RENDERER *r,
-    NriCommandBuffer *cmd,
-    NriTexture *swap,
-    NriTexture *hdr,
-    NriTexture *ao,
-    NriTexture *bloom,
-    NriTexture *lut,
-    NriDescriptor *sampler_desc,
-    const void *uniforms,
-    size_t size
-) {
+static bool begin_compose_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTexture *swap, NriTexture *hdr, NriTexture *ao, NriTexture *bloom, NriTexture *lut,
+                                    NriDescriptor *sampler_desc, const void *uniforms, size_t size) {
     NriTexture *sources[] = {hdr, ao, bloom, lut};
 
     for (uint32_t i = 0; i < 4; ++i)
         if (!transition_texture(r, cmd, sources[i], NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_FRAGMENT_SHADER)) return false;
 
-    NriDescriptor *src[] = {
-        create_texture_view(r, hdr, NriTextureView_TEXTURE),
-        create_texture_view(r, ao, NriTextureView_TEXTURE),
-        create_texture_view(r, bloom, NriTextureView_TEXTURE),
-        create_texture_view(r, lut, NriTextureView_TEXTURE),
-        sampler_desc,
-        sampler_desc,
-        sampler_desc,
-        sampler_desc
-    };
+    NriDescriptor *src[] = {create_texture_view(r, hdr, NriTextureView_TEXTURE),
+                            create_texture_view(r, ao, NriTextureView_TEXTURE),
+                            create_texture_view(r, bloom, NriTextureView_TEXTURE),
+                            create_texture_view(r, lut, NriTextureView_TEXTURE),
+                            sampler_desc,
+                            sampler_desc,
+                            sampler_desc,
+                            sampler_desc};
 
     if (!bind_descriptor_set(r, cmd, r->compose_layout, NriBindPoint_GRAPHICS, 2, src, 8) ||
         !bind_uniform_data(r, cmd, r->compose_layout, NriBindPoint_GRAPHICS, 3, uniforms, size))
         return false;
 
     if (!texture_barrier(
-            r,
-            cmd,
-            swap,
-            (NriAccessLayoutStage){
-                .layout = NriLayout_UNDEFINED,
-                .stages = NriStageBits_NONE
-            },
-            (NriAccessLayoutStage){
-                .access = NriAccessBits_COLOR_ATTACHMENT,
-                .layout = NriLayout_COLOR_ATTACHMENT,
-                .stages = NriStageBits_COLOR_ATTACHMENT
-            }
-        ))
+            r, cmd, swap, (NriAccessLayoutStage){.layout = NriLayout_UNDEFINED, .stages = NriStageBits_NONE},
+            (NriAccessLayoutStage){.access = NriAccessBits_COLOR_ATTACHMENT, .layout = NriLayout_COLOR_ATTACHMENT, .stages = NriStageBits_COLOR_ATTACHMENT}))
         return false;
 
     const NriAttachmentDesc color = {
-        .descriptor = r->gpu->swapchain_frames[r->gpu->current_swap_index].color_attachment,
-        .loadOp = NriLoadOp_CLEAR,
-        .storeOp = NriStoreOp_STORE
-    };
+        .descriptor = r->gpu->swapchain_frames[r->gpu->current_swap_index].color_attachment, .loadOp = NriLoadOp_CLEAR, .storeOp = NriStoreOp_STORE};
 
-    const NriRenderingDesc desc = {
-        .colors = &color,
-        .colorNum = 1
-    };
+    const NriRenderingDesc desc = {.colors = &color, .colorNum = 1};
 
     r->gpu->core.CmdBeginRendering(cmd, &desc);
 
@@ -1695,41 +1464,26 @@ static bool begin_compose_rendering(
 }
 
 static bool submit_frame(RENDERER *r, FRAME_CONTEXT *frame, NriCommandBuffer *cmd, uint32_t index) {
-    bool good = frame && texture_barrier(
-                             r,
-                             cmd,
-                             r->gpu->swapchain_textures[index],
-                             (NriAccessLayoutStage){
-                                 .access = NriAccessBits_COLOR_ATTACHMENT,
-                                 .layout = NriLayout_COLOR_ATTACHMENT,
-                                 .stages = NriStageBits_COLOR_ATTACHMENT
-                             },
-                             (NriAccessLayoutStage){
-                                 .layout = NriLayout_PRESENT,
-                                 .stages = NriStageBits_NONE
-                             }
-                         );
+    bool good =
+        frame && texture_barrier(r, cmd, r->gpu->swapchain_textures[index],
+                                 (NriAccessLayoutStage){
+                                     .access = NriAccessBits_COLOR_ATTACHMENT, .layout = NriLayout_COLOR_ATTACHMENT, .stages = NriStageBits_COLOR_ATTACHMENT},
+                                 (NriAccessLayoutStage){.layout = NriLayout_PRESENT, .stages = NriStageBits_NONE});
     if (good) good = r->gpu->core.EndCommandBuffer(cmd) == NriResult_SUCCESS;
 
     const uint64_t frame_value = 1u + r->gpu->frame_index;
-    NriFenceSubmitDesc waits[2] = {{.fence = r->gpu->swapchain_frames[r->gpu->frame_index % r->gpu->swapchain_texture_count].acquire, .stages = NriStageBits_COLOR_ATTACHMENT}, {0}};
+    NriFenceSubmitDesc waits[2] = {
+        {.fence = r->gpu->swapchain_frames[r->gpu->frame_index % r->gpu->swapchain_texture_count].acquire, .stages = NriStageBits_COLOR_ATTACHMENT}, {0}};
     uint32_t wait_num = 1u;
 
     if (r->gpu->upload && r->gpu->upload->fence && r->gpu->upload->next_fence_value > 1u) {
         waits[wait_num++] = (NriFenceSubmitDesc){.fence = r->gpu->upload->fence, .value = r->gpu->upload->next_fence_value - 1u, .stages = NriStageBits_ALL};
     }
 
-    const NriFenceSubmitDesc wait = {
-        .fence = r->gpu->swapchain_frames[r->gpu->frame_index % r->gpu->swapchain_texture_count].acquire,
-        .stages = NriStageBits_COLOR_ATTACHMENT
-    };
+    const NriFenceSubmitDesc wait = {.fence = r->gpu->swapchain_frames[r->gpu->frame_index % r->gpu->swapchain_texture_count].acquire,
+                                     .stages = NriStageBits_COLOR_ATTACHMENT};
 
-    const NriFenceSubmitDesc signals[2] = {{
-    .fence = r->gpu->swapchain_frames[index].release
-}, {
-    .fence = r->gpu->frame_fence,
-    .value = frame_value
-}};
+    const NriFenceSubmitDesc signals[2] = {{.fence = r->gpu->swapchain_frames[index].release}, {.fence = r->gpu->frame_fence, .value = frame_value}};
 
     const NriQueueSubmitDesc submit = {.waitFences = waits,
                                        .waitFenceNum = wait_num,
@@ -1750,23 +1504,19 @@ static bool submit_frame(RENDERER *r, FRAME_CONTEXT *frame, NriCommandBuffer *cm
 
     r->gpu->active_frame = NULL;
 
-    if (submitted) r->gpu->frame_index++;
-    else if (!good) abort_frame_commands(r, frame);
+    if (submitted)
+        r->gpu->frame_index++;
+    else if (!good)
+        abort_frame_commands(r, frame);
 
     return good;
 }
 
 static NriDescriptor *sampler(RENDERER *r, NriFilter min_filter, NriFilter mag_filter, NriAddressMode address) {
-    const NriSamplerDesc desc = {
-        .filters = {
-            .min = min_filter,
-            .mag = mag_filter,
-            .mip = NriFilter_NEAREST
-        },
-        .addressModes = {address, address, address},
-        .mipMin = 0.0f,
-        .mipMax = 16.0f
-    };
+    const NriSamplerDesc desc = {.filters = {.min = min_filter, .mag = mag_filter, .mip = NriFilter_NEAREST},
+                                 .addressModes = {address, address, address},
+                                 .mipMin = 0.0f,
+                                 .mipMax = 16.0f};
 
     NriDescriptor *result = NULL;
 
@@ -1776,85 +1526,38 @@ static NriDescriptor *sampler(RENDERER *r, NriFilter min_filter, NriFilter mag_f
 }
 
 static NriPipeline *make_line_pipeline(RENDERER *r, NriPipelineLayout *layout, const NriShaderDesc *vs, const NriShaderDesc *ps) {
-    const NriVertexStreamDesc vb = {
-        .bindingSlot = 0,
-        .stepRate = NriVertexStreamStepRate_PER_VERTEX,
-        .stride = (uint16_t)sizeof(RENDER_VERTEX)
-    };
+    const NriVertexStreamDesc vb = {.bindingSlot = 0, .stepRate = NriVertexStreamStepRate_PER_VERTEX, .stride = (uint16_t)sizeof(RENDER_VERTEX)};
 
-    const NriVertexAttributeDesc attrs[2] = {
-        {
-            .d3d = {
-                .semanticName = "TEXCOORD",
-                .semanticIndex = 0
-            },
-            .vk = {
-                .location = 0
-            },
-            .offset = (uint32_t)offsetof(RENDER_VERTEX, x),
-            .format = NriFormat_RGB32_SFLOAT,
-            .streamIndex = 0
-        },
-        {
-            .d3d = {
-                .semanticName = "TEXCOORD",
-                .semanticIndex = 1
-            },
-            .vk = {
-                .location = 1
-            },
-            .offset = (uint32_t)offsetof(RENDER_VERTEX, r),
-            .format = NriFormat_RGBA32_SFLOAT,
-            .streamIndex = 0
-        }
-    };
+    const NriVertexAttributeDesc attrs[2] = {{.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 0},
+                                              .vk = {.location = 0},
+                                              .offset = (uint32_t)offsetof(RENDER_VERTEX, x),
+                                              .format = NriFormat_RGB32_SFLOAT,
+                                              .streamIndex = 0},
+                                             {.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 1},
+                                              .vk = {.location = 1},
+                                              .offset = (uint32_t)offsetof(RENDER_VERTEX, r),
+                                              .format = NriFormat_RGBA32_SFLOAT,
+                                              .streamIndex = 0}};
 
-    const NriVertexInputDesc vertex_input = {
-        .attributes = attrs,
-        .attributeNum = 2,
-        .streams = &vb,
-        .streamNum = 1
-    };
+    const NriVertexInputDesc vertex_input = {.attributes = attrs, .attributeNum = 2, .streams = &vb, .streamNum = 1};
 
-    const NriColorAttachmentDesc targets[2] = {
-        {
-            .format = NriFormat_RGBA16_SFLOAT,
-            .colorWriteMask = NriColorWriteBits_RGBA
-        }, {
-            .format = NriFormat_RGBA16_SFLOAT,
-            .colorWriteMask = NriColorWriteBits_NONE
-        }
-    };
+    const NriColorAttachmentDesc targets[2] = {{.format = NriFormat_RGBA16_SFLOAT, .colorWriteMask = NriColorWriteBits_RGBA},
+                                               {.format = NriFormat_RGBA16_SFLOAT, .colorWriteMask = NriColorWriteBits_NONE}};
 
-    const NriMultisampleDesc multisample = {
-        .sampleMask = NRI_ALL,
-        .sampleNum = 1
-    };
+    const NriMultisampleDesc multisample = {.sampleMask = NRI_ALL, .sampleNum = 1};
 
     const NriShaderDesc shaders[2] = {*vs, *ps};
 
     const NriGraphicsPipelineDesc desc = {
         .pipelineLayout = layout,
         .vertexInput = &vertex_input,
-        .inputAssembly = {
-            .topology = NriTopology_LINE_LIST
-        },
-        .rasterization = {
-            .fillMode = NriFillMode_SOLID,
-            .cullMode = NriCullMode_NONE,
-            .frontCounterClockwise = true,
-            .depthClamp = false
-        },
+        .inputAssembly = {.topology = NriTopology_LINE_LIST},
+        .rasterization = {.fillMode = NriFillMode_SOLID, .cullMode = NriCullMode_NONE, .frontCounterClockwise = true, .depthClamp = false},
         .multisample = &multisample,
-        .outputMerger = {
-            .colors = targets,
-            .colorNum = 2,
-            .depth = {
-                .compareOp = NriCompareOp_LESS_EQUAL,
-                .write = false
-            },
-            .depthStencilFormat = r->depth_format
-        },
+        .outputMerger = {.colors = targets,
+                         .colorNum = 2,
+                         .depth = {.compareOp = NriCompareOp_LESS_EQUAL, .write = false},
+                         .depthStencilFormat = r->depth_format},
         .shaders = shaders,
         .shaderNum = 2,
         .cache = r->gpu->pipeline_cache};
@@ -1867,30 +1570,21 @@ static NriPipeline *make_line_pipeline(RENDERER *r, NriPipelineLayout *layout, c
 }
 
 static NriPipeline *make_sky_pipeline(RENDERER *r, NriPipelineLayout *layout, const NriShaderDesc *vs, const NriShaderDesc *ps) {
-    const NriColorAttachmentDesc targets[2] = {
-        {
-            .format = NriFormat_RGBA16_SFLOAT,
-            .colorWriteMask = NriColorWriteBits_RGBA
-        }, {
-            .format = NriFormat_RGBA16_SFLOAT,
-            .colorWriteMask = NriColorWriteBits_RGBA
-        }
-    };
+    const NriColorAttachmentDesc targets[2] = {{.format = NriFormat_RGBA16_SFLOAT, .colorWriteMask = NriColorWriteBits_RGBA},
+                                               {.format = NriFormat_RGBA16_SFLOAT, .colorWriteMask = NriColorWriteBits_RGBA}};
 
-    const NriMultisampleDesc multisample = {
-        .sampleMask = NRI_ALL,
-        .sampleNum = 1
-    };
+    const NriMultisampleDesc multisample = {.sampleMask = NRI_ALL, .sampleNum = 1};
 
     const NriShaderDesc shaders[2] = {*vs, *ps};
-    const NriGraphicsPipelineDesc desc = {.pipelineLayout = layout,
-                                          .inputAssembly = {.topology = NriTopology_TRIANGLE_LIST},
-                                          .rasterization = {.fillMode = NriFillMode_SOLID, .cullMode = NriCullMode_NONE, .frontCounterClockwise = true, .depthClamp = false},
-                                          .multisample = &multisample,
-                                          .outputMerger = {.colors = targets, .colorNum = 2, .depthStencilFormat = r->depth_format},
-                                          .shaders = shaders,
-                                          .shaderNum = 2,
-                                          .cache = r->gpu->pipeline_cache};
+    const NriGraphicsPipelineDesc desc = {
+        .pipelineLayout = layout,
+        .inputAssembly = {.topology = NriTopology_TRIANGLE_LIST},
+        .rasterization = {.fillMode = NriFillMode_SOLID, .cullMode = NriCullMode_NONE, .frontCounterClockwise = true, .depthClamp = false},
+        .multisample = &multisample,
+        .outputMerger = {.colors = targets, .colorNum = 2, .depthStencilFormat = r->depth_format},
+        .shaders = shaders,
+        .shaderNum = 2,
+        .cache = r->gpu->pipeline_cache};
 
     NriPipeline *pipeline = NULL;
 
@@ -1902,17 +1596,15 @@ static NriPipeline *make_sky_pipeline(RENDERER *r, NriPipelineLayout *layout, co
 static NriTexture *create_texture(RENDERER *r, NriFormat format, NriTextureUsageBits usage, Uint32 width, Uint32 height) {
     if (!r || !r->gpu->device || !width || !height) return NULL;
 
-    const NriTextureDesc desc = {
-        .type = NriTextureType_TEXTURE_2D,
-        .usage = usage,
-        .format = format,
-        .width = (NriDim_t)width,
-        .height = (NriDim_t)height,
-        .depth = 1,
-        .mipNum = 1,
-        .layerNum = 1,
-        .sampleNum = 1
-    };
+    const NriTextureDesc desc = {.type = NriTextureType_TEXTURE_2D,
+                                 .usage = usage,
+                                 .format = format,
+                                 .width = (NriDim_t)width,
+                                 .height = (NriDim_t)height,
+                                 .depth = 1,
+                                 .mipNum = 1,
+                                 .layerNum = 1,
+                                 .sampleNum = 1};
 
     NriTexture *result = NULL;
 
@@ -1966,10 +1658,7 @@ static bool create_upload_context(RENDERER *r) {
 
     if (r->gpu->core.CreateFence(r->gpu->device, 0u, &upload->fence) != NriResult_SUCCESS) goto fail;
 
-    const NriBufferDesc staging_desc = {
-        .size = UPLOAD_CHUNK_BYTES,
-        .usage = NriBufferUsageBits_NONE
-    };
+    const NriBufferDesc staging_desc = {.size = UPLOAD_CHUNK_BYTES, .usage = NriBufferUsageBits_NONE};
 
     for (uint32_t i = 0; i < UPLOAD_RING_SIZE; ++i) {
         UPLOAD_SLOT *slot = &upload->slots[i];
@@ -1998,11 +1687,9 @@ static bool upload_wait_slot(RENDERER *r, UPLOAD_SLOT *slot) {
 
     while (r->gpu->core.GetFenceValue(r->gpu->upload->fence) < slot->fence_value) {
         if (!logged && SDL_GetTicks() - started >= UPLOAD_SLOW_LOG_MS) {
-            SDL_Log(
-                "GPU upload chunk is still pending after %u ms; continuing "
-                "without NRI's hard fence timeout",
-                UPLOAD_SLOW_LOG_MS
-            );
+            SDL_Log("GPU upload chunk is still pending after %u ms; continuing "
+                    "without NRI's hard fence timeout",
+                    UPLOAD_SLOW_LOG_MS);
             logged = true;
         }
 
@@ -2037,19 +1724,12 @@ static bool upload_submit_slot(RENDERER *r, UPLOAD_SLOT *slot) {
 
     const uint64_t value = r->gpu->upload->next_fence_value++;
 
-    const NriFenceSubmitDesc signal = {
-        .fence = r->gpu->upload->fence,
-        .value = value
-    };
+    const NriFenceSubmitDesc signal = {.fence = r->gpu->upload->fence, .value = value};
 
     NriCommandBuffer *command = slot->command_buffer;
 
     const NriQueueSubmitDesc submit = {
-        .commandBuffers = (const NriCommandBuffer *const *)&command,
-        .commandBufferNum = 1u,
-        .signalFences = &signal,
-        .signalFenceNum = 1u
-    };
+        .commandBuffers = (const NriCommandBuffer *const *)&command, .commandBufferNum = 1u, .signalFences = &signal, .signalFenceNum = 1u};
 
     if (r->gpu->core.QueueSubmit(r->gpu->graphics_queue, &submit) != NriResult_SUCCESS) return false;
 
@@ -2086,20 +1766,13 @@ static NriAccessStage uploaded_buffer_state(NriBufferUsageBits usage) {
 static NriBuffer *upload_buffer(RENDERER *r, NriBufferUsageBits usage, const void *data, size_t bytes, uint32_t stride) {
     if (!r || !r->gpu->device || !r->gpu->graphics_queue || !data || !bytes) return NULL;
 
-    const NriBufferDesc desc = {
-        .size = bytes,
-        .structureStride = stride,
-        .usage = usage
-    };
+    const NriBufferDesc desc = {.size = bytes, .structureStride = stride, .usage = usage};
 
     NriBuffer *buffer = NULL;
 
     if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &buffer) != NriResult_SUCCESS) return NULL;
 
-    const NriAccessStage copy_state = {
-        .access = NriAccessBits_COPY_DESTINATION,
-        .stages = NriStageBits_ALL
-    };
+    const NriAccessStage copy_state = {.access = NriAccessBits_COPY_DESTINATION, .stages = NriStageBits_ALL};
 
     const NriAccessStage final_state = uploaded_buffer_state(usage);
     const Uint8 *source = data;
@@ -2125,31 +1798,17 @@ static NriBuffer *upload_buffer(RENDERER *r, NriBufferUsageBits usage, const voi
         r->gpu->core.UnmapBuffer(slot->staging);
 
         if (!offset) {
-            const NriBufferBarrierDesc barrier = {
-                .buffer = buffer,
-                .before = {0},
-                .after = copy_state
-            };
+            const NriBufferBarrierDesc barrier = {.buffer = buffer, .before = {0}, .after = copy_state};
 
-            r->gpu->core.CmdBarrier(slot->command_buffer, &(NriBarrierDesc){
-                .buffers = &barrier,
-                .bufferNum = 1u
-            });
+            r->gpu->core.CmdBarrier(slot->command_buffer, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1u});
         }
 
         r->gpu->core.CmdCopyBuffer(slot->command_buffer, buffer, offset, slot->staging, 0u, chunk);
 
         if (offset + chunk == bytes) {
-            const NriBufferBarrierDesc barrier = {
-                .buffer = buffer,
-                .before = copy_state,
-                .after = final_state
-            };
+            const NriBufferBarrierDesc barrier = {.buffer = buffer, .before = copy_state, .after = final_state};
 
-            r->gpu->core.CmdBarrier(slot->command_buffer, &(NriBarrierDesc){
-                .buffers = &barrier,
-                .bufferNum = 1u
-            });
+            r->gpu->core.CmdBarrier(slot->command_buffer, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1u});
         }
 
         if (!upload_submit_slot(r, slot)) goto fail;
@@ -2165,8 +1824,8 @@ fail:
     return NULL;
 }
 
-static bool
-upload_texture_data(RENDERER *r, NriTexture *texture, const void *data, uint32_t row_pitch, uint32_t slice_pitch, NriAccessBits access, NriLayout layout, NriStageBits stages) {
+static bool upload_texture_data(RENDERER *r, NriTexture *texture, const void *data, uint32_t row_pitch, uint32_t slice_pitch, NriAccessBits access,
+                                NriLayout layout, NriStageBits stages) {
     if (!r || !texture || !data || !row_pitch || !slice_pitch || slice_pitch % row_pitch) return false;
 
     const NriTextureDesc *desc = r->gpu->core.GetTextureDesc(texture);
@@ -2179,17 +1838,9 @@ upload_texture_data(RENDERER *r, NriTexture *texture, const void *data, uint32_t
 
     if (!desc || !row_count || aligned_row > UPLOAD_CHUNK_BYTES) return false;
 
-    const NriAccessLayoutStage copy_state = {
-        .access = NriAccessBits_COPY_DESTINATION,
-        .layout = NriLayout_COPY_DESTINATION,
-        .stages = NriStageBits_ALL
-    };
+    const NriAccessLayoutStage copy_state = {.access = NriAccessBits_COPY_DESTINATION, .layout = NriLayout_COPY_DESTINATION, .stages = NriStageBits_ALL};
 
-    const NriAccessLayoutStage final_state = {
-        .access = access,
-        .layout = layout,
-        .stages = stages
-    };
+    const NriAccessLayoutStage final_state = {.access = access, .layout = layout, .stages = stages};
 
     const Uint8 *source = data;
 
@@ -2225,28 +1876,15 @@ upload_texture_data(RENDERER *r, NriTexture *texture, const void *data, uint32_t
             goto fail;
         }
 
-        for (uint32_t row = 0; row < rows; ++row)
-            memcpy(mapped + (size_t)row * aligned_row, source + (size_t)(first_row + row) * row_pitch, row_pitch);
+        for (uint32_t row = 0; row < rows; ++row) memcpy(mapped + (size_t)row * aligned_row, source + (size_t)(first_row + row) * row_pitch, row_pitch);
         r->gpu->core.UnmapBuffer(slot->staging);
 
         if (!first_row && !texture_barrier(r, slot->command_buffer, texture, (NriAccessLayoutStage){0}, copy_state)) goto fail;
 
-        const NriTextureDataLayoutDesc source_layout = {
-            .offset = 0u,
-            .rowPitch = (uint32_t)aligned_row,
-            .slicePitch = (uint32_t)staging_bytes
-        };
+        const NriTextureDataLayoutDesc source_layout = {.offset = 0u, .rowPitch = (uint32_t)aligned_row, .slicePitch = (uint32_t)staging_bytes};
 
         const NriTextureRegionDesc region = {
-            .x = 0u,
-            .y = (NriDim_t)first_row,
-            .z = 0u,
-            .width = desc->width,
-            .height = (NriDim_t)rows,
-            .depth = 1u,
-            .mipOffset = 0u,
-            .layerOffset = 0u
-        };
+            .x = 0u, .y = (NriDim_t)first_row, .z = 0u, .width = desc->width, .height = (NriDim_t)rows, .depth = 1u, .mipOffset = 0u, .layerOffset = 0u};
 
         r->gpu->core.CmdUploadBufferToTexture(slot->command_buffer, texture, &region, slot->staging, &source_layout);
 
@@ -2345,16 +1983,8 @@ static NriTexture *load_image(RENDERER *r, const GLTF_IMAGE *image) {
 
     NriTexture *result = create_texture(r, NriFormat_RGBA8_UNORM, NriTextureUsageBits_SHADER_RESOURCE, (Uint32)rgba->w, (Uint32)rgba->h);
 
-    if (result && !upload_texture_data(
-                      r,
-                      result,
-                      rgba->pixels,
-                      (uint32_t)rgba->pitch,
-                      (uint32_t)(rgba->pitch * rgba->h),
-                      NriAccessBits_SHADER_RESOURCE,
-                      NriLayout_SHADER_RESOURCE,
-                      NriStageBits_FRAGMENT_SHADER
-                  )) {
+    if (result && !upload_texture_data(r, result, rgba->pixels, (uint32_t)rgba->pitch, (uint32_t)(rgba->pitch * rgba->h), NriAccessBits_SHADER_RESOURCE,
+                                       NriLayout_SHADER_RESOURCE, NriStageBits_FRAGMENT_SHADER)) {
         release_texture(r, result);
 
         result = NULL;
@@ -2403,8 +2033,7 @@ static void release_scene_resources(RENDERER *r) {
     if (!r || !r->gpu->device) return;
 
     if (r->image_textures) {
-        for (uint32_t i = 0; i < r->image_texture_count; ++i)
-            release_texture(r, r->image_textures[i]);
+        for (uint32_t i = 0; i < r->image_texture_count; ++i) release_texture(r, r->image_textures[i]);
     }
 
     free(r->image_textures);
@@ -2499,7 +2128,8 @@ NriTexture *upload_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached) {
 
     if (!result) return NULL;
 
-    if (!upload_texture_data(r, result, cached->pixels, cached->width * 8u, bytes, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_ALL)) {
+    if (!upload_texture_data(r, result, cached->pixels, cached->width * 8u, bytes, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
+                             NriStageBits_ALL)) {
         release_texture(r, result);
 
         return NULL;
@@ -2529,10 +2159,7 @@ static bool read_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width,
 
     if (staging_bytes > UINT32_MAX) return false;
 
-    const NriBufferDesc desc = {
-        .size = staging_bytes,
-        .usage = NriBufferUsageBits_NONE
-    };
+    const NriBufferDesc desc = {.size = staging_bytes, .usage = NriBufferUsageBits_NONE};
 
     NriBuffer *readback = NULL;
 
@@ -2543,19 +2170,9 @@ static bool read_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width,
     bool good = begin_commands(r, &allocator, &cmd) == NriResult_SUCCESS;
 
     if (good) {
-        const NriTextureDataLayoutDesc layout = {
-            .offset = 0,
-            .rowPitch = (uint32_t)row_pitch,
-            .slicePitch = (uint32_t)staging_bytes
-        };
+        const NriTextureDataLayoutDesc layout = {.offset = 0, .rowPitch = (uint32_t)row_pitch, .slicePitch = (uint32_t)staging_bytes};
 
-        const NriTextureRegionDesc region = {
-            .width = (NriDim_t)width,
-            .height = (NriDim_t)height,
-            .depth = 1,
-            .mipOffset = 0,
-            .layerOffset = 0
-        };
+        const NriTextureRegionDesc region = {.width = (NriDim_t)width, .height = (NriDim_t)height, .depth = 1, .mipOffset = 0, .layerOffset = 0};
 
         good = transition_texture(r, cmd, texture, NriAccessBits_COPY_SOURCE, NriLayout_COPY_SOURCE, NriStageBits_COPY);
 
@@ -2586,8 +2203,7 @@ static bool read_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width,
     Uint8 *data = malloc(tight_bytes);
 
     if (data) {
-        for (uint32_t y = 0; y < height; ++y)
-            memcpy(data + (size_t)y * row_bytes, mapped + (size_t)y * row_pitch, row_bytes);
+        for (uint32_t y = 0; y < height; ++y) memcpy(data + (size_t)y * row_bytes, mapped + (size_t)y * row_pitch, row_bytes);
     }
 
     r->gpu->core.UnmapBuffer(readback);
@@ -2619,7 +2235,8 @@ bool upload_bvh(RENDERER *r, const BVH *tree) {
 
     r->bvh_node_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, tree->nodes, (size_t)tree->node_count * sizeof(*tree->nodes), sizeof(BVH_NODE));
 
-    r->bvh_triangle_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, tree->triangles, (size_t)tree->triangle_count * sizeof(*tree->triangles), sizeof(BVH_TRIANGLE));
+    r->bvh_triangle_buffer =
+        upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, tree->triangles, (size_t)tree->triangle_count * sizeof(*tree->triangles), sizeof(BVH_TRIANGLE));
 
     const bool good = r->bvh_node_buffer && r->bvh_triangle_buffer;
 
@@ -2698,8 +2315,8 @@ static bool lightmap_queue_ensure(RENDERER *r, Uint32 capacity) {
 
     const uint64_t bytes = (uint64_t)capacity * sizeof(Uint32);
 
-    if (r->lightmap_active_capacity >= bytes && r->lightmap_active_buffer[0] && r->lightmap_active_buffer[1] && r->lightmap_active_count[0] && r->lightmap_active_count[1] &&
-        r->lightmap_dispatch_args)
+    if (r->lightmap_active_capacity >= bytes && r->lightmap_active_buffer[0] && r->lightmap_active_buffer[1] && r->lightmap_active_count[0] &&
+        r->lightmap_active_count[1] && r->lightmap_dispatch_args)
         return true;
 
     for (uint32_t i = 0; i < 2u; ++i) {
@@ -2723,7 +2340,9 @@ static bool lightmap_queue_ensure(RENDERER *r, Uint32 capacity) {
 
     r->lightmap_dispatch_args = lightmap_queue_buffer(r, 3u * sizeof(Uint32), args_usage);
 
-    if (!r->lightmap_active_buffer[0] || !r->lightmap_active_buffer[1] || !r->lightmap_active_count[0] || !r->lightmap_active_count[1] || !r->lightmap_dispatch_args) return false;
+    if (!r->lightmap_active_buffer[0] || !r->lightmap_active_buffer[1] || !r->lightmap_active_count[0] || !r->lightmap_active_count[1] ||
+        !r->lightmap_dispatch_args)
+        return false;
 
     r->lightmap_active_capacity = bytes;
 
@@ -2744,8 +2363,8 @@ static void dispatch_shape_trace(Uint32 items, Uint32 *groups_x, Uint32 *groups_
     *dispatch_width = width;
 }
 
-static void lightmap_buffer_barrier(RENDERER *r, NriCommandBuffer *cmd, NriBuffer *buffer, NriAccessBits before_access, NriStageBits before_stages, NriAccessBits after_access,
-                                    NriStageBits after_stages) {
+static void lightmap_buffer_barrier(RENDERER *r, NriCommandBuffer *cmd, NriBuffer *buffer, NriAccessBits before_access, NriStageBits before_stages,
+                                    NriAccessBits after_access, NriStageBits after_stages) {
     const NriBufferBarrierDesc barrier = {
         .buffer = buffer, .before = {.access = before_access, .stages = before_stages}, .after = {.access = after_access, .stages = after_stages}};
     r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1u});
@@ -2753,8 +2372,8 @@ static void lightmap_buffer_barrier(RENDERER *r, NriCommandBuffer *cmd, NriBuffe
 
 static bool record_lightmap_queue_reset(RENDERER *r, NriCommandBuffer *cmd, uint32_t index, bool reused) {
     NriBuffer *count = r->lightmap_active_count[index];
-    lightmap_buffer_barrier(r, cmd, count, reused ? NriAccessBits_SHADER_RESOURCE : NriAccessBits_NONE, reused ? NriStageBits_COMPUTE_SHADER : NriStageBits_NONE,
-                            NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER);
+    lightmap_buffer_barrier(r, cmd, count, reused ? NriAccessBits_SHADER_RESOURCE : NriAccessBits_NONE,
+                            reused ? NriStageBits_COMPUTE_SHADER : NriStageBits_NONE, NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER);
     NriDescriptor *dst = create_buffer_view(r, count, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32));
 
     if (!dst || !bind_descriptor_set(r, cmd, r->lightmap_queue_reset_layout, NriBindPoint_COMPUTE, 1, &dst, 1)) return false;
@@ -2766,7 +2385,8 @@ static bool record_lightmap_queue_reset(RENDERER *r, NriCommandBuffer *cmd, uint
 
 static bool record_lightmap_queue_args(RENDERER *r, NriCommandBuffer *cmd, uint32_t index, Uint32 dispatch_width, bool args_reused) {
     NriBuffer *count = r->lightmap_active_count[index];
-    lightmap_buffer_barrier(r, cmd, count, NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER, NriAccessBits_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER);
+    lightmap_buffer_barrier(r, cmd, count, NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER, NriAccessBits_SHADER_RESOURCE,
+                            NriStageBits_COMPUTE_SHADER);
     lightmap_buffer_barrier(r, cmd, r->lightmap_dispatch_args, args_reused ? NriAccessBits_ARGUMENT_BUFFER : NriAccessBits_NONE,
                             args_reused ? NriStageBits_INDIRECT : NriStageBits_NONE, NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER);
 
@@ -2781,8 +2401,8 @@ static bool record_lightmap_queue_args(RENDERER *r, NriCommandBuffer *cmd, uint3
 
     r->gpu->core.CmdSetPipeline(cmd, r->lightmap_queue_args_pipeline);
     r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = 1u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
-    lightmap_buffer_barrier(r, cmd, r->lightmap_dispatch_args, NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER, NriAccessBits_ARGUMENT_BUFFER,
-                            NriStageBits_INDIRECT);
+    lightmap_buffer_barrier(r, cmd, r->lightmap_dispatch_args, NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER,
+                            NriAccessBits_ARGUMENT_BUFFER, NriStageBits_INDIRECT);
     return true;
 }
 
@@ -2821,12 +2441,11 @@ static BAKE_UNIFORMS bake_data(RENDERER *r, Uint32 phase, Uint32 iteration, Uint
         .bake_params = {r->bake_epsilon, 0.72f, sky.intensity, (float)r->lightmap_min_samples},
         .probe_origin_spacing = {r->lightmap_probe_origin.x, r->lightmap_probe_origin.y, r->lightmap_probe_origin.z, r->lightmap_probe_spacing},
         .probe_dims_mode = {r->lightmap_probe_count_x, r->lightmap_probe_count_y, r->lightmap_probe_count_z, 0u},
-        .emissive_data = {r->bvh_emissive_weight, (float)r->bvh_triangle_count, r->volumetrics.emissive_probe_intensity, 0.0f}
-    };
+        .emissive_data = {r->bvh_emissive_weight, (float)r->bvh_triangle_count, r->volumetrics.emissive_probe_intensity, 0.0f}};
 }
 
-static bool
-record_bake_pass(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, Uint32 phase, Uint32 iteration, Uint32 item_count, Uint32 batch_count) {
+static bool record_bake_pass(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, Uint32 phase, Uint32 iteration, Uint32 item_count,
+                             Uint32 batch_count) {
     Uint32 groups_x, groups_y, dispatch_width;
     dispatch_shape(item_count, &groups_x, &groups_y, &dispatch_width);
 
@@ -2835,11 +2454,7 @@ record_bake_pass(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriText
     if (!bind_bake_resources(r, cmd, source, destination, &uniforms, sizeof(uniforms))) return false;
 
     r->gpu->core.CmdSetPipeline(cmd, r->bake_pipeline);
-    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
-        .workGroupNumX = groups_x,
-        .workGroupNumY = groups_y,
-        .workGroupNumZ = 1
-    });
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = groups_x, .workGroupNumY = groups_y, .workGroupNumZ = 1});
 
     return true;
 }
@@ -2851,8 +2466,8 @@ static void swap_lightmaps(RENDERER *r) {
     r->lightmap_scratch = tmp;
 }
 
-static bool record_trace_batch(RENDERER *r, NriCommandBuffer *cmd, Uint32 first, Uint32 count, Uint32 items, Uint32 batch_index, Uint32 groups_x, Uint32 groups_y,
-                               Uint32 dispatch_width) {
+static bool record_trace_batch(RENDERER *r, NriCommandBuffer *cmd, Uint32 first, Uint32 count, Uint32 items, Uint32 batch_index, Uint32 groups_x,
+                               Uint32 groups_y, Uint32 dispatch_width) {
     if (!r || !cmd || !items || !count) return false;
 
     const uint32_t output_index = batch_index & 1u;
@@ -2862,11 +2477,12 @@ static bool record_trace_batch(RENDERER *r, NriCommandBuffer *cmd, Uint32 first,
 
     if (!record_lightmap_queue_reset(r, cmd, output_index, output_reused)) return false;
     lightmap_buffer_barrier(r, cmd, r->lightmap_active_buffer[output_index], output_reused ? NriAccessBits_SHADER_RESOURCE : NriAccessBits_NONE,
-                            output_reused ? NriStageBits_COMPUTE_SHADER : NriStageBits_NONE, NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER);
+                            output_reused ? NriStageBits_COMPUTE_SHADER : NriStageBits_NONE, NriAccessBits_SHADER_RESOURCE_STORAGE,
+                            NriStageBits_COMPUTE_SHADER);
 
     if (active_mode) {
-        lightmap_buffer_barrier(r, cmd, r->lightmap_active_buffer[input_index], NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER, NriAccessBits_SHADER_RESOURCE,
-                                NriStageBits_COMPUTE_SHADER);
+        lightmap_buffer_barrier(r, cmd, r->lightmap_active_buffer[input_index], NriAccessBits_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER,
+                                NriAccessBits_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER);
     }
 
     BAKE_UNIFORMS uniforms = bake_data(r, PHASE_TRACE, first, items, dispatch_width, count);
@@ -2879,8 +2495,10 @@ static bool record_trace_batch(RENDERER *r, NriCommandBuffer *cmd, Uint32 first,
 
     r->gpu->core.CmdSetPipeline(cmd, r->bake_pipeline);
 
-    if (active_mode) r->gpu->core.CmdDispatchIndirect(cmd, r->lightmap_dispatch_args, 0u);
-    else r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = groups_x, .workGroupNumY = groups_y, .workGroupNumZ = 1u});
+    if (active_mode)
+        r->gpu->core.CmdDispatchIndirect(cmd, r->lightmap_dispatch_args, 0u);
+    else
+        r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = groups_x, .workGroupNumY = groups_y, .workGroupNumZ = 1u});
 
     if (!record_lightmap_queue_args(r, cmd, output_index, dispatch_width, batch_index != 0u)) return false;
     swap_lightmaps(r);
@@ -3155,8 +2773,8 @@ static bool bake_lightmap_once(RENDERER *r, const LIGHTMAP *lm) {
 }
 
 bool bake_lightmap(RENDERER *r, const BVH *tree, const LIGHTMAP *lm, const PROBE_GRID *probes) {
-    if (!r || !r->gpu->device || !tree || !tree->node_count || !lm || !lm->width || !lm->height || !lm->samples || !lm->sample_count || !r->lightmap_sampler || !probes ||
-        !probes->probes || !probes->spacing || !probes->count_x || !probes->count_y || !probes->count_z)
+    if (!r || !r->gpu->device || !tree || !tree->node_count || !lm || !lm->width || !lm->height || !lm->samples || !lm->sample_count || !r->lightmap_sampler ||
+        !probes || !probes->probes || !probes->spacing || !probes->count_x || !probes->count_y || !probes->count_z)
         return false;
 
     r->lightmap_width = lm->width;
@@ -3193,7 +2811,8 @@ bool bake_lightmap(RENDERER *r, const BVH *tree, const LIGHTMAP *lm, const PROBE
     if (!r->lightmap_texture || !r->lightmap_scratch || !r->lightmap_direct) return false;
 
     if (!upload_bvh(r, tree)) return false;
-    r->lightmap_sample_buffer = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, lm->samples, (size_t)lm->sample_count * sizeof(*lm->samples), sizeof(LMAP_SAMPLE));
+    r->lightmap_sample_buffer =
+        upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, lm->samples, (size_t)lm->sample_count * sizeof(*lm->samples), sizeof(LMAP_SAMPLE));
 
     if (!r->lightmap_sample_buffer) return false;
 
@@ -3384,11 +3003,9 @@ static bool probe_wavefront_layout(RENDERER *r, NriPipelineLayout **layout, uint
 
     if (reads > 4u || writes > 3u) return false;
 
-    for (uint8_t i = 0; i < reads; ++i)
-        read_types[i] = NriDescriptorType_STRUCTURED_BUFFER;
+    for (uint8_t i = 0; i < reads; ++i) read_types[i] = NriDescriptorType_STRUCTURED_BUFFER;
 
-    for (uint8_t i = 0; i < writes; ++i)
-        write_types[i] = NriDescriptorType_STORAGE_STRUCTURED_BUFFER;
+    for (uint8_t i = 0; i < writes; ++i) write_types[i] = NriDescriptorType_STORAGE_STRUCTURED_BUFFER;
     const NriDescriptorType *sets[4] = {reads ? read_types : NULL, writes ? write_types : NULL, uniform, NULL};
 
     const uint8_t counts[4] = {reads, writes, 1u, 0u};
@@ -3443,8 +3060,8 @@ static void probe_wavefront_pipelines_deinit(RENDERER *r, PROBE_WAVEFRONT_PIPELI
     probe_wavefront_stage_deinit(r, &p->prepare);
 }
 
-static bool probe_wavefront_scratch_ensure(RENDERER *r, uint64_t node_bytes, uint64_t triangle_bytes, uint64_t state_bytes, uint64_t result_bytes, uint64_t accum_bytes,
-                                           uint64_t output_bytes) {
+static bool probe_wavefront_scratch_ensure(RENDERER *r, uint64_t node_bytes, uint64_t triangle_bytes, uint64_t state_bytes, uint64_t result_bytes,
+                                           uint64_t accum_bytes, uint64_t output_bytes) {
     if (!r) return false;
 
     if (!r->probe_scratch) {
@@ -3505,8 +3122,8 @@ static void probe_wavefront_scratch_destroy(RENDERER *r) {
     r->probe_scratch = NULL;
 }
 
-static bool probe_wavefront_transition(RENDERER *r, NriCommandBuffer *cmd, PROBE_WAVEFRONT_BUFFER *const *reads, uint8_t read_count, PROBE_WAVEFRONT_BUFFER *const *writes,
-                                       uint8_t write_count) {
+static bool probe_wavefront_transition(RENDERER *r, NriCommandBuffer *cmd, PROBE_WAVEFRONT_BUFFER *const *reads, uint8_t read_count,
+                                       PROBE_WAVEFRONT_BUFFER *const *writes, uint8_t write_count) {
     NriBufferBarrierDesc barriers[7] = {0};
     uint32_t count = 0;
 
@@ -3515,17 +3132,9 @@ static bool probe_wavefront_transition(RENDERER *r, NriCommandBuffer *cmd, PROBE
 
         if (!buffer || !buffer->buffer) return false;
 
-        barriers[count++] = (NriBufferBarrierDesc){
-            .buffer = buffer->buffer,
-            .before = {
-                .access = buffer->access,
-                .stages = buffer->stages
-            },
-            .after = {
-                .access = NriAccessBits_SHADER_RESOURCE,
-                .stages = NriStageBits_COMPUTE_SHADER
-            }
-        };
+        barriers[count++] = (NriBufferBarrierDesc){.buffer = buffer->buffer,
+                                                   .before = {.access = buffer->access, .stages = buffer->stages},
+                                                   .after = {.access = NriAccessBits_SHADER_RESOURCE, .stages = NriStageBits_COMPUTE_SHADER}};
 
         buffer->access = NriAccessBits_SHADER_RESOURCE;
         buffer->stages = NriStageBits_COMPUTE_SHADER;
@@ -3536,39 +3145,21 @@ static bool probe_wavefront_transition(RENDERER *r, NriCommandBuffer *cmd, PROBE
 
         if (!buffer || !buffer->buffer) return false;
 
-        barriers[count++] = (NriBufferBarrierDesc){
-            .buffer = buffer->buffer,
-            .before = {
-                .access = buffer->access,
-                .stages = buffer->stages
-            },
-            .after = {
-                .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
-                .stages = NriStageBits_COMPUTE_SHADER
-            }
-        };
+        barriers[count++] = (NriBufferBarrierDesc){.buffer = buffer->buffer,
+                                                   .before = {.access = buffer->access, .stages = buffer->stages},
+                                                   .after = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER}};
 
         buffer->access = NriAccessBits_SHADER_RESOURCE_STORAGE;
         buffer->stages = NriStageBits_COMPUTE_SHADER;
     }
 
-    if (count) r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){
-        .buffers = barriers,
-        .bufferNum = count
-    });
+    if (count) r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = barriers, .bufferNum = count});
 
     return true;
 }
 
-static bool probe_wavefront_dispatch(
-    RENDERER *r,
-    NriCommandBuffer *cmd,
-    const PROBE_WAVEFRONT_STAGE *stage,
-    PROBE_WAVEFRONT_BUFFER *const *reads,
-    PROBE_WAVEFRONT_BUFFER *const *writes,
-    const PROBE_WAVEFRONT_UNIFORMS *uniforms,
-    uint32_t groups_x
-) {
+static bool probe_wavefront_dispatch(RENDERER *r, NriCommandBuffer *cmd, const PROBE_WAVEFRONT_STAGE *stage, PROBE_WAVEFRONT_BUFFER *const *reads,
+                                     PROBE_WAVEFRONT_BUFFER *const *writes, const PROBE_WAVEFRONT_UNIFORMS *uniforms, uint32_t groups_x) {
     if (!r || !cmd || !stage || !stage->pipeline || !stage->layout || !uniforms || !groups_x) return false;
 
     if (!probe_wavefront_transition(r, cmd, reads, stage->read_count, writes, stage->write_count)) return false;
@@ -3594,17 +3185,14 @@ static bool probe_wavefront_dispatch(
     if (!bind_uniform_data(r, cmd, stage->layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms))) return false;
 
     r->gpu->core.CmdSetPipeline(cmd, stage->pipeline);
-    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
-        .workGroupNumX = groups_x,
-        .workGroupNumY = 1,
-        .workGroupNumZ = 1
-    });
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = groups_x, .workGroupNumY = 1, .workGroupNumZ = 1});
 
     return true;
 }
 
 static bool probe_wavefront_dispatch_indirect(RENDERER *r, NriCommandBuffer *cmd, const PROBE_WAVEFRONT_STAGE *stage, PROBE_WAVEFRONT_BUFFER *const *reads,
-                                              PROBE_WAVEFRONT_BUFFER *const *writes, const PROBE_WAVEFRONT_UNIFORMS *uniforms, PROBE_WAVEFRONT_BUFFER *arguments) {
+                                              PROBE_WAVEFRONT_BUFFER *const *writes, const PROBE_WAVEFRONT_UNIFORMS *uniforms,
+                                              PROBE_WAVEFRONT_BUFFER *arguments) {
     if (!r || !cmd || !stage || !stage->pipeline || !stage->layout || !uniforms || !arguments || !arguments->buffer) return false;
 
     if (!probe_wavefront_transition(r, cmd, reads, stage->read_count, writes, stage->write_count)) return false;
@@ -3648,17 +3236,8 @@ static uint32_t probe_wavefront_groups64(uint64_t threads) {
     return groups && groups <= UINT32_MAX ? (uint32_t)groups : 0u;
 }
 
-static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(
-    const BVH *tree,
-    const BEAM_GRID *beams,
-    DIRECTIONAL_LIGHT sun,
-    SKY sky,
-    VOLUMETRICS_LIGHTING volumetrics,
-    uint32_t probe_count,
-    uint32_t sample_offset,
-    uint32_t block_samples,
-    uint32_t bounce_index
-) {
+static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(const BVH *tree, const BEAM_GRID *beams, DIRECTIONAL_LIGHT sun, SKY sky, VOLUMETRICS_LIGHTING volumetrics,
+                                                     uint32_t probe_count, uint32_t sample_offset, uint32_t block_samples, uint32_t bounce_index) {
     const BVH_NODE *root = &tree->nodes[0];
     float scene_scale = fmaxf(root->max[0] - root->min[0], fmaxf(root->max[1] - root->min[1], root->max[2] - root->min[2]));
 
@@ -3666,32 +3245,28 @@ static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(
 
     const float epsilon = scene_scale * 2.0e-5f;
 
-    return (PROBE_WAVEFRONT_UNIFORMS){
-        .probe_count = probe_count,
-        .sample_offset = sample_offset,
-        .samples_per_block = block_samples,
-        .total_samples = volumetrics.probe_samples,
-        .node_count = tree->node_count,
-        .triangle_count = tree->triangle_count,
-        .bounce_index = bounce_index,
-        .max_bounces = PROBE_MAX_BOUNCES,
-        .beam_depth = beams->depth,
-        .emissive_samples = volumetrics.emissive_samples,
-        .sun_direction_intensity = {sun.direction.x, sun.direction.y, sun.direction.z, sun.intensity},
-        .sun_color_radius = {sun.color.x, sun.color.y, sun.color.z, sun.angular_radius},
-        .sky_zenith = {sky.zenith.x, sky.zenith.y, sky.zenith.z, 1.0f},
-        .sky_horizon = {sky.horizon.x, sky.horizon.y, sky.horizon.z, 1.0f},
-        .bake_params = {epsilon, 0.72f, sky.intensity, tree->emissive_weight},
-        .emissive_params = {volumetrics.emissive_probe_intensity, 0.0f, 0.0f, 0.0f},
-        .beam_origin = {beams->origin.x, beams->origin.y, beams->origin.z, 0.0f},
-        .beam_step = {beams->step.x, beams->step.y, beams->step.z, 0.0f}
-    };
+    return (PROBE_WAVEFRONT_UNIFORMS){.probe_count = probe_count,
+                                      .sample_offset = sample_offset,
+                                      .samples_per_block = block_samples,
+                                      .total_samples = volumetrics.probe_samples,
+                                      .node_count = tree->node_count,
+                                      .triangle_count = tree->triangle_count,
+                                      .bounce_index = bounce_index,
+                                      .max_bounces = PROBE_MAX_BOUNCES,
+                                      .beam_depth = beams->depth,
+                                      .emissive_samples = volumetrics.emissive_samples,
+                                      .sun_direction_intensity = {sun.direction.x, sun.direction.y, sun.direction.z, sun.intensity},
+                                      .sun_color_radius = {sun.color.x, sun.color.y, sun.color.z, sun.angular_radius},
+                                      .sky_zenith = {sky.zenith.x, sky.zenith.y, sky.zenith.z, 1.0f},
+                                      .sky_horizon = {sky.horizon.x, sky.horizon.y, sky.horizon.z, 1.0f},
+                                      .bake_params = {epsilon, 0.72f, sky.intensity, tree->emissive_weight},
+                                      .emissive_params = {volumetrics.emissive_probe_intensity, 0.0f, 0.0f, 0.0f},
+                                      .beam_origin = {beams->origin.x, beams->origin.y, beams->origin.z, 0.0f},
+                                      .beam_step = {beams->step.x, beams->step.y, beams->step.z, 0.0f}};
 }
 
 static NriBuffer *probe_wavefront_readback_buffer(RENDERER *r, uint64_t bytes) {
-    const NriBufferDesc desc = {
-        .size = bytes
-    };
+    const NriBufferDesc desc = {.size = bytes};
 
     NriBuffer *buffer = NULL;
 
@@ -3703,22 +3278,11 @@ static NriBuffer *probe_wavefront_readback_buffer(RENDERER *r, uint64_t bytes) {
 static bool probe_wavefront_copy_to_readback(RENDERER *r, NriCommandBuffer *cmd, PROBE_WAVEFRONT_BUFFER *source, NriBuffer *destination, uint64_t bytes) {
     if (!source || !source->buffer || !destination) return false;
 
-    const NriBufferBarrierDesc barrier = {
-        .buffer = source->buffer,
-        .before = {
-            .access = source->access,
-            .stages = source->stages
-        },
-        .after = {
-            .access = NriAccessBits_COPY_SOURCE,
-            .stages = NriStageBits_COPY
-        }
-    };
+    const NriBufferBarrierDesc barrier = {.buffer = source->buffer,
+                                          .before = {.access = source->access, .stages = source->stages},
+                                          .after = {.access = NriAccessBits_COPY_SOURCE, .stages = NriStageBits_COPY}};
 
-    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){
-        .buffers = &barrier,
-        .bufferNum = 1
-    });
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
     source->access = NriAccessBits_COPY_SOURCE;
     source->stages = NriStageBits_COPY;
     r->gpu->core.CmdCopyBuffer(cmd, destination, 0, source->buffer, 0, bytes);
@@ -3740,12 +3304,11 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
     const uint64_t result_bytes = max_rays * sizeof(float[4]);
     const uint64_t accum_bytes = probe_count64 * PROBE_ACCUM_BYTES;
 
-    float (*positions)[4] = malloc((size_t)probe_count * sizeof(float[4]));
+    float(*positions)[4] = malloc((size_t)probe_count * sizeof(float[4]));
 
     if (!positions) return false;
 
-    for (uint32_t i = 0; i < probe_count; ++i)
-        memcpy(positions[i], grid->probes[i].position, sizeof(float[4]));
+    for (uint32_t i = 0; i < probe_count; ++i) memcpy(positions[i], grid->probes[i].position, sizeof(float[4]));
 
     float *beam_data = beam_expand(beams);
 
@@ -3773,14 +3336,16 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
 
     PROBE_WAVEFRONT_BUFFER position_buffer = probe_wavefront_uploaded(r, positions, probe_count64 * sizeof(float[4]), sizeof(float[4]));
     PROBE_WAVEFRONT_BUFFER source_nodes = probe_wavefront_uploaded(r, tree->nodes, (uint64_t)tree->node_count * sizeof(*tree->nodes), sizeof(BVH_NODE));
-    PROBE_WAVEFRONT_BUFFER source_triangles = probe_wavefront_uploaded(r, tree->triangles, (uint64_t)tree->triangle_count * sizeof(*tree->triangles), sizeof(BVH_TRIANGLE));
+    PROBE_WAVEFRONT_BUFFER source_triangles =
+        probe_wavefront_uploaded(r, tree->triangles, (uint64_t)tree->triangle_count * sizeof(*tree->triangles), sizeof(BVH_TRIANGLE));
     PROBE_WAVEFRONT_BUFFER sun_beams = probe_wavefront_uploaded(r, beam_data, (beam_count + depth_count) * sizeof(float), sizeof(float));
 
     free(positions);
     free(beam_data);
 
-    const bool scratch_ready = probe_wavefront_scratch_ensure(r, (uint64_t)tree->node_count * PROBE_PACKED_NODE_BYTES, (uint64_t)tree->triangle_count * PROBE_PACKED_TRIANGLE_BYTES,
-                                                              state_bytes, result_bytes, accum_bytes, output_bytes);
+    const bool scratch_ready =
+        probe_wavefront_scratch_ensure(r, (uint64_t)tree->node_count * PROBE_PACKED_NODE_BYTES, (uint64_t)tree->triangle_count * PROBE_PACKED_TRIANGLE_BYTES,
+                                       state_bytes, result_bytes, accum_bytes, output_bytes);
     PROBE_WAVEFRONT_SCRATCH *scratch = r->probe_scratch;
 
     PROBE_WAVEFRONT_BUFFER packed_nodes = scratch_ready ? scratch->packed_nodes : (PROBE_WAVEFRONT_BUFFER){0};
@@ -3826,8 +3391,10 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
 
             if (good) good = gpu_timestamp_end(r, cmd, 0u);
 
-            if (good) good = submit_commands(r, allocator, cmd);
-            else abort_commands(r, allocator, cmd);
+            if (good)
+                good = submit_commands(r, allocator, cmd);
+            else
+                abort_commands(r, allocator, cmd);
         }
 
         if (good) gpu_timestamp_log(r, 0u, "probe prepare + validate");
@@ -3864,7 +3431,9 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
 
         PROBE_WAVEFRONT_BUFFER *primary_writes[] = {&results, &states_a, &counters};
 
-        if (good) good = probe_wavefront_dispatch(r, cmd, &pipelines.primary, primary_reads, primary_writes, &uniforms, probe_wavefront_groups64((uint64_t)probe_count * block));
+        if (good)
+            good = probe_wavefront_dispatch(r, cmd, &pipelines.primary, primary_reads, primary_writes, &uniforms,
+                                            probe_wavefront_groups64((uint64_t)probe_count * block));
 
         for (uint32_t bounce = 0; good && bounce < PROBE_MAX_BOUNCES; ++bounce) {
             uniforms.bounce_index = bounce;
@@ -3892,8 +3461,10 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
 
         if (good) good = probe_wavefront_copy_to_readback(r, cmd, &counters, counter_readback, 4u * sizeof(uint32_t));
 
-        if (good) good = submit_commands(r, allocator, cmd);
-        else abort_commands(r, allocator, cmd);
+        if (good)
+            good = submit_commands(r, allocator, cmd);
+        else
+            abort_commands(r, allocator, cmd);
 
         if (!good) break;
         gpu_timestamp_log(r, 2u, "probe trace block");
@@ -3928,8 +3499,10 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
             PROBE_WAVEFRONT_BUFFER *emissive_writes[] = {&coefficients};
             good = probe_wavefront_dispatch(r, cmd, &pipelines.emissive, emissive_reads, emissive_writes, &uniforms, probe_groups);
 
-            if (good) good = submit_commands(r, allocator, cmd);
-            else abort_commands(r, allocator, cmd);
+            if (good)
+                good = submit_commands(r, allocator, cmd);
+            else
+                abort_commands(r, allocator, cmd);
         }
     }
 
@@ -3941,15 +3514,18 @@ bool bake_probe_grid_fast(RENDERER *r, PROBE_GRID *grid, const BVH *tree, const 
         if (good) {
             good = probe_wavefront_copy_to_readback(r, cmd, &coefficients, output_readback, output_bytes);
 
-            if (good) good = submit_commands(r, allocator, cmd);
-            else abort_commands(r, allocator, cmd);
+            if (good)
+                good = submit_commands(r, allocator, cmd);
+            else
+                abort_commands(r, allocator, cmd);
         }
     }
 
     if (good) {
-        const float (*values)[4] = r->gpu->core.MapBuffer(output_readback, 0, output_bytes);
+        const float(*values)[4] = r->gpu->core.MapBuffer(output_readback, 0, output_bytes);
 
-        if (!values) good = false;
+        if (!values)
+            good = false;
         else {
             for (uint32_t i = 0; i < probe_count; ++i) {
                 for (uint32_t coefficient = 0; coefficient < 9u; ++coefficient)
@@ -3996,22 +3572,17 @@ bool bake_probe_grid(RENDERER *r, PROBE_GRID *grid, Uint32 samples) {
     const Uint32 output_bytes = (Uint32)output_size;
     const Uint32 input_bytes = (Uint32)input_size;
 
-    float (*positions)[4] = malloc(input_bytes);
+    float(*positions)[4] = malloc(input_bytes);
 
     if (!positions) return false;
 
-    for (uint32_t i = 0; i < (uint32_t)count; ++i)
-        memcpy(positions[i], grid->probes[i].position, sizeof(positions[i]));
+    for (uint32_t i = 0; i < (uint32_t)count; ++i) memcpy(positions[i], grid->probes[i].position, sizeof(positions[i]));
 
     NriBuffer *input = upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, positions, input_bytes, sizeof(float[4]));
 
     free(positions);
 
-    const NriBufferDesc output_desc = {
-        .size = output_bytes,
-        .structureStride = sizeof(float[4]),
-        .usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE
-    };
+    const NriBufferDesc output_desc = {.size = output_bytes, .structureStride = sizeof(float[4]), .usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE};
 
     NriBuffer *output = NULL;
 
@@ -4034,11 +3605,7 @@ bool bake_probe_grid(RENDERER *r, PROBE_GRID *grid, Uint32 samples) {
             if (good) {
                 r->gpu->core.CmdSetPipeline(cmd, pipeline);
 
-                r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
-                    .workGroupNumX = (Uint32)count,
-                    .workGroupNumY = 1,
-                    .workGroupNumZ = 1
-                });
+                r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (Uint32)count, .workGroupNumY = 1, .workGroupNumZ = 1});
 
                 good = submit_commands(r, allocator, cmd);
             } else {
@@ -4108,9 +3675,8 @@ void release_bake_resources(RENDERER *r) {
     r->lightmap_queue_args_pipeline = NULL;
 }
 
-static bool dispatch_one(
-    FX_STATE *fx, NriCommandBuffer *cmd, NriPipeline *pipeline, NriTexture *source, NriTexture *destination, const void *uniforms, Uint32 uniform_size, Uint32 width, Uint32 height
-) {
+static bool dispatch_one(FX_STATE *fx, NriCommandBuffer *cmd, NriPipeline *pipeline, NriTexture *source, NriTexture *destination, const void *uniforms,
+                         Uint32 uniform_size, Uint32 width, Uint32 height) {
     if (!fx || !fx->owner || !cmd || !pipeline || !destination) return false;
 
     RENDERER *r = fx->owner;
@@ -4118,11 +3684,7 @@ static bool dispatch_one(
     if (!bind_fx_resources(r, cmd, pipeline, source, destination, fx->sampler, uniforms, uniform_size)) return false;
 
     r->gpu->core.CmdSetPipeline(cmd, pipeline);
-    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
-        .workGroupNumX = (width + 7u) / 8u,
-        .workGroupNumY = (height + 7u) / 8u,
-        .workGroupNumZ = 1
-    });
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (width + 7u) / 8u, .workGroupNumY = (height + 7u) / 8u, .workGroupNumZ = 1});
 
     return true;
 }
@@ -4180,19 +3742,17 @@ static void fx_deinit(FX_STATE *fx) {
 }
 
 static bool make_compose_pipeline(RENDERER *r, NriShaderDesc *vs, NriShaderDesc *ps, NriFormat swap_format, NriPipeline **out) {
-    const NriColorAttachmentDesc target = {
-        .format = swap_format,
-        .colorWriteMask = NriColorWriteBits_RGBA
-    };
+    const NriColorAttachmentDesc target = {.format = swap_format, .colorWriteMask = NriColorWriteBits_RGBA};
 
     const NriShaderDesc shaders[2] = {*vs, *ps};
-    const NriGraphicsPipelineDesc desc = {.pipelineLayout = r->compose_layout,
-                                          .inputAssembly = {.topology = NriTopology_TRIANGLE_LIST},
-                                          .rasterization = {.fillMode = NriFillMode_SOLID, .cullMode = NriCullMode_NONE, .frontCounterClockwise = true, .depthClamp = false},
-                                          .outputMerger = {.colors = &target, .colorNum = 1},
-                                          .shaders = shaders,
-                                          .shaderNum = 2,
-                                          .cache = r->gpu->pipeline_cache};
+    const NriGraphicsPipelineDesc desc = {
+        .pipelineLayout = r->compose_layout,
+        .inputAssembly = {.topology = NriTopology_TRIANGLE_LIST},
+        .rasterization = {.fillMode = NriFillMode_SOLID, .cullMode = NriCullMode_NONE, .frontCounterClockwise = true, .depthClamp = false},
+        .outputMerger = {.colors = &target, .colorNum = 1},
+        .shaders = shaders,
+        .shaderNum = 2,
+        .cache = r->gpu->pipeline_cache};
 
     return r->gpu->core.CreateGraphicsPipeline(r->gpu->device, &desc, out) == NriResult_SUCCESS;
 }
@@ -4228,7 +3788,9 @@ static bool fx_init(FX_STATE *fx, RENDERER *r) {
 
     fx->volume_compose_pipeline = compile_compute(r, r->volume_compose_layout, "shaders/vision_compute.hlsl", "volume_compose_cs", "BUILD_VISION_COMPOSE_CS");
 
-    if (!vs.bytecode || !ps.bytecode || !fx->ssao_pipeline || !fx->bloom_pipeline || !fx->grade_pipeline || !fx->volume_pipeline || !fx->volume_compose_pipeline) goto fail;
+    if (!vs.bytecode || !ps.bytecode || !fx->ssao_pipeline || !fx->bloom_pipeline || !fx->grade_pipeline || !fx->volume_pipeline ||
+        !fx->volume_compose_pipeline)
+        goto fail;
 
     if (!make_compose_pipeline(r, &vs, &ps, r->gpu->swapchain_format, &fx->compose_pipeline)) goto fail;
 
@@ -4292,15 +3854,16 @@ static bool fx_ensure(FX_STATE *fx, Uint32 width, Uint32 height) {
     return true;
 }
 
-static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, NriBuffer *beams, const PROBE_GRID *grid, const BEAM_GRID *beam_grid, const RENDER_FRAME *frame) {
+static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, NriBuffer *beams, const PROBE_GRID *grid, const BEAM_GRID *beam_grid,
+                      const RENDER_FRAME *frame) {
     if (!fx || !fx->owner || !cmd || !probes || !beams || !grid || !beam_grid || !grid->probes || !fx->volume) return false;
 
     RENDERER *r = fx->owner;
 
     const VOLUME_UNIFORMS u = {
         .eye_density = {frame->eye.x, frame->eye.y, frame->eye.z, 0.0f},
-        .right_tan =
-        {frame->right.x * frame->tan_half_fov * frame->aspect, frame->right.y * frame->tan_half_fov * frame->aspect, frame->right.z * frame->tan_half_fov * frame->aspect, 0},
+        .right_tan = {frame->right.x * frame->tan_half_fov * frame->aspect, frame->right.y * frame->tan_half_fov * frame->aspect,
+                      frame->right.z * frame->tan_half_fov * frame->aspect, 0},
         .up_tan = {frame->up.x * frame->tan_half_fov, frame->up.y * frame->tan_half_fov, frame->up.z * frame->tan_half_fov, 0},
         .forward_g = {frame->forward.x, frame->forward.y, frame->forward.z, 0.0f},
         .sun_intensity = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, frame->sun.intensity},
@@ -4311,41 +3874,36 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
         .beam_origin = {beam_grid->origin.x, beam_grid->origin.y, beam_grid->origin.z, 0},
         .beam_step = {beam_grid->step.x, beam_grid->step.y, beam_grid->step.z, 0},
         .volume_params = {frame->volumetrics.density, frame->volumetrics.anisotropy, frame->volumetrics.probe_intensity, frame->volumetrics.max_distance},
-        .volume_radii = {frame->vision.center_radius, frame->vision.middle_radius, frame->vision.center_transition_width, frame->vision.middle_transition_width},
+        .volume_radii = {frame->vision.center_radius, frame->vision.middle_radius, frame->vision.center_transition_width,
+                         frame->vision.middle_transition_width},
         .volume_filter = {frame->vision.jitter_strength, frame->vision.volume_blur_strength, 0.0f, 0.0f},
         .volume_quality = {frame->vision.center_steps, frame->vision.middle_steps, frame->vision.peripheral_steps, 0u},
-        .volume_strides = {frame->vision.center_stride, frame->vision.middle_stride, frame->vision.peripheral_stride, 0u}
-    };
+        .volume_strides = {frame->vision.center_stride, frame->vision.middle_stride, frame->vision.peripheral_stride, 0u}};
 
     if (!bind_volume_resources(r, cmd, fx->normal_depth, fx->depth_sampler, probes, beams, fx->volume, &u, sizeof(u))) return false;
 
     r->gpu->core.CmdSetPipeline(cmd, fx->volume_pipeline);
 
-    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
-        .workGroupNumX = (fx->ao_width + 7u) / 8u,
-        .workGroupNumY = (fx->ao_height + 7u) / 8u,
-        .workGroupNumZ = 1
-    });
+    r->gpu->core.CmdDispatch(cmd,
+                             &(NriDispatchDesc){.workGroupNumX = (fx->ao_width + 7u) / 8u, .workGroupNumY = (fx->ao_height + 7u) / 8u, .workGroupNumZ = 1});
 
     const VOLUME_COMPOSE_UNIFORMS compose = {
         .width = fx->width,
         .height = fx->height,
         .debug_view = fx->debug_view,
         .bypass_volume = 0u,
-        .volume_radii = {frame->vision.center_radius, frame->vision.middle_radius, frame->vision.center_transition_width, frame->vision.middle_transition_width},
+        .volume_radii = {frame->vision.center_radius, frame->vision.middle_radius, frame->vision.center_transition_width,
+                         frame->vision.middle_transition_width},
         .volume_filter = {frame->vision.jitter_strength, frame->vision.volume_blur_strength, 0.0f, 0.0f},
         .volume_strides = {frame->vision.center_stride, frame->vision.middle_stride, frame->vision.peripheral_stride, 0u},
     };
 
-    if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, &compose, sizeof(compose))) return false;
+    if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, &compose, sizeof(compose)))
+        return false;
 
     r->gpu->core.CmdSetPipeline(cmd, fx->volume_compose_pipeline);
 
-    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
-        .workGroupNumX = (fx->width + 7u) / 8u,
-        .workGroupNumY = (fx->height + 7u) / 8u,
-        .workGroupNumZ = 1
-    });
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (fx->width + 7u) / 8u, .workGroupNumY = (fx->height + 7u) / 8u, .workGroupNumZ = 1});
 
     fx->volume_ready = true;
 
@@ -4364,30 +3922,25 @@ static bool run_vision_only(FX_STATE *fx, NriCommandBuffer *cmd) {
         .bypass_volume = 1u,
     };
 
-    if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, &compose, sizeof(compose))) return false;
+    if (!bind_volume_compose_resources(r, cmd, fx->hdr, fx->volume, fx->normal_depth, fx->sampler, fx->depth_sampler, fx->lit, &compose, sizeof(compose)))
+        return false;
 
     r->gpu->core.CmdSetPipeline(cmd, fx->volume_compose_pipeline);
 
-    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
-        .workGroupNumX = (fx->width + 7u) / 8u,
-        .workGroupNumY = (fx->height + 7u) / 8u,
-        .workGroupNumZ = 1
-    });
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (fx->width + 7u) / 8u, .workGroupNumY = (fx->height + 7u) / 8u, .workGroupNumZ = 1});
 
     return true;
 }
 
 static bool bloom_pass(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, Uint32 src_width, Uint32 src_height, Uint32 phase) {
-    const BLOOM_UNIFORMS u = {
-        .src_width = src_width,
-        .src_height = src_height,
-        .dst_width = fx->ao_width,
-        .dst_height = fx->ao_height,
-        .phase = phase,
-        .threshold = 1.0f,
-        .knee = 0.55f,
-        .strength = 1.0f * 1e2
-    };
+    const BLOOM_UNIFORMS u = {.src_width = src_width,
+                              .src_height = src_height,
+                              .dst_width = fx->ao_width,
+                              .dst_height = fx->ao_height,
+                              .phase = phase,
+                              .threshold = 1.0f,
+                              .knee = 0.55f,
+                              .strength = 1.0f * 1e2};
 
     return dispatch_one(fx, cmd, fx->bloom_pipeline, source, destination, &u, sizeof(u), fx->ao_width, fx->ao_height);
 }
@@ -4397,39 +3950,29 @@ static bool fx_apply_base(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *swap,
 
     RENDERER *r = fx->owner;
 
-    const SSAO_UNIFORMS ao = {
-        .width = fx->width,
-        .height = fx->height,
-        .ao_width = fx->ao_width,
-        .ao_height = fx->ao_height,
-        .tan_half_fov = tan_half_fov,
-        .aspect = aspect,
-        .radius = 0.65f,
-        .bias = 0.035f
-    };
+    const SSAO_UNIFORMS ao = {.width = fx->width,
+                              .height = fx->height,
+                              .ao_width = fx->ao_width,
+                              .ao_height = fx->ao_height,
+                              .tan_half_fov = tan_half_fov,
+                              .aspect = aspect,
+                              .radius = 0.65f,
+                              .bias = 0.035f};
 
     NriTexture *hdr = fx->volume_ready ? fx->lit : fx->hdr;
 
     if (!dispatch_one(fx, cmd, fx->ssao_pipeline, fx->normal_depth, fx->ao, &ao, sizeof(ao), fx->ao_width, fx->ao_height) ||
-        !bloom_pass(fx, cmd, fx->hdr, fx->bloom_a, fx->width, fx->height, 0u) || !bloom_pass(fx, cmd, fx->bloom_a, fx->bloom_b, fx->ao_width, fx->ao_height, 1u) ||
+        !bloom_pass(fx, cmd, fx->hdr, fx->bloom_a, fx->width, fx->height, 0u) ||
+        !bloom_pass(fx, cmd, fx->bloom_a, fx->bloom_b, fx->ao_width, fx->ao_height, 1u) ||
         !bloom_pass(fx, cmd, fx->bloom_b, fx->bloom_a, fx->ao_width, fx->ao_height, 2u))
         return false;
 
-    const COMPOSE_UNIFORMS u = {
-        .exposure = 1.0f,
-        .ao_strength = fx->debug_view >= 3u ? 0.0f : 0.62f,
-        .bloom_strength = fx->debug_view >= 3u ? 0.0f : 0.22f
-    };
+    const COMPOSE_UNIFORMS u = {.exposure = 1.0f, .ao_strength = fx->debug_view >= 3u ? 0.0f : 0.62f, .bloom_strength = fx->debug_view >= 3u ? 0.0f : 0.22f};
 
     if (!begin_compose_rendering(r, cmd, swap, hdr, fx->ao, fx->bloom_a, fx->lut, fx->sampler, &u, sizeof(u))) return false;
 
     r->gpu->core.CmdSetPipeline(cmd, fx->compose_pipeline);
-    r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){
-        .vertexNum = 3,
-        .instanceNum = 1,
-        .baseVertex = 0,
-        .baseInstance = 0
-    });
+    r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){.vertexNum = 3, .instanceNum = 1, .baseVertex = 0, .baseInstance = 0});
 
     r->gpu->core.CmdEndRendering(cmd);
 
@@ -4462,8 +4005,9 @@ static bool fx_apply(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *swap, floa
  * never learns about NRI descriptor sets/views.
  */
 static bool create_pipeline_layouts(RENDERER *r) {
-    return create_surface_layout(r) && create_line_layout(r) && create_sky_layout(r) && create_bake_layout(r) && create_lightmap_queue_layouts(r) && create_probe_layout(r) &&
-           create_ssao_layout(r) && create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) && create_volume_compose_layout(r) && create_compose_layout(r);
+    return create_surface_layout(r) && create_line_layout(r) && create_sky_layout(r) && create_bake_layout(r) && create_lightmap_queue_layouts(r) &&
+           create_probe_layout(r) && create_ssao_layout(r) && create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) &&
+           create_volume_compose_layout(r) && create_compose_layout(r);
 }
 
 static void destroy_pipeline_layouts(RENDERER *r) {
@@ -4498,9 +4042,9 @@ bool gpu_init(GPU *gpu, const char *title, int width, int height) {
     gpu->window = SDL_CreateWindow(title, width, height,
                                    SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY
 #if defined(__APPLE__)
-            | SDL_WINDOW_METAL
+                                       | SDL_WINDOW_METAL
 #else
-            | SDL_WINDOW_VULKAN
+                                       | SDL_WINDOW_VULKAN
 #endif
     );
     if (!gpu->window) return false;
@@ -4509,12 +4053,7 @@ bool gpu_init(GPU *gpu, const char *title, int width, int height) {
     device_desc.graphicsAPI = NriGraphicsAPI_VK;
     device_desc.enableNRIValidation = false;
     device_desc.enableGraphicsAPIValidation = false;
-    device_desc.vkBindingOffsets = (NriVKBindingOffsets){
-        .sRegister = 0,
-        .tRegister = 16,
-        .bRegister = 32,
-        .uRegister = 48
-    };
+    device_desc.vkBindingOffsets = (NriVKBindingOffsets){.sRegister = 0, .tRegister = 16, .bRegister = 32, .uRegister = 48};
 
     if (nriCreateDevice(&device_desc, &gpu->device) != NriResult_SUCCESS) {
         SDL_Log("NRI device creation failed");
@@ -4532,9 +4071,8 @@ bool gpu_init(GPU *gpu, const char *title, int width, int height) {
 
     RENDERER shell = {.gpu = gpu};
 
-    if (!acquire_queues(&shell) || !create_pipeline_cache(&shell) || !create_gpu_timestamps(&shell) ||
-        !create_swapchain(&shell, width, height) || !create_descriptor_pool(&shell) ||
-        !create_work_contexts(&shell) || !create_frame_contexts(&shell)) {
+    if (!acquire_queues(&shell) || !create_pipeline_cache(&shell) || !create_gpu_timestamps(&shell) || !create_swapchain(&shell, width, height) ||
+        !create_descriptor_pool(&shell) || !create_work_contexts(&shell) || !create_frame_contexts(&shell)) {
         gpu_deinit(gpu);
         return false;
     }
@@ -4606,7 +4144,8 @@ bool renderer_gpu_resources_init(RENDERER *r) {
 }
 
 bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
-    if (!r || !frame || !r->gpu->device || !r->solid_pipeline || !r->sky_pipeline || !r->vertex_buffer || !r->lightmap_texture || !r->lightmap_sampler) return false;
+    if (!r || !frame || !r->gpu->device || !r->solid_pipeline || !r->sky_pipeline || !r->vertex_buffer || !r->lightmap_texture || !r->lightmap_sampler)
+        return false;
 
     uint32_t width = 0;
     uint32_t height = 0;
@@ -4646,34 +4185,23 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     memcpy(camera.mvp, frame->mvp, sizeof(camera.mvp));
     memcpy(camera.view, frame->view, sizeof(camera.view));
 
-    const SKY_UNIFORMS sky = {
-        .camera_right =
-        {frame->right.x * frame->tan_half_fov * frame->aspect, frame->right.y * frame->tan_half_fov * frame->aspect, frame->right.z * frame->tan_half_fov * frame->aspect, 0},
-        .camera_up = {frame->up.x * frame->tan_half_fov, frame->up.y * frame->tan_half_fov, frame->up.z * frame->tan_half_fov, 0},
-        .camera_forward = {frame->forward.x, frame->forward.y, frame->forward.z, 0},
-        .sky_zenith = {frame->sky.zenith.x, frame->sky.zenith.y, frame->sky.zenith.z, frame->sky.intensity},
-        .sky_horizon = {frame->sky.horizon.x, frame->sky.horizon.y, frame->sky.horizon.z, 1.0f},
-        .sun_direction_intensity = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, frame->sun.intensity},
-        .sun_color_radius = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, frame->sun.angular_radius}
-    };
+    const SKY_UNIFORMS sky = {.camera_right = {frame->right.x * frame->tan_half_fov * frame->aspect, frame->right.y * frame->tan_half_fov * frame->aspect,
+                                               frame->right.z * frame->tan_half_fov * frame->aspect, 0},
+                              .camera_up = {frame->up.x * frame->tan_half_fov, frame->up.y * frame->tan_half_fov, frame->up.z * frame->tan_half_fov, 0},
+                              .camera_forward = {frame->forward.x, frame->forward.y, frame->forward.z, 0},
+                              .sky_zenith = {frame->sky.zenith.x, frame->sky.zenith.y, frame->sky.zenith.z, frame->sky.intensity},
+                              .sky_horizon = {frame->sky.horizon.x, frame->sky.horizon.y, frame->sky.horizon.z, 1.0f},
+                              .sun_direction_intensity = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, frame->sun.intensity},
+                              .sun_color_radius = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, frame->sun.angular_radius}};
 
     if (!begin_scene_rendering(r, cmd, r->fx.hdr, r->fx.normal_depth, r->depth_texture, width, height)) goto failed_frame;
 
     if (!bind_sky_resources(r, cmd, &sky, sizeof(sky))) goto failed_frame;
     r->gpu->core.CmdSetPipeline(cmd, r->sky_pipeline);
 
-    r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){
-        .vertexNum = 3,
-        .instanceNum = 1,
-        .baseVertex = 0,
-        .baseInstance = 0
-    });
+    r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){.vertexNum = 3, .instanceNum = 1, .baseVertex = 0, .baseInstance = 0});
 
-    const NriVertexBufferDesc vertex = {
-        .buffer = r->vertex_buffer,
-        .offset = 0,
-        .stride = sizeof(RENDER_VERTEX)
-    };
+    const NriVertexBufferDesc vertex = {.buffer = r->vertex_buffer, .offset = 0, .stride = sizeof(RENDER_VERTEX)};
 
     r->gpu->core.CmdSetVertexBuffers(cmd, 0, &vertex, 1);
     r->gpu->core.CmdSetPipeline(cmd, r->solid_pipeline);
@@ -4690,17 +4218,11 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
             .roughness_normal_ao_sun = {m->data.roughness, m->data.normal_scale, m->data.occlusion_strength, frame->sun.intensity},
             .sun_direction = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, 0},
             .sun_color = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, 1},
-            .camera_position = {frame->eye.x, frame->eye.y, frame->eye.z, r->debug_view == 1u ? 2.0f : (r->has_bake ? 1.0f : 0.0f)}
-        };
+            .camera_position = {frame->eye.x, frame->eye.y, frame->eye.z, r->debug_view == 1u ? 2.0f : (r->has_bake ? 1.0f : 0.0f)}};
 
         if (!bind_surface_resources(r, cmd, m, r->lightmap_texture, r->material_sampler, r->lightmap_sampler, &material, sizeof(material))) goto failed_frame;
 
-        r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){
-            .vertexNum = draw->count,
-            .instanceNum = 1,
-            .baseVertex = draw->first,
-            .baseInstance = 0
-        });
+        r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){.vertexNum = draw->count, .instanceNum = 1, .baseVertex = draw->first, .baseInstance = 0});
     }
 
     if (r->show_debug && r->debug_vertex_count) {
@@ -4708,12 +4230,7 @@ bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
 
         if (!bind_line_resources(r, cmd, camera.mvp, sizeof(camera.mvp))) goto failed_frame;
 
-        r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){
-            .vertexNum = r->debug_vertex_count,
-            .instanceNum = 1,
-            .baseVertex = r->debug_vertex_start,
-            .baseInstance = 0
-        });
+        r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){.vertexNum = r->debug_vertex_count, .instanceNum = 1, .baseVertex = r->debug_vertex_start, .baseInstance = 0});
     }
 
     r->gpu->core.CmdEndRendering(cmd);
@@ -4755,12 +4272,7 @@ bool bake_worker_init(RENDERER *r) {
 
     NriDeviceCreationDesc device_desc = {0};
     device_desc.graphicsAPI = NriGraphicsAPI_VK;
-    device_desc.vkBindingOffsets = (NriVKBindingOffsets){
-        .sRegister = 0,
-        .tRegister = 16,
-        .bRegister = 32,
-        .uRegister = 48
-    };
+    device_desc.vkBindingOffsets = (NriVKBindingOffsets){.sRegister = 0, .tRegister = 16, .bRegister = 32, .uRegister = 48};
 
     if (nriCreateDevice(&device_desc, &r->gpu->device) != NriResult_SUCCESS) {
         bake_worker_deinit(r);
@@ -4768,14 +4280,12 @@ bool bake_worker_init(RENDERER *r) {
     }
 
     if (nriGetInterface(r->gpu->device, NRI_INTERFACE(NriCoreInterface), &r->gpu->core) != NriResult_SUCCESS ||
-        nriGetInterface(r->gpu->device, NRI_INTERFACE(NriHelperInterface), &r->gpu->helper) != NriResult_SUCCESS ||
-        !acquire_queues(r)) {
+        nriGetInterface(r->gpu->device, NRI_INTERFACE(NriHelperInterface), &r->gpu->helper) != NriResult_SUCCESS || !acquire_queues(r)) {
         bake_worker_deinit(r);
         return false;
     }
 
-    if (!create_pipeline_cache(r) || !create_gpu_timestamps(r) || !create_descriptor_pool(r) ||
-        !create_work_contexts(r) || !create_pipeline_layouts(r)) {
+    if (!create_pipeline_cache(r) || !create_gpu_timestamps(r) || !create_descriptor_pool(r) || !create_work_contexts(r) || !create_pipeline_layouts(r)) {
         bake_worker_deinit(r);
         return false;
     }
@@ -4837,8 +4347,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         fx_deinit(&r->fx);
 
         if (r->image_textures) {
-            for (uint32_t i = 0; i < r->image_texture_count; ++i)
-                release_texture(r, r->image_textures[i]);
+            for (uint32_t i = 0; i < r->image_texture_count; ++i) release_texture(r, r->image_textures[i]);
         }
 
         free(r->image_textures);

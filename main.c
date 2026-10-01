@@ -18,15 +18,15 @@ static bool input_event(const SDL_Event *event) {
     if (!event) return false;
 
     switch (event->type) {
-        case SDL_EVENT_KEY_DOWN:
-        case SDL_EVENT_KEY_UP:
-        case SDL_EVENT_MOUSE_BUTTON_DOWN:
-        case SDL_EVENT_MOUSE_BUTTON_UP:
-        case SDL_EVENT_MOUSE_MOTION:
-        case SDL_EVENT_MOUSE_WHEEL:
-            return true;
-        default:
-            return false;
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP:
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+    case SDL_EVENT_MOUSE_MOTION:
+    case SDL_EVENT_MOUSE_WHEEL:
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -75,53 +75,33 @@ int main(int argc, char **argv) {
     GLTF_SCENE visual = {0};
     LIGHTMAP lightmap = {0};
 
-    struct MODEL model = {
-        .geometry = &geometry,
-        .visual = &visual
-    };
+    struct MODEL model = {.geometry = &geometry, .visual = &visual};
 
-    struct LIGHT sun = {
-        .type = LIGHT_DIRECTIONAL,
-        .directional = {
-            .direction = {0.38f, 0.30f, 0.32f},
-            .color = {1.00f, 0.94f, 0.84f},
-            .intensity = 1.0f,
-            .angular_radius = 0.00465f
-        }
-    };
+    struct LIGHT sun = {.type = LIGHT_DIRECTIONAL,
+                        .directional = {.direction = {0.38f, 0.30f, 0.32f}, .color = {1.00f, 0.94f, 0.84f}, .intensity = 1.0f, .angular_radius = 0.00465f}};
 
-    SCENE scene = {
-        .sky = {
-            .zenith = {0.22f, 0.42f, 0.78f},
-            .horizon = {0.68f, 0.76f, 0.88f},
-            .intensity = 1.0f
-        },
-        .volumetrics = {
-            .density = 0.045f,
-            .anisotropy = 0.55f,
-            .probe_intensity = 0.15f,
-            .emissive_probe_intensity = 1.0f,
-            .max_distance = 10000.0f,
-            .probe_spacing = 4.0f,
-            .probe_samples = 1024u,
-            .emissive_samples = 128u
-        },
-        .vision = {
-            .center_radius = 0.50f,
-            .middle_radius = 0.82f,
-            .center_transition_width = 0.08f,
-            .middle_transition_width = 0.08f,
-            .jitter_strength = 0.65f,
-            .volume_blur_strength = 0.35f,
-            .center_steps = 4u,
-            .middle_steps = 2u,
-            .peripheral_steps = 1u,
-            .center_stride = 1u,
-            .middle_stride = 8u,
-            .peripheral_stride = 24u
-        },
-        .lightmap = &lightmap
-    };
+    SCENE scene = {.sky = {.zenith = {0.22f, 0.42f, 0.78f}, .horizon = {0.68f, 0.76f, 0.88f}, .intensity = 1.0f},
+                   .volumetrics = {.density = 0.045f,
+                                   .anisotropy = 0.55f,
+                                   .probe_intensity = 0.15f,
+                                   .emissive_probe_intensity = 1.0f,
+                                   .max_distance = 10000.0f,
+                                   .probe_spacing = 4.0f,
+                                   .probe_samples = 1024u,
+                                   .emissive_samples = 128u},
+                   .vision = {.center_radius = 0.50f,
+                              .middle_radius = 0.82f,
+                              .center_transition_width = 0.08f,
+                              .middle_transition_width = 0.08f,
+                              .jitter_strength = 0.65f,
+                              .volume_blur_strength = 0.35f,
+                              .center_steps = 4u,
+                              .middle_steps = 2u,
+                              .peripheral_steps = 1u,
+                              .center_stride = 1u,
+                              .middle_stride = 8u,
+                              .peripheral_stride = 24u},
+                   .lightmap = &lightmap};
 
     const char *startup_stage = NULL;
     const char *startup_detail = NULL;
@@ -186,59 +166,19 @@ int main(int argc, char **argv) {
     layout_hash = hash_bytes(layout_hash, lightmap.uvs, geometry.faces.count * 6u * sizeof(*lightmap.uvs));
 
     const uint32_t bake_settings[] = {
-        LIGHTMAP_TEXELS_PER_UNIT,
-        LIGHTMAP_MAX_SIZE,
-        128u,
-        3u,
-        4u,
-        32u,
-        2u,
-        32u,
-        8u,
-        50u,
-        75u,
-        1u,
-        4u,
-        16u,
-        2u,
-        1u,
-        1u,
-        4u,
-        995u,
-        25u,
-        60u,
-        100u
-    };
+        LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE, 128u, 3u, 4u, 32u, 2u, 32u, 8u, 50u, 75u, 1u, 4u, 16u, 2u, 1u, 1u, 4u, 995u, 25u, 60u, 100u};
 
     layout_hash = hash_bytes(layout_hash, bake_settings, sizeof(bake_settings));
 
-    const float lighting_settings[] = {
-        sun.directional.direction.x,
-        sun.directional.direction.y,
-        sun.directional.direction.z,
-        sun.directional.intensity,
-        sun.directional.color.x,
-        sun.directional.color.y,
-        sun.directional.color.z,
-        sun.directional.angular_radius,
-        scene.sky.zenith.x,
-        scene.sky.zenith.y,
-        scene.sky.zenith.z,
-        scene.sky.horizon.x,
-        scene.sky.horizon.y,
-        scene.sky.horizon.z,
-        scene.sky.intensity
-    };
+    const float lighting_settings[] = {sun.directional.direction.x, sun.directional.direction.y, sun.directional.direction.z, sun.directional.intensity,
+                                       sun.directional.color.x,     sun.directional.color.y,     sun.directional.color.z,     sun.directional.angular_radius,
+                                       scene.sky.zenith.x,          scene.sky.zenith.y,          scene.sky.zenith.z,          scene.sky.horizon.x,
+                                       scene.sky.horizon.y,         scene.sky.horizon.z,         scene.sky.intensity};
 
     layout_hash = hash_bytes(layout_hash, lighting_settings, sizeof(lighting_settings));
 
-    const float volume_bake_settings[] = {
-        scene.volumetrics.probe_spacing,
-        (float)scene.volumetrics.probe_samples,
-        (float)scene.volumetrics.emissive_samples,
-        scene.volumetrics.emissive_probe_intensity,
-        9.0f
-    };
+    const float volume_bake_settings[] = {scene.volumetrics.probe_spacing, (float)scene.volumetrics.probe_samples, (float)scene.volumetrics.emissive_samples,
+                                          scene.volumetrics.emissive_probe_intensity, 9.0f};
 
     uint64_t volume_hash = hash_bytes(scene_hash, volume_bake_settings, sizeof(volume_bake_settings));
     volume_hash = hash_bytes(volume_hash, lighting_settings, sizeof(lighting_settings));
@@ -251,24 +191,12 @@ int main(int argc, char **argv) {
 
     SDL_SetWindowTitle(gpu.window, cached ? "READY" : "UNBAKED");
 
-    printf(
-        "%s: %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n",
-        model_path,
-        load_ms,
-        geometry.vertices.count,
-        geometry.faces.count,
-        (double)document.bin_size / (1024.0 * 1024.0)
-    );
-    printf("Visual: %zu vertices | %u materials | %u textures | %u images\n", visual.vertex_count, visual.material_count, visual.texture_count, visual.image_count);
-    printf(
-        "Lightmap: %.2f ms atlas | %ux%u | %u charts | %.2f texels/unit | %u valid texels\n",
-        atlas_ms,
-        lightmap.width,
-        lightmap.height,
-        lightmap.chart_count,
-        lightmap.texel_density,
-        lightmap.sample_count
-    );
+    printf("%s: %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n", model_path, load_ms, geometry.vertices.count, geometry.faces.count,
+           (double)document.bin_size / (1024.0 * 1024.0));
+    printf("Visual: %zu vertices | %u materials | %u textures | %u images\n", visual.vertex_count, visual.material_count, visual.texture_count,
+           visual.image_count);
+    printf("Lightmap: %.2f ms atlas | %ux%u | %u charts | %.2f texels/unit | %u valid texels\n", atlas_ms, lightmap.width, lightmap.height,
+           lightmap.chart_count, lightmap.texel_density, lightmap.sample_count);
     printf("Lighting: %s. Press B to rebake this scene in the renderer.\n", cached ? "loaded saved bake" : "unbaked fallback");
     printf("Runtime: PBR + sun beams + volume probes -> HDR -> bloom -> ACES + GPU LUT\n");
     printf("LMB drag: orbit | wheel: zoom | B: rebake | F5: fog on/off | Tab: wireframe | F11: fullscreen | Esc: quit\n");
@@ -291,20 +219,8 @@ int main(int argc, char **argv) {
                 if (event.key.scancode == SDL_SCANCODE_B || event.key.key == SDLK_B) {
                     SDL_ClearError();
 
-                    if (!bake_start(
-                            &renderer,
-                            model.geometry,
-                            model.visual,
-                            &lightmap,
-                            &sun,
-                            &scene.sky,
-                            &scene.volumetrics,
-                            bake_path,
-                            scene_hash,
-                            layout_hash,
-                            volume_hash,
-                            beam_hash
-                        )) {
+                    if (!bake_start(&renderer, model.geometry, model.visual, &lightmap, &sun, &scene.sky, &scene.volumetrics, bake_path, scene_hash,
+                                    layout_hash, volume_hash, beam_hash)) {
                         SDL_Log("B: could not start rebake: %s", *SDL_GetError() ? SDL_GetError() : "unknown error");
                     }
                 }

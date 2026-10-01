@@ -64,23 +64,13 @@ static OBJECT *scene_add_object(SCENE *scene, OBJECT_TYPE type, OBJECT_STATE sta
     }
 
     OBJECT *object = &scene->objects[scene->object_count++];
-    *object = (OBJECT){
-        .state = state,
-        .type = type,
-        .transform = transform,
-        .data = data,
-        .revision = 1u
-    };
+    *object = (OBJECT){.state = state, .type = type, .transform = transform, .data = data, .revision = 1u};
 
     return object;
 }
 
 TRANSFORM transform_identity(void) {
-    return (TRANSFORM){
-        .position = {0.0f, 0.0f, 0.0f},
-        .rotation = {0.0f, 0.0f, 0.0f, 1.0f},
-        .scale = {1.0f, 1.0f, 1.0f}
-    };
+    return (TRANSFORM){.position = {0.0f, 0.0f, 0.0f}, .rotation = {0.0f, 0.0f, 0.0f, 1.0f}, .scale = {1.0f, 1.0f, 1.0f}};
 }
 
 OBJECT *scene_add_model(SCENE *scene, struct MODEL *model, OBJECT_STATE state, TRANSFORM transform) {

@@ -48,8 +48,7 @@ static uint32_t uf_find(uint32_t *parent, uint32_t x) {
 
     uint32_t root = x;
 
-    while (parent[root] != root)
-        root = parent[root];
+    while (parent[root] != root) root = parent[root];
 
     while (parent[x] != x) {
         uint32_t next = parent[x];
@@ -168,8 +167,7 @@ static bool pack_charts(CHART *charts, uint32_t chart_count, float density, uint
 
     if (!order && chart_count) return false;
 
-    for (uint32_t i = 0; i < chart_count; ++i)
-        order[i] = i;
+    for (uint32_t i = 0; i < chart_count; ++i) order[i] = i;
 
     g_sort_charts = charts;
 
@@ -249,7 +247,7 @@ static bool barycentric(float px, float py, LMAP_UV a, LMAP_UV b, LMAP_UV c, flo
     const LMAP_UV corners[3] = {a, b, c};
 
     /* Cover every texel square touched by a triangle. Center-only coverage
-   * drops entire subpixel charts on dense meshes. */
+     * drops entire subpixel charts on dense meshes. */
     for (uint32_t i = 0; i < 3u; ++i) {
         const LMAP_UV p = corners[i], q = corners[(i + 1u) % 3u];
         const LMAP_UV opposite = corners[(i + 2u) % 3u];
@@ -269,7 +267,7 @@ static bool barycentric(float px, float py, LMAP_UV a, LMAP_UV b, LMAP_UV c, flo
     }
 
     /* For a conservatively covered pixel outside the triangle, sample the
-   * closest point on its surface instead of extrapolating world position. */
+     * closest point on its surface instead of extrapolating world position. */
     float closest = INFINITY;
 
     for (uint32_t i = 0; i < 3u; ++i) {
@@ -318,8 +316,7 @@ static void vertex_normals(const MESH *m, VEC3 *normals) {
         normals[f.indices[2]] = v3_add(normals[f.indices[2]], weighted);
     }
 
-    for (size_t i = 0; i < m->vertices.count; ++i)
-        normals[i] = v3_normalize(normals[i]);
+    for (size_t i = 0; i < m->vertices.count; ++i) normals[i] = v3_normalize(normals[i]);
 }
 
 void lmap_free(LIGHTMAP *lm) {
@@ -381,8 +378,7 @@ bool lmap_build(LIGHTMAP *lm, const MESH *m, uint32_t preferred_texels_per_unit,
 
         size_t end = first + 1u;
 
-        while (end < (size_t)face_count * 3u && edges[end].a == edges[first].a && edges[end].b == edges[first].b)
-            ++end;
+        while (end < (size_t)face_count * 3u && edges[end].a == edges[first].a && edges[end].b == edges[first].b) ++end;
 
         for (size_t a = first; a < end; ++a) {
 
@@ -424,8 +420,7 @@ bool lmap_build(LIGHTMAP *lm, const MESH *m, uint32_t preferred_texels_per_unit,
 
     if (!charts) goto fail;
 
-    for (uint32_t i = 0; i < face_count; ++i)
-        charts[face_chart[i]].normal = v3_add(charts[face_chart[i]].normal, geometric_normal(points, faces[i]));
+    for (uint32_t i = 0; i < face_count; ++i) charts[face_chart[i]].normal = v3_add(charts[face_chart[i]].normal, geometric_normal(points, faces[i]));
 
     for (uint32_t i = 0; i < chart_count; ++i) {
         charts[i].normal = v3_normalize(charts[i].normal);
@@ -460,8 +455,10 @@ bool lmap_build(LIGHTMAP *lm, const MESH *m, uint32_t preferred_texels_per_unit,
     for (uint32_t i = 0; i < chart_count; ++i) {
         const float area = (charts[i].max_u - charts[i].min_u) * (charts[i].max_v - charts[i].min_v);
 
-        if (area >= 32.0f) charts[i].density_scale = 0.5f;
-        else if (area >= 8.0f) charts[i].density_scale = 0.75f;
+        if (area >= 32.0f)
+            charts[i].density_scale = 0.5f;
+        else if (area >= 8.0f)
+            charts[i].density_scale = 0.75f;
     }
 
     float density = preferred_texels_per_unit ? (float)preferred_texels_per_unit : 16.0f;

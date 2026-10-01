@@ -1,28 +1,25 @@
 #ifndef GPU_BIND_S
-#define GPU_BIND_S(n,s) [[vk::binding(n, s)]]
-#define GPU_BIND_T(n,s) [[vk::binding(n + 16, s)]]
-#define GPU_BIND_B(n,s) [[vk::binding(n + 32, s)]]
-#define GPU_BIND_U(n,s) [[vk::binding(n + 48, s)]]
+#define GPU_BIND_S(n, s) [[vk::binding(n, s)]]
+#define GPU_BIND_T(n, s) [[vk::binding(n + 16, s)]]
+#define GPU_BIND_B(n, s) [[vk::binding(n + 32, s)]]
+#define GPU_BIND_U(n, s) [[vk::binding(n + 48, s)]]
 #define GPU_STORAGE_RGBA16F [[vk::image_format("rgba16f")]]
 #endif
 
 #if defined(BUILD_SURFACE_VS)
-GPU_BIND_B(0, 1) cbuffer Camera : register(b0, space1)
-{
+GPU_BIND_B(0, 1) cbuffer Camera : register(b0, space1) {
     float4x4 mvp;
     float4x4 view;
 };
 
-struct SurfaceInput
-{
+struct SurfaceInput {
     float3 position : TEXCOORD0;
     float3 normal : TEXCOORD1;
     float2 uv : TEXCOORD2;
     float2 lightmap_uv : TEXCOORD3;
 };
 
-struct SurfaceOutput
-{
+struct SurfaceOutput {
     float4 position : SV_Position;
     float3 world_position : TEXCOORD0;
     float3 world_normal : TEXCOORD1;
@@ -33,9 +30,8 @@ struct SurfaceOutput
     float2 back_lightmap_uv : TEXCOORD6;
 };
 
-SurfaceOutput surface_vs(SurfaceInput input)
-{
-    SurfaceOutput output; 
+SurfaceOutput surface_vs(SurfaceInput input) {
+    SurfaceOutput output;
     float4 world = float4(input.position, 1.0f);
     float4 view_position = mul(view, world);
     output.position = mul(mvp, world);
@@ -54,18 +50,19 @@ SurfaceOutput surface_vs(SurfaceInput input)
     return output;
 }
 #elif defined(BUILD_FULLSCREEN_VS)
-struct FullscreenOutput
-{
+struct FullscreenOutput {
     float4 position : SV_Position;
     float2 ndc : TEXCOORD0;
 };
 
-FullscreenOutput fullscreen_vs(uint vertex_id : SV_VertexID)
-{
+FullscreenOutput fullscreen_vs(uint vertex_id : SV_VertexID) {
     float2 p;
-    if (vertex_id == 0u) p = float2(-1.0f, -1.0f);
-    else if (vertex_id == 1u) p = float2(-1.0f, 3.0f);
-    else p = float2(3.0f, -1.0f);
+    if (vertex_id == 0u)
+        p = float2(-1.0f, -1.0f);
+    else if (vertex_id == 1u)
+        p = float2(-1.0f, 3.0f);
+    else
+        p = float2(3.0f, -1.0f);
 
     FullscreenOutput output;
     output.position = float4(p, 0.0f, 1.0f);
@@ -73,25 +70,21 @@ FullscreenOutput fullscreen_vs(uint vertex_id : SV_VertexID)
     return output;
 }
 #elif defined(BUILD_WIREFRAME_VS)
-GPU_BIND_B(0, 1) cbuffer Camera : register(b0, space1)
-{
+GPU_BIND_B(0, 1) cbuffer Camera : register(b0, space1) {
     float4x4 mvp;
 };
 
-struct WireframeInput
-{
+struct WireframeInput {
     float3 position : TEXCOORD0;
     float4 color : TEXCOORD1;
 };
 
-struct WireframeOutput
-{
+struct WireframeOutput {
     float4 position : SV_Position;
     float4 color : TEXCOORD0;
 };
 
-WireframeOutput wireframe_vs(WireframeInput input)
-{
+WireframeOutput wireframe_vs(WireframeInput input) {
     WireframeOutput output;
     output.position = mul(mvp, float4(input.position, 1.0f));
     output.color = input.color;

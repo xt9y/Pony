@@ -55,8 +55,7 @@ static VEC3 texture_triangle_average(const GLTF_SCENE *visual, SDL_Surface **ima
 
     VEC3 sum = v3(0, 0, 0);
 
-    for (uint32_t i = 0; i < 3u; ++i)
-        sum = v3_add(sum, texture_color_uv(visual, images, texture_index, vertices[i].u, vertices[i].v));
+    for (uint32_t i = 0; i < 3u; ++i) sum = v3_add(sum, texture_color_uv(visual, images, texture_index, vertices[i].u, vertices[i].v));
 
     sum = v3_add(sum, texture_color(visual, images, texture_index, vertices));
 
@@ -245,8 +244,9 @@ static bool sah_split(const BUILD_TRI *tris, uint32_t first, uint32_t count, VEC
         for (uint32_t i = 0; i + 1u < BVH_SAH_BINS; ++i) {
             if (!prefix[i].count || !suffix[i + 1u].count) continue;
 
-            float cost =
-                1.0f + (surface_area(prefix[i].min, prefix[i].max) * prefix[i].count + surface_area(suffix[i + 1u].min, suffix[i + 1u].max) * suffix[i + 1u].count) / parent_area;
+            float cost = 1.0f + (surface_area(prefix[i].min, prefix[i].max) * prefix[i].count +
+                                 surface_area(suffix[i + 1u].min, suffix[i + 1u].max) * suffix[i + 1u].count) /
+                                    parent_area;
 
             if (cost < best_cost) {
                 best_cost = cost;
@@ -439,10 +439,7 @@ bool trace_any(const BVH *tree, TRACE_RAY ray) {
 bool trace_closest(const BVH *tree, TRACE_RAY ray, TRACE_HIT *hit) {
 
     if (!hit) return false;
-    *hit = (TRACE_HIT){
-        .t = ray.tmax,
-        .triangle = UINT32_MAX
-    };
+    *hit = (TRACE_HIT){.t = ray.tmax, .triangle = UINT32_MAX};
 
     if (!tree || !tree->nodes || !tree->triangles || !tree->node_count || !tree->triangle_count || ray.tmax <= ray.tmin) return false;
 
@@ -576,7 +573,8 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
             if (material < visual->material_count) {
                 const GLTF_MATERIAL *mat = &visual->materials[material];
                 const GLTF_VERTEX *triangle = &visual->vertices[i * 3u];
-                albedo = v3(mat->base_color[0] * (1.0f - mat->metallic), mat->base_color[1] * (1.0f - mat->metallic), mat->base_color[2] * (1.0f - mat->metallic));
+                albedo =
+                    v3(mat->base_color[0] * (1.0f - mat->metallic), mat->base_color[1] * (1.0f - mat->metallic), mat->base_color[2] * (1.0f - mat->metallic));
                 emissive = v3(mat->emissive[0], mat->emissive[1], mat->emissive[2]);
 
                 if (images) {
@@ -588,13 +586,11 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
             }
         }
 
-        build[i].gpu = (BVH_TRIANGLE){
-            .a = {a.x, a.y, a.z, albedo.x},
-            .b = {b.x, b.y, b.z, albedo.y},
-            .c = {c.x, c.y, c.z, albedo.z},
-            .normal = {n.x, n.y, n.z, 0.0f},
-            .emissive = {emissive.x, emissive.y, emissive.z, 0.0f}
-        };
+        build[i].gpu = (BVH_TRIANGLE){.a = {a.x, a.y, a.z, albedo.x},
+                                      .b = {b.x, b.y, b.z, albedo.y},
+                                      .c = {c.x, c.y, c.z, albedo.z},
+                                      .normal = {n.x, n.y, n.z, 0.0f},
+                                      .emissive = {emissive.x, emissive.y, emissive.z, 0.0f}};
 
         build[i].centroid = v3_scale(v3_add(v3_add(a, b), c), 1.0f / 3.0f);
         build[i].min = v3(fminf(a.x, fminf(b.x, c.x)), fminf(a.y, fminf(b.y, c.y)), fminf(a.z, fminf(b.z, c.z)));
@@ -623,8 +619,7 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
         return false;
     }
 
-    for (uint32_t i = 0; i < count; ++i)
-        tree->triangles[i] = build[i].gpu;
+    for (uint32_t i = 0; i < count; ++i) tree->triangles[i] = build[i].gpu;
     free(build);
 
     float emissive_weight = 0.0f;

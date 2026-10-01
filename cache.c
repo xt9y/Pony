@@ -110,16 +110,17 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, CACHED_LIGHTMAP *
 
     CACHE_HEADER header = {0};
     uint64_t expected = 0;
-    bool good = fread(&header, sizeof(header), 1, file) == 1 && header.magic == DM_CACHE_MAGIC && header.version == DM_CACHE_VERSION && header.scene_hash == scene_hash &&
-                valid_dimensions(header.width, header.height, &expected) && expected == header.bytes;
+    bool good = fread(&header, sizeof(header), 1, file) == 1 && header.magic == DM_CACHE_MAGIC && header.version == DM_CACHE_VERSION &&
+                header.scene_hash == scene_hash && valid_dimensions(header.width, header.height, &expected) && expected == header.bytes;
 
     if (good) {
 
         unpack_grid(&out->object_probes, header.object_dims, header.object_origin, header.object_spacing);
         unpack_grid(&out->volume_probes, header.volume_dims, header.volume_origin, header.volume_spacing);
 
-        good = header.object_dims[0] <= 16384u && header.object_dims[1] <= 16384u && header.object_dims[2] <= 16384u && header.volume_dims[0] && header.volume_dims[0] <= 16384u &&
-               header.volume_dims[1] && header.volume_dims[1] <= 16384u && header.volume_dims[2] && header.volume_dims[2] <= 16384u;
+        good = header.object_dims[0] <= 16384u && header.object_dims[1] <= 16384u && header.object_dims[2] <= 16384u && header.volume_dims[0] &&
+               header.volume_dims[0] <= 16384u && header.volume_dims[1] && header.volume_dims[1] <= 16384u && header.volume_dims[2] &&
+               header.volume_dims[2] <= 16384u;
 
         const uint64_t object_count = good ? (uint64_t)header.object_dims[0] * header.object_dims[1] * header.object_dims[2] : 0;
 
@@ -128,8 +129,8 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, CACHED_LIGHTMAP *
         const uint64_t beam_capacity = good ? (uint64_t)header.beam_dims[0] * header.beam_dims[1] * header.beam_dims[2] : 0;
 
         good = good && object_count <= 16384u && volume_count <= 16384u &&
-               (!object_count || (header.object_spacing > 0.0f && isfinite(header.object_spacing) && isfinite(header.object_origin[0]) && isfinite(header.object_origin[1]) &&
-                                  isfinite(header.object_origin[2]))) &&
+               (!object_count || (header.object_spacing > 0.0f && isfinite(header.object_spacing) && isfinite(header.object_origin[0]) &&
+                                  isfinite(header.object_origin[1]) && isfinite(header.object_origin[2]))) &&
                header.volume_spacing > 0.0f && isfinite(header.volume_spacing) && isfinite(header.volume_origin[0]) && isfinite(header.volume_origin[1]) &&
                isfinite(header.volume_origin[2]) && header.beam_dims[0] == DM_CACHE_BEAM_WIDTH && header.beam_dims[1] == DM_CACHE_BEAM_HEIGHT &&
                header.beam_dims[2] >= DM_CACHE_MIN_BEAM_DEPTH && header.beam_dims[2] <= DM_CACHE_MAX_BEAM_DEPTH && header.beam_count <= beam_capacity;
@@ -182,7 +183,8 @@ bool cache_read_partial(const char *path, uint64_t scene_hash, CACHED_LIGHTMAP *
 
         const size_t depth_bytes = depth_count * sizeof(float);
 
-        good = out->pixels && fread(out->pixels, (size_t)expected, 1, file) == 1 && (!object_bytes || fread(out->object_probes.probes, object_bytes, 1, file) == 1) &&
+        good = out->pixels && fread(out->pixels, (size_t)expected, 1, file) == 1 &&
+               (!object_bytes || fread(out->object_probes.probes, object_bytes, 1, file) == 1) &&
                fread(out->volume_probes.probes, volume_bytes, 1, file) == 1 && (!beam_bytes || fread(out->beams.cells, beam_bytes, 1, file) == 1) &&
                fread(out->beams.shadow_depth, depth_bytes, 1, file) == 1 && fgetc(file) == EOF && !ferror(file);
 
@@ -252,8 +254,8 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
     const BEAM_GRID *beams = &data->beams;
     const uint64_t beam_capacity = (uint64_t)beams->width * beams->height * beams->depth;
 
-    if (beams->width != DM_CACHE_BEAM_WIDTH || beams->height != DM_CACHE_BEAM_HEIGHT || beams->depth < DM_CACHE_MIN_BEAM_DEPTH || beams->depth > DM_CACHE_MAX_BEAM_DEPTH ||
-        beams->count > beam_capacity || (beams->count && !beams->cells) || !beams->shadow_depth)
+    if (beams->width != DM_CACHE_BEAM_WIDTH || beams->height != DM_CACHE_BEAM_HEIGHT || beams->depth < DM_CACHE_MIN_BEAM_DEPTH ||
+        beams->depth > DM_CACHE_MAX_BEAM_DEPTH || beams->count > beam_capacity || (beams->count && !beams->cells) || !beams->shadow_depth)
         return false;
 
     const size_t depth_count = (size_t)beams->width * beams->height;
@@ -305,37 +307,37 @@ bool cache_write(const char *path, uint64_t scene_hash, uint64_t layout_hash, ui
         return false;
     }
 
-    const CACHE_HEADER header = {
-        .magic = DM_CACHE_MAGIC,
-        .version = DM_CACHE_VERSION,
-        .scene_hash = scene_hash,
-        .layout_hash = layout_hash,
-        .volume_hash = volume_hash,
-        .beam_hash = beam_hash,
-        .width = data->width,
-        .height = data->height,
-        .bytes = bytes,
-        .payload_hash = payload_hash,
-        .object_dims = {data->object_probes.count_x, data->object_probes.count_y, data->object_probes.count_z},
-        .volume_dims = {data->volume_probes.count_x, data->volume_probes.count_y, data->volume_probes.count_z},
-        .object_origin = {data->object_probes.origin.x, data->object_probes.origin.y, data->object_probes.origin.z},
-        .volume_origin = {data->volume_probes.origin.x, data->volume_probes.origin.y, data->volume_probes.origin.z},
-        .object_spacing = data->object_probes.spacing,
-        .volume_spacing = data->volume_probes.spacing,
-        .beam_origin = {beams->origin.x, beams->origin.y, beams->origin.z},
-        .beam_step = {beams->step.x, beams->step.y, beams->step.z},
-        .beam_dims = {beams->width, beams->height, beams->depth},
-        .beam_count = beams->count
-    };
+    const CACHE_HEADER header = {.magic = DM_CACHE_MAGIC,
+                                 .version = DM_CACHE_VERSION,
+                                 .scene_hash = scene_hash,
+                                 .layout_hash = layout_hash,
+                                 .volume_hash = volume_hash,
+                                 .beam_hash = beam_hash,
+                                 .width = data->width,
+                                 .height = data->height,
+                                 .bytes = bytes,
+                                 .payload_hash = payload_hash,
+                                 .object_dims = {data->object_probes.count_x, data->object_probes.count_y, data->object_probes.count_z},
+                                 .volume_dims = {data->volume_probes.count_x, data->volume_probes.count_y, data->volume_probes.count_z},
+                                 .object_origin = {data->object_probes.origin.x, data->object_probes.origin.y, data->object_probes.origin.z},
+                                 .volume_origin = {data->volume_probes.origin.x, data->volume_probes.origin.y, data->volume_probes.origin.z},
+                                 .object_spacing = data->object_probes.spacing,
+                                 .volume_spacing = data->volume_probes.spacing,
+                                 .beam_origin = {beams->origin.x, beams->origin.y, beams->origin.z},
+                                 .beam_step = {beams->step.x, beams->step.y, beams->step.z},
+                                 .beam_dims = {beams->width, beams->height, beams->depth},
+                                 .beam_count = beams->count};
 
     const Uint64 write_started = SDL_GetPerformanceCounter();
     bool good = fwrite(&header, sizeof(header), 1, file) == 1 && fwrite(data->pixels, (size_t)bytes, 1, file) == 1 &&
-                (!object_bytes || fwrite(data->object_probes.probes, object_bytes, 1, file) == 1) && fwrite(data->volume_probes.probes, volume_bytes, 1, file) == 1 &&
-                (!beam_bytes || fwrite(beams->cells, beam_bytes, 1, file) == 1) && fwrite(beams->shadow_depth, depth_bytes, 1, file) == 1 && fflush(file) == 0;
+                (!object_bytes || fwrite(data->object_probes.probes, object_bytes, 1, file) == 1) &&
+                fwrite(data->volume_probes.probes, volume_bytes, 1, file) == 1 && (!beam_bytes || fwrite(beams->cells, beam_bytes, 1, file) == 1) &&
+                fwrite(beams->shadow_depth, depth_bytes, 1, file) == 1 && fflush(file) == 0;
 
     if (fclose(file) != 0) good = false;
 
-    if (good) SDL_Log("B: cache file write took %.2f ms", (double)(SDL_GetPerformanceCounter() - write_started) * 1000.0 / (double)SDL_GetPerformanceFrequency());
+    if (good)
+        SDL_Log("B: cache file write took %.2f ms", (double)(SDL_GetPerformanceCounter() - write_started) * 1000.0 / (double)SDL_GetPerformanceFrequency());
 
     if (good && !cache_replace_file(temporary, path)) {
         SDL_SetError("could not save %s: %s", path, strerror(errno));

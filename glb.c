@@ -99,13 +99,7 @@ static int tok_add(GLB_DOC *d, GLB_TOKEN_TYPE type, uint32_t start, int parent) 
 
     int idx = (int)d->token_count++;
 
-    d->tokens[idx] = (GLB_TOKEN){
-        .start = start,
-        .end = start,
-        .parent = parent,
-        .children = 0,
-        .type = type
-    };
+    d->tokens[idx] = (GLB_TOKEN){.start = start, .end = start, .parent = parent, .children = 0, .type = type};
 
     if (parent >= 0) d->tokens[parent].children++;
 
@@ -633,25 +627,25 @@ static size_t component_size(uint32_t t) {
 
     switch (t) {
 
-        case 5120:
+    case 5120:
 
-        case 5121:
-            return 1;
+    case 5121:
+        return 1;
 
-        case 5122:
+    case 5122:
 
-        case 5123:
+    case 5123:
 
-            return 2;
+        return 2;
 
-        case 5125:
+    case 5125:
 
-        case 5126:
+    case 5126:
 
-            return 4;
+        return 4;
 
-        default:
-            return 0;
+    default:
+        return 0;
     }
 }
 
@@ -725,52 +719,52 @@ static float read_component(const unsigned char *p, uint32_t type, bool normaliz
 
     switch (type) {
 
-        case 5120: {
-            const int8_t v = (int8_t)p[0];
+    case 5120: {
+        const int8_t v = (int8_t)p[0];
 
-            if (!normalized) return (float)v;
+        if (!normalized) return (float)v;
 
-            const float f = (float)v / 127.0f;
+        const float f = (float)v / 127.0f;
 
-            return f < -1.0f ? -1.0f : f;
-        }
+        return f < -1.0f ? -1.0f : f;
+    }
 
-        case 5121: {
-            return normalized ? (float)p[0] / 255.0f : (float)p[0];
-        }
+    case 5121: {
+        return normalized ? (float)p[0] / 255.0f : (float)p[0];
+    }
 
-        case 5122: {
-            const int16_t v = (int16_t)rd16(p);
+    case 5122: {
+        const int16_t v = (int16_t)rd16(p);
 
-            if (!normalized) return (float)v;
+        if (!normalized) return (float)v;
 
-            const float f = (float)v / 32767.0f;
+        const float f = (float)v / 32767.0f;
 
-            return f < -1.0f ? -1.0f : f;
-        }
+        return f < -1.0f ? -1.0f : f;
+    }
 
-        case 5123: {
-            const uint16_t v = rd16(p);
+    case 5123: {
+        const uint16_t v = rd16(p);
 
-            return normalized ? (float)v / 65535.0f : (float)v;
-        }
+        return normalized ? (float)v / 65535.0f : (float)v;
+    }
 
-        case 5125: {
-            const uint32_t v = rd32(p);
+    case 5125: {
+        const uint32_t v = rd32(p);
 
-            return normalized ? (float)((double)v / 4294967295.0) : (float)v;
-        }
+        return normalized ? (float)((double)v / 4294967295.0) : (float)v;
+    }
 
-        case 5126: {
-            const uint32_t u = rd32(p);
-            float v;
-            memcpy(&v, &u, sizeof(v));
+    case 5126: {
+        const uint32_t u = rd32(p);
+        float v;
+        memcpy(&v, &u, sizeof(v));
 
-            return v;
-        }
+        return v;
+    }
 
-        default:
-            return 0.0f;
+    default:
+        return 0.0f;
     }
 }
 
@@ -798,20 +792,20 @@ bool glb_accessor_u32(const GLB_ACCESSOR *a, size_t element, uint32_t *value) {
 
     switch (a->component_type) {
 
-        case 5121:
-            *value = p[0];
-            return true;
+    case 5121:
+        *value = p[0];
+        return true;
 
-        case 5123:
-            *value = rd16(p);
-            return true;
+    case 5123:
+        *value = rd16(p);
+        return true;
 
-        case 5125:
-            *value = rd32(p);
-            return true;
+    case 5125:
+        *value = rd32(p);
+        return true;
 
-        default:
-            return false;
+    default:
+        return false;
     }
 }
 
@@ -907,8 +901,7 @@ static GM4 node_local(const GLB_DOC *d, int node) {
         GM4 m = m_identity();
         bool ok = true;
 
-        for (int i = 0; i < 16; ++i)
-            ok &= json_float(d, glb_at(d, t, (size_t)i), &m.m[i]);
+        for (int i = 0; i < 16; ++i) ok &= json_float(d, glb_at(d, t, (size_t)i), &m.m[i]);
 
         if (ok) return m;
     }
@@ -1070,7 +1063,9 @@ static bool extract_primitive(const GLB_DOC *d, int prim, GM4 world, MESH *out) 
 
             uint32_t a, b, c;
 
-            if (!primitive_index(indices, i, pos.count, &a) || !primitive_index(indices, i + 1, pos.count, &b) || !primitive_index(indices, i + 2, pos.count, &c)) return false;
+            if (!primitive_index(indices, i, pos.count, &a) || !primitive_index(indices, i + 1, pos.count, &b) ||
+                !primitive_index(indices, i + 2, pos.count, &c))
+                return false;
 
             if (flip) {
                 uint32_t t = b;
@@ -1088,7 +1083,9 @@ static bool extract_primitive(const GLB_DOC *d, int prim, GM4 world, MESH *out) 
 
             uint32_t a, b, c;
 
-            if (!primitive_index(indices, i, pos.count, &a) || !primitive_index(indices, i + 1, pos.count, &b) || !primitive_index(indices, i + 2, pos.count, &c)) return false;
+            if (!primitive_index(indices, i, pos.count, &a) || !primitive_index(indices, i + 1, pos.count, &b) ||
+                !primitive_index(indices, i + 2, pos.count, &c))
+                return false;
 
             if (i & 1u) {
                 uint32_t t = a;

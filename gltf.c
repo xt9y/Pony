@@ -109,8 +109,7 @@ static GM4 node_local(const GLB_DOC *d, int node) {
         GM4 m = m_identity();
         bool ok = true;
 
-        for (int i = 0; i < 16; ++i)
-            ok &= token_number(d, glb_at(d, t, (size_t)i), &m.m[i]);
+        for (int i = 0; i < 16; ++i) ok &= token_number(d, glb_at(d, t, (size_t)i), &m.m[i]);
 
         if (ok) return m;
     }
@@ -165,10 +164,9 @@ static VEC3 m_normal(GM4 m, VEC3 n) {
     if (fabsf(det) < 1.0e-12f) return v3_normalize(v3(a00 * n.x + a01 * n.y + a02 * n.z, a10 * n.x + a11 * n.y + a12 * n.z, a20 * n.x + a21 * n.y + a22 * n.z));
 
     const float inv = 1.0f / det;
-    const VEC3 r =
-        v3(((a11 * a22 - a12 * a21) * n.x + (a12 * a20 - a10 * a22) * n.y + (a10 * a21 - a11 * a20) * n.z) * inv,
-           ((a02 * a21 - a01 * a22) * n.x + (a00 * a22 - a02 * a20) * n.y + (a01 * a20 - a00 * a21) * n.z) * inv,
-           ((a01 * a12 - a02 * a11) * n.x + (a02 * a10 - a00 * a12) * n.y + (a00 * a11 - a01 * a10) * n.z) * inv);
+    const VEC3 r = v3(((a11 * a22 - a12 * a21) * n.x + (a12 * a20 - a10 * a22) * n.y + (a10 * a21 - a11 * a20) * n.z) * inv,
+                      ((a02 * a21 - a01 * a22) * n.x + (a00 * a22 - a02 * a20) * n.y + (a01 * a20 - a00 * a21) * n.z) * inv,
+                      ((a01 * a12 - a02 * a11) * n.x + (a02 * a10 - a00 * a12) * n.y + (a00 * a11 - a01 * a10) * n.z) * inv);
 
     return v3_normalize(r);
 }
@@ -239,7 +237,8 @@ static bool open_attribute(const GLB_DOC *d, int attrs, const char *name, size_t
     return true;
 }
 
-static bool read_vertex(const GLB_ACCESSOR *pos, const GLB_ACCESSOR *normal, const GLB_ACCESSOR *uv, uint32_t index, GM4 world, uint32_t material, GLTF_VERTEX *out) {
+static bool read_vertex(const GLB_ACCESSOR *pos, const GLB_ACCESSOR *normal, const GLB_ACCESSOR *uv, uint32_t index, GM4 world, uint32_t material,
+                        GLTF_VERTEX *out) {
     float x, y, z;
 
     if (!glb_accessor_f32(pos, index, 0, &x) || !glb_accessor_f32(pos, index, 1, &y) || !glb_accessor_f32(pos, index, 2, &z)) return false;
@@ -262,13 +261,14 @@ static bool read_vertex(const GLB_ACCESSOR *pos, const GLB_ACCESSOR *normal, con
     return true;
 }
 
-static bool
-emit_triangle(GLTF_SCENE *s, const GLB_ACCESSOR *pos, const GLB_ACCESSOR *normal, const GLB_ACCESSOR *uv, GM4 world, uint32_t material, uint32_t a, uint32_t b, uint32_t c) {
+static bool emit_triangle(GLTF_SCENE *s, const GLB_ACCESSOR *pos, const GLB_ACCESSOR *normal, const GLB_ACCESSOR *uv, GM4 world, uint32_t material, uint32_t a,
+                          uint32_t b, uint32_t c) {
 
     if (a == b || b == c || c == a) return true;
     GLTF_VERTEX va, vb, vc;
 
-    if (!read_vertex(pos, normal, uv, a, world, material, &va) || !read_vertex(pos, normal, uv, b, world, material, &vb) || !read_vertex(pos, normal, uv, c, world, material, &vc))
+    if (!read_vertex(pos, normal, uv, a, world, material, &va) || !read_vertex(pos, normal, uv, b, world, material, &vb) ||
+        !read_vertex(pos, normal, uv, c, world, material, &vc))
         return false;
 
     return push_triangle(s, va, vb, vc);
@@ -323,7 +323,9 @@ static bool extract_primitive(const GLB_DOC *d, int prim, GM4 world, GLTF_SCENE 
 
             uint32_t a, b, c;
 
-            if (!primitive_index(indices, i, pos.count, &a) || !primitive_index(indices, i + 1u, pos.count, &b) || !primitive_index(indices, i + 2u, pos.count, &c)) return false;
+            if (!primitive_index(indices, i, pos.count, &a) || !primitive_index(indices, i + 1u, pos.count, &b) ||
+                !primitive_index(indices, i + 2u, pos.count, &c))
+                return false;
 
             if (flip) {
                 uint32_t t = b;
@@ -341,7 +343,9 @@ static bool extract_primitive(const GLB_DOC *d, int prim, GM4 world, GLTF_SCENE 
 
             uint32_t a, b, c;
 
-            if (!primitive_index(indices, i, pos.count, &a) || !primitive_index(indices, i + 1u, pos.count, &b) || !primitive_index(indices, i + 2u, pos.count, &c)) return false;
+            if (!primitive_index(indices, i, pos.count, &a) || !primitive_index(indices, i + 1u, pos.count, &b) ||
+                !primitive_index(indices, i + 2u, pos.count, &c))
+                return false;
 
             if (i & 1u) {
                 uint32_t t = a;
@@ -468,8 +472,7 @@ static bool extract_materials(const GLB_DOC *d, GLTF_SCENE *s) {
 
     if (!s->materials) return false;
 
-    for (uint32_t i = 0; i < s->material_count; ++i)
-        material_defaults(&s->materials[i]);
+    for (uint32_t i = 0; i < s->material_count; ++i) material_defaults(&s->materials[i]);
 
     for (uint32_t i = 0; i < (uint32_t)source_count; ++i) {
 

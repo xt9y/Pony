@@ -111,8 +111,7 @@ static void raster_depth(float *depth, const BEAM_GRID *grid, const BVH *tree, V
 
     const size_t columns = (size_t)grid->width * grid->height;
 
-    for (size_t n = 0; n < columns; ++n)
-        depth[n] = -INFINITY;
+    for (size_t n = 0; n < columns; ++n) depth[n] = -INFINITY;
 
     for (uint32_t n = 0; n < tree->triangle_count; ++n) {
         const BVH_TRIANGLE *t = &tree->triangles[n];
@@ -272,10 +271,8 @@ bool beam_build(BEAM_GRID *grid, const MESH *scene, const BVH *tree, VEC3 sun_di
     VEC3 max = v3(-INFINITY, -INFINITY, -INFINITY);
 
     for (uint32_t corner = 0; corner < 8u; ++corner) {
-        const VEC3 p =
-            v3(corner & 1u ? scene->bounds.max.x : scene->bounds.min.x,
-               corner & 2u ? scene->bounds.max.y : scene->bounds.min.y,
-               corner & 4u ? scene->bounds.max.z : scene->bounds.min.z);
+        const VEC3 p = v3(corner & 1u ? scene->bounds.max.x : scene->bounds.min.x, corner & 2u ? scene->bounds.max.y : scene->bounds.min.y,
+                          corner & 4u ? scene->bounds.max.z : scene->bounds.min.z);
         const VEC3 q = v3(v3_dot(p, u), v3_dot(p, v), v3_dot(p, sun));
         min = v3(fminf(min.x, q.x), fminf(min.y, q.y), fminf(min.z, q.z));
         max = v3(fmaxf(max.x, q.x), fmaxf(max.y, q.y), fmaxf(max.z, q.z));
@@ -331,12 +328,7 @@ bool beam_build(BEAM_GRID *grid, const MESH *scene, const BVH *tree, VEC3 sun_di
                             const VEC3 q = v3(min.x + (i + 0.5f) * grid->step.x, min.y + (j + 0.5f) * grid->step.y, min.z + (z + 0.5f) * grid->step.z);
                             const VEC3 p = v3_add(v3_add(v3_scale(u, q.x), v3_scale(v, q.y)), v3_scale(sun, q.z));
 
-                            const TRACE_RAY ray = {
-                                .origin = p,
-                                .tmin = 0.001f,
-                                .direction = sun,
-                                .tmax = 1.0e20f
-                            };
+                            const TRACE_RAY ray = {.origin = p, .tmin = 0.001f, .direction = sun, .tmax = 1.0e20f};
 
                             visible = !trace_any(tree, ray);
                             ++traced;
@@ -363,7 +355,8 @@ bool beam_build(BEAM_GRID *grid, const MESH *scene, const BVH *tree, VEC3 sun_di
     free(tiles);
     free(prefix);
 
-    if (good) grid->shadow_depth = depth;
+    if (good)
+        grid->shadow_depth = depth;
     else {
         free(depth);
         beam_free(grid);
@@ -374,7 +367,8 @@ bool beam_build(BEAM_GRID *grid, const MESH *scene, const BVH *tree, VEC3 sun_di
 
 float *beam_expand(const BEAM_GRID *grid) {
 
-    if (!grid || !grid->width || !grid->height || !grid->depth || grid->width > 128u || grid->height > 128u || grid->depth > BEAM_MAX_SLICES || (grid->count && !grid->cells))
+    if (!grid || !grid->width || !grid->height || !grid->depth || grid->width > 128u || grid->height > 128u || grid->depth > BEAM_MAX_SLICES ||
+        (grid->count && !grid->cells))
         return NULL;
 
     const size_t total = (size_t)grid->width * grid->height * grid->depth;

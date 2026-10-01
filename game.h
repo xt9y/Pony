@@ -54,12 +54,7 @@ float v3_len_sq(VEC3 v);
 VEC3 v3_normalize(VEC3 v);
 void mesh_free(MESH *mesh);
 
-typedef enum GLB_TOKEN_TYPE {
-    GLB_TOKEN_OBJECT,
-    GLB_TOKEN_ARRAY,
-    GLB_TOKEN_STRING,
-    GLB_TOKEN_PRIMITIVE
-} GLB_TOKEN_TYPE;
+typedef enum GLB_TOKEN_TYPE { GLB_TOKEN_OBJECT, GLB_TOKEN_ARRAY, GLB_TOKEN_STRING, GLB_TOKEN_PRIMITIVE } GLB_TOKEN_TYPE;
 
 typedef struct GLB_TOKEN {
     uint32_t start;
@@ -166,26 +161,16 @@ typedef struct TRANSFORM {
     VEC3 scale;
 } TRANSFORM;
 
-typedef enum OBJECT_STATE {
-    STATIC,
-    DYNAMIC
-} OBJECT_STATE;
+typedef enum OBJECT_STATE { STATIC, DYNAMIC } OBJECT_STATE;
 
-typedef enum OBJECT_TYPE {
-    MODEL,
-    LIGHT
-} OBJECT_TYPE;
+typedef enum OBJECT_TYPE { MODEL, LIGHT } OBJECT_TYPE;
 
 struct MODEL {
     MESH *geometry;
     GLTF_SCENE *visual;
 };
 
-typedef enum LIGHT_TYPE {
-    LIGHT_DIRECTIONAL,
-    LIGHT_POINT,
-    LIGHT_SPOT
-} LIGHT_TYPE;
+typedef enum LIGHT_TYPE { LIGHT_DIRECTIONAL, LIGHT_POINT, LIGHT_SPOT } LIGHT_TYPE;
 
 typedef struct DIRECTIONAL_LIGHT {
     VEC3 direction;
@@ -393,45 +378,15 @@ void renderer_event(RENDERER *renderer, const SDL_Event *event);
 bool renderer_frame(RENDERER *renderer);
 void renderer_deinit(RENDERER *renderer);
 
-bool renderer_load_cached_lightmap(
-    RENDERER *renderer,
-    const char *path,
-    uint64_t scene_hash,
-    uint64_t layout_hash,
-    uint64_t volume_hash,
-    uint64_t beam_hash,
-    const LIGHTMAP *lightmap
-);
-bool renderer_rebake_current_scene(
-    RENDERER *renderer,
-    const MESH *mesh,
-    const GLTF_SCENE *visual,
-    const LIGHTMAP *lightmap,
-    const struct LIGHT *light,
-    const SKY *sky,
-    const VOLUMETRICS_LIGHTING *volumetrics,
-    const char *path,
-    uint64_t scene_hash,
-    uint64_t layout_hash,
-    uint64_t volume_hash,
-    uint64_t beam_hash
-);
+bool renderer_load_cached_lightmap(RENDERER *renderer, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash,
+                                   const LIGHTMAP *lightmap);
+bool renderer_rebake_current_scene(RENDERER *renderer, const MESH *mesh, const GLTF_SCENE *visual, const LIGHTMAP *lightmap, const struct LIGHT *light,
+                                   const SKY *sky, const VOLUMETRICS_LIGHTING *volumetrics, const char *path, uint64_t scene_hash, uint64_t layout_hash,
+                                   uint64_t volume_hash, uint64_t beam_hash);
 
 void bake_progress(RENDERER *renderer, const char *stage, Uint32 done, Uint32 total);
-bool bake_start(
-    RENDERER *renderer,
-    const MESH *scene,
-    const GLTF_SCENE *visual,
-    const LIGHTMAP *layout,
-    const struct LIGHT *light,
-    const SKY *sky,
-    const VOLUMETRICS_LIGHTING *volumetrics,
-    const char *path,
-    uint64_t scene_hash,
-    uint64_t layout_hash,
-    uint64_t volume_hash,
-    uint64_t beam_hash
-);
+bool bake_start(RENDERER *renderer, const MESH *scene, const GLTF_SCENE *visual, const LIGHTMAP *layout, const struct LIGHT *light, const SKY *sky,
+                const VOLUMETRICS_LIGHTING *volumetrics, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash);
 void bake_update(RENDERER *renderer);
 void bake_cancel(RENDERER *renderer);
 bool bake_active(RENDERER *renderer);
