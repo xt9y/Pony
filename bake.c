@@ -274,7 +274,7 @@ NriTexture *upload_direct_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached) {
     return cached ? upload_lightmap_pixels(r, cached->width, cached->height, cached->direct_pixels) : NULL;
 }
 
-static bool read_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width, Uint32 height, Uint8 **pixels) {
+bool download_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width, Uint32 height, Uint8 **pixels) {
     if (!r || !r->gpu->device || !texture || !width || !height || !pixels) return false;
     *pixels = NULL;
 
@@ -354,9 +354,9 @@ bool download_lightmap(RENDERER *r, CACHED_LIGHTMAP *out) {
     Uint8 *pixels = NULL;
     Uint8 *direct_pixels = NULL;
 
-    if (!read_rgba16f_texture(r, r->lightmap_texture, r->lightmap_width, r->lightmap_height, &pixels)) return false;
+    if (!download_rgba16f_texture(r, r->lightmap_texture, r->lightmap_width, r->lightmap_height, &pixels)) return false;
 
-    if (!read_rgba16f_texture(r, r->lightmap_direct, r->lightmap_width, r->lightmap_height, &direct_pixels)) {
+    if (!download_rgba16f_texture(r, r->lightmap_direct, r->lightmap_width, r->lightmap_height, &direct_pixels)) {
         free(pixels);
         return false;
     }
@@ -671,7 +671,7 @@ static float direct_luma(const Uint8 *pixels, Uint32 pixel) {
 static bool build_lightmap_patches(RENDERER *r, const LIGHTMAP *lm) {
     Uint8 *pixels = NULL;
 
-    if (!read_rgba16f_texture(r, r->lightmap_direct, lm->width, lm->height, &pixels)) return false;
+    if (!download_rgba16f_texture(r, r->lightmap_direct, lm->width, lm->height, &pixels)) return false;
 
     const size_t pixel_count = (size_t)lm->width * lm->height;
     const size_t tile_width = (lm->width + 3u) / 4u;
