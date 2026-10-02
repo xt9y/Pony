@@ -955,6 +955,15 @@ static DYNAMIC_LIGHTING_ALLOCATION *dynamic_lighting_find(RENDERER *r, OBJECT_ID
     return NULL;
 }
 
+static const DYNAMIC_LIGHTING_ALLOCATION *dynamic_lighting_find_const(const RENDERER *r, OBJECT_ID object_id) {
+    if (!r || !object_id) return NULL;
+
+    for (uint32_t i = 0; i < r->dynamic_lighting_count; ++i)
+        if (r->dynamic_lighting[i].object_id == object_id) return &r->dynamic_lighting[i];
+
+    return NULL;
+}
+
 static void release_scene_resources(RENDERER *r) {
     if (!r || !r->gpu->device) return;
 
@@ -1623,7 +1632,7 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
     float dynamic_cache_valid = 0.0f;
 
     if (r && r->scene && draw && draw->object_id && r->reference_lighting_enabled) {
-        DYNAMIC_LIGHTING_ALLOCATION *allocation = dynamic_lighting_find((RENDERER *)r, draw->object_id);
+        const DYNAMIC_LIGHTING_ALLOCATION *allocation = dynamic_lighting_find_const(r, draw->object_id);
         const OBJECT *object = scene_object_by_id_const(r->scene, draw->object_id);
 
         if (allocation && allocation->texture && object && allocation->transform_revision == object->transform_revision &&
