@@ -388,7 +388,7 @@ def main() -> None:
     for needle in (
         "GPU_FRAME_QUEUE_DEPTH",
         "DYNAMIC_TIMESTAMP_BASE",
-        'gpu_timestamp_log(r, timing_base, "dynamic surface cache")',
+        'gpu_timestamp_log(r, timing_base, "dynamic lighting caches")',
         'gpu_timestamp_log(r, timing_base + 2u, "dynamic shadow map")',
         "gpu_timestamp_begin(r, cmd, timing_base)",
         "gpu_timestamp_end(r, cmd, timing_base + 2u)",
