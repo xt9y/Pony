@@ -411,6 +411,7 @@ def main() -> None:
         "pending_lighting_revision",
         "allocation->sample_cursor = 0u",
         "cache_needs_clear",
+        "clear.sample_count = total",
         "clear.trace_params[1] = 1.0f",
         "gpu_texture_barrier(r, cmd, allocation->texture, storage, storage)",
         "allocation->transform_revision = object->transform_revision",
@@ -439,7 +440,8 @@ def main() -> None:
         "beam_visibility(",
         "encoded_visibility",
         "trace_params.y > 0.5f",
-        "Output[uint2(id.x % texture_width, id.x / texture_width)] = 0.0f",
+        "SurfaceSample clear_sample = Samples[sample_offset + id.x]",
+        "Output[uint2(clear_pixel % texture_width, clear_pixel / texture_width)] = 0.0f",
         "Output[uint2(pixel % texture_width, pixel / texture_width)]",
     ):
         if needle not in dynamic_surface:
