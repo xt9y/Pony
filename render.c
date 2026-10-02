@@ -748,9 +748,10 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
 
 static bool bind_dynamic_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const DYNAMIC_LIGHTING_ALLOCATION *allocation,
                                            const DYNAMIC_SURFACE_UNIFORMS *uniforms) {
-    if (!r || !cmd || !allocation || !allocation->texture || !allocation->sample_buffer || !allocation->self_node_buffer ||
-        !allocation->self_triangle_buffer || !uniforms || !r->dynamic_static_node_buffer || !r->dynamic_static_triangle_buffer ||
-        !r->dynamic_static_surface_buffer || !r->dynamic_static_uv_buffer || !r->beam_buffer || !r->lightmap_texture || !r->lightmap_sampler)
+    if (!r || !cmd || !allocation || !allocation->texture || !allocation->sample_buffer || !uniforms ||
+        !r->dynamic_static_node_buffer || !r->dynamic_static_triangle_buffer || !r->dynamic_static_surface_buffer ||
+        !r->dynamic_static_uv_buffer || !r->dynamic_object_node_buffer || !r->dynamic_object_triangle_buffer ||
+        !r->beam_buffer || !r->lightmap_texture || !r->lightmap_sampler)
         return false;
 
     if (!gpu_transition_texture(r, cmd, r->lightmap_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
@@ -765,8 +766,8 @@ static bool bind_dynamic_surface_resources(RENDERER *r, NriCommandBuffer *cmd, c
         gpu_create_buffer_view(r, r->dynamic_static_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
         gpu_create_buffer_view(r, r->dynamic_static_surface_buffer, NriBufferView_STRUCTURED_BUFFER, 16u),
         gpu_create_buffer_view(r, r->dynamic_static_uv_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(LMAP_UV)),
-        gpu_create_buffer_view(r, allocation->self_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
-        gpu_create_buffer_view(r, allocation->self_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
+        gpu_create_buffer_view(r, r->dynamic_object_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
+        gpu_create_buffer_view(r, r->dynamic_object_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
         gpu_create_texture_view(r, r->lightmap_texture, NriTextureView_TEXTURE),
         r->lightmap_sampler,
     };
@@ -2656,6 +2657,48 @@ static bool renderer_build_dynamic_static_transport(RENDERER *renderer, const SC
     return good;
 }
 
+static bool append_dynamic_bvh(BVH_NODE **nodes, uint32_t *node_count, BVH_TRIANGLE **triangles, uint32_t *triangle_count,
+                               const BVH *tree, DYNAMIC_LIGHTING_ALLOCATION *allocation) {
+    if (!nodes || !node_count || !triangles || !triangle_count || !tree || !allocation || !tree->node_count || !tree->triangle_count) return false;
+    if (*node_count > UINT32_MAX - tree->node_count || *triangle_count > UINT32_MAX - tree->triangle_count) return false;
+
+    const uint32_t node_offset = *node_count;
+    const uint32_t triangle_offset = *triangle_count;
+    const uint32_t next_node_count = node_offset + tree->node_count;
+    const uint32_t next_triangle_count = triangle_offset + tree->triangle_count;
+
+    BVH_NODE *next_nodes = realloc(*nodes, (size_t)next_node_count * sizeof(*next_nodes));
+    if (!next_nodes) return false;
+    *nodes = next_nodes;
+
+    BVH_TRIANGLE *next_triangles = realloc(*triangles, (size_t)next_triangle_count * sizeof(*next_triangles));
+    if (!next_triangles) return false;
+    *triangles = next_triangles;
+
+    for (uint32_t i = 0; i < tree->node_count; ++i) {
+        BVH_NODE node = tree->nodes[i];
+
+        if (node.meta[3] != 0u) {
+            node.meta[2] += triangle_offset;
+        } else if (node.meta[0] != UINT32_MAX) {
+            node.meta[0] += node_offset;
+        }
+
+        if (node.meta[1] != UINT32_MAX) node.meta[1] += node_offset;
+        (*nodes)[node_offset + i] = node;
+    }
+
+    memcpy(*triangles + triangle_offset, tree->triangles, (size_t)tree->triangle_count * sizeof(**triangles));
+
+    allocation->dynamic_node_offset = node_offset;
+    allocation->dynamic_node_count = tree->node_count;
+    allocation->dynamic_triangle_offset = triangle_offset;
+    allocation->dynamic_triangle_count = tree->triangle_count;
+    *node_count = next_node_count;
+    *triangle_count = next_triangle_count;
+    return true;
+}
+
 static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene) {
     uint32_t count = 0u;
 
@@ -2670,7 +2713,13 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
     renderer->dynamic_lighting = calloc(count, sizeof(*renderer->dynamic_lighting));
     if (!renderer->dynamic_lighting) return false;
 
-    for (uint32_t i = 0, out = 0; i < scene->object_count; ++i) {
+    BVH_NODE *packed_nodes = NULL;
+    BVH_TRIANGLE *packed_triangles = NULL;
+    uint32_t packed_node_count = 0u;
+    uint32_t packed_triangle_count = 0u;
+    bool good = true;
+
+    for (uint32_t i = 0, out = 0; i < scene->object_count && good; ++i) {
         OBJECT *object = &scene->objects[i];
 
         if (object->type != MODEL || object->state != DYNAMIC || !object->data) continue;
@@ -2678,11 +2727,13 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         struct MODEL *model = object->data;
 
         if (!model_surface_layout(model, target_samples)) {
-            release_dynamic_lighting(renderer);
-            return false;
+            good = false;
+            break;
         }
 
         DYNAMIC_LIGHTING_ALLOCATION *allocation = &renderer->dynamic_lighting[out++];
+        renderer->dynamic_lighting_count = out;
+
         allocation->object_id = object->id;
         allocation->layout = model->surface_layout;
         allocation->local_center = model->geometry->bounds.center;
@@ -2697,6 +2748,7 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         allocation->pending_lighting_revision = 0u;
         allocation->sample_cursor = 0u;
         allocation->cache_needs_clear = true;
+
         allocation->texture =
             gpu_create_texture(renderer, NriFormat_RGBA16_SFLOAT,
                                NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE,
@@ -2713,29 +2765,39 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
             gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, allocation->layout->samples,
                               (size_t)allocation->layout->sample_count * sizeof(*allocation->layout->samples), sizeof(LMAP_SAMPLE));
 
-        BVH self_tree = {0};
-
-        if (allocation->texture && allocation->sample_buffer && bvh_build(&self_tree, model->geometry, model->visual)) {
-            allocation->self_node_buffer =
-                gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, self_tree.nodes,
-                                  (size_t)self_tree.node_count * sizeof(*self_tree.nodes), sizeof(BVH_NODE));
-            allocation->self_triangle_buffer =
-                gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, self_tree.triangles,
-                                  (size_t)self_tree.triangle_count * sizeof(*self_tree.triangles), sizeof(BVH_TRIANGLE));
-        }
-
-        bvh_free(&self_tree);
-
-        if (!allocation->texture || !allocation->sample_buffer || !allocation->self_node_buffer || !allocation->self_triangle_buffer) {
-            renderer->dynamic_lighting_count = out;
-            release_dynamic_lighting(renderer);
-            return false;
-        }
-
-        renderer->dynamic_lighting_count = out;
+        BVH tree = {0};
+        good = allocation->texture && allocation->sample_buffer && bvh_build(&tree, model->geometry, model->visual) &&
+               append_dynamic_bvh(&packed_nodes, &packed_node_count, &packed_triangles, &packed_triangle_count, &tree, allocation);
+        bvh_free(&tree);
     }
 
-    return renderer->dynamic_lighting_count == count;
+    if (good && renderer->dynamic_lighting_count == count) {
+        renderer->dynamic_object_node_buffer =
+            gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, packed_nodes,
+                              (size_t)packed_node_count * sizeof(*packed_nodes), sizeof(BVH_NODE));
+        renderer->dynamic_object_triangle_buffer =
+            gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, packed_triangles,
+                              (size_t)packed_triangle_count * sizeof(*packed_triangles), sizeof(BVH_TRIANGLE));
+
+        good = renderer->dynamic_object_node_buffer && renderer->dynamic_object_triangle_buffer;
+    } else {
+        good = false;
+    }
+
+    if (good) {
+        renderer->dynamic_object_node_count = packed_node_count;
+        renderer->dynamic_object_triangle_count = packed_triangle_count;
+    }
+
+    free(packed_nodes);
+    free(packed_triangles);
+
+    if (!good) {
+        release_dynamic_lighting(renderer);
+        return false;
+    }
+
+    return true;
 }
 
 static bool reference_world_layout(const LIGHTMAP *local, TRANSFORM transform, LIGHTMAP *world) {
