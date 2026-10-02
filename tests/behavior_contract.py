@@ -180,6 +180,7 @@ def main() -> None:
     for needle in (
         '#define BASE_MODEL_PATH "hospital_hallway.glb"',
         'strcmp(argv[i], "--") == 0',
+        "return argc > 1 ? 1 : argc;",
         "load_scene_model(&scene, &models[0], BASE_MODEL_PATH",
         "const char *path = argv[extra_start + i];",
         "load_extra_model(&scene, &models[0], &models[i + 1], path, i",
