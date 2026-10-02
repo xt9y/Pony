@@ -257,10 +257,16 @@ void gpu_abort_commands(RENDERER *r, NriCommandAllocator *allocator, NriCommandB
 
 /* Descriptor sets match the HLSL register spaces in shaders/. */
 bool gpu_create_pipeline_layout(RENDERER *r, NriPipelineLayout **out, const NriDescriptorType *types[4], const uint8_t counts[4], NriStageBits stages) {
-    NriDescriptorRangeDesc ranges[4][16] = {0};
+    enum { MAX_LAYOUT_RANGES = 32 };
+    NriDescriptorRangeDesc ranges[4][MAX_LAYOUT_RANGES] = {0};
     NriDescriptorSetDesc sets[4] = {0};
 
     for (uint32_t set = 0; set < 4; ++set) {
+        if (counts[set] > MAX_LAYOUT_RANGES) {
+            SDL_SetError("pipeline layout set %u has %u ranges; maximum is %u", set, counts[set], MAX_LAYOUT_RANGES);
+            return false;
+        }
+
         sets[set].registerSpace = set;
         sets[set].ranges = ranges[set];
         sets[set].rangeNum = counts[set];
