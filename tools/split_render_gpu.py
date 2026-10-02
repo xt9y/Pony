@@ -358,5 +358,11 @@ for name in (
     if name not in render:
         raise SystemExit(f"render.c missing moved implementation: {name}")
 
+debug_lines = render.splitlines()
+for lo, hi in ((1, 45), (1045, 1090), (1180, 1210), (1310, 1360), (1660, 1700)):
+    print(f"--- render.c {lo}-{hi} ---")
+    for number in range(lo, min(hi, len(debug_lines)) + 1):
+        print(f"{number}: {debug_lines[number - 1]}")
+
 GPU.write_text(gpu, encoding="utf-8")
 RENDER.write_text(render, encoding="utf-8")
