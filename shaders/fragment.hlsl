@@ -131,8 +131,8 @@ float3 thin_film_fresnel(float cos_theta, float3 base_f0, float film_ior, float 
     float cos_theta2 = sqrt(cos_theta2_sq);
     float3 base_ior = fresnel0_to_ior(min(base_f0 + 0.0001f, 0.9999f));
 
-    float3 interface = (base_ior - film_ior) / max(base_ior + film_ior, 1.0e-4f);
-    float3 r1 = interface * interface;
+    float3 interface_ratio = (base_ior - film_ior) / max(base_ior + film_ior, 1.0e-4f);
+    float3 r1 = interface_ratio * interface_ratio;
     float3 r23 = r1 + (1.0f - r1) * pow(1.0f - cos_theta2, 5.0f);
 
     float opd = 2.0f * film_ior * max(thickness_nm, 0.0f) * cos_theta2;
