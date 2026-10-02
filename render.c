@@ -1809,6 +1809,39 @@ static bool render_dynamic_shadow_map(RENDERER *r, NriCommandBuffer *cmd, const 
     return true;
 }
 
+static uint32_t dynamic_trace_instances(const RENDERER *r, DYNAMIC_SURFACE_UNIFORMS *uniforms, OBJECT_ID current_object) {
+    if (!r || !r->scene || !uniforms) return 0u;
+
+    uint32_t count = 0u;
+    uint32_t current = UINT32_MAX;
+
+    for (uint32_t i = 0; i < r->dynamic_lighting_count && count < DYNAMIC_TRACE_INSTANCE_LIMIT; ++i) {
+        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        const OBJECT *object = scene_object_by_id_const(r->scene, allocation->object_id);
+
+        if (!object || object->type != MODEL || object->state != DYNAMIC || !allocation->dynamic_node_count || !allocation->dynamic_triangle_count)
+            continue;
+
+        const MAT4 inverse = m4_inverse_transform(object->transform);
+        const MAT4 normal = m4_transform(object->transform, true);
+
+        memcpy(uniforms->dynamic_instance_inverse[count], inverse.m, sizeof(inverse.m));
+        memcpy(uniforms->dynamic_instance_normal[count], normal.m, sizeof(normal.m));
+
+        uniforms->dynamic_instance_meta[count][0] = allocation->dynamic_node_offset;
+        uniforms->dynamic_instance_meta[count][1] = allocation->dynamic_node_count;
+        uniforms->dynamic_instance_meta[count][2] = allocation->dynamic_triangle_offset;
+        uniforms->dynamic_instance_meta[count][3] = allocation->dynamic_triangle_count;
+
+        if (allocation->object_id == current_object) current = count;
+        ++count;
+    }
+
+    uniforms->dynamic_instance_data[0] = count;
+    uniforms->dynamic_instance_data[1] = current;
+    return count;
+}
+
 static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame) {
     if (!r || !cmd || !frame) return false;
     if (r->reference_lighting_enabled || !r->has_bake || !r->dynamic_lighting_count) return true;
@@ -1878,6 +1911,7 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
         memcpy(uniforms.model, model.m, sizeof(uniforms.model));
         memcpy(uniforms.inverse_model, inverse_model.m, sizeof(uniforms.inverse_model));
         memcpy(uniforms.normal_model, normal_model.m, sizeof(uniforms.normal_model));
+        (void)dynamic_trace_instances(r, &uniforms, allocation->object_id);
 
         if (allocation->cache_needs_clear) {
             DYNAMIC_SURFACE_UNIFORMS clear = uniforms;
