@@ -365,6 +365,11 @@ def main() -> None:
         if needle not in render:
             raise AssertionError(f"stale dynamic cache rejection missing: {needle}")
 
+    if "if (!scene_compile(renderer->scene)) return false;" in render:
+        raise AssertionError("normal dynamic motion must not rebuild the full flattened CPU scene")
+    if "if (!scene_compile(r->scene)) return false;" not in render:
+        raise AssertionError("F2 reference mode must rebuild the full current scene before oracle baking")
+
     dynamic_surface = text("shaders/dynamic_surface.hlsl")
     for needle in (
         "DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u",
@@ -376,6 +381,9 @@ def main() -> None:
         "dynamic_static_node_buffer",
         "dynamic_static_surface_buffer",
         "dynamic_static_uv_buffer",
+        "self_node_buffer",
+        "self_triangle_buffer",
+        "m4_inverse_transform(",
         "update_dynamic_surface_caches(",
         "pending_transform_revision",
         "pending_lighting_revision",
@@ -395,8 +403,12 @@ def main() -> None:
         "StructuredBuffer<BvhTriangle> Triangles",
         "StructuredBuffer<StaticSurfaceRef> SurfaceRefs",
         "StructuredBuffer<float2> StaticUVs",
+        "StructuredBuffer<BvhNode> SelfNodes",
+        "StructuredBuffer<BvhTriangle> SelfTriangles",
         "Texture2D<float4> StaticLightmap",
         "static_closest(",
+        "self_closest(",
+        "self_any(",
         "static_lightmap_uv(",
         "static_outgoing(",
         "trace_static_indirect(",
