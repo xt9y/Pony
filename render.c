@@ -2228,20 +2228,26 @@ static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd, co
 
     if (uniforms.receiver_params[2] <= 0.0f) return true;
 
-    if (!bind_dynamic_receiver_resources(r, cmd, r->dynamic_receiver_texture, r->dynamic_receiver_scratch, &uniforms)) return false;
-    r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
-    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (lightmap->sample_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+    uint32_t active_samples = 0u;
+    const uint32_t active_ranges = dynamic_receiver_mark_active_cells(r, &uniforms, &active_samples);
 
-    uniforms.dispatch_data[0] = 1u;
-    uniforms.dispatch_data[1] = lightmap->sample_count;
+    if (!active_samples || !active_ranges) {
+        r->dynamic_receiver_ready = true;
+        return true;
+    }
 
-    if (!bind_dynamic_receiver_resources(r, cmd, r->dynamic_receiver_scratch, r->dynamic_receiver_texture, &uniforms)) return false;
-    r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
-    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (lightmap->sample_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+    if (!dynamic_receiver_dispatch_active(r, cmd, &uniforms, 0u, r->dynamic_receiver_texture, r->dynamic_receiver_scratch))
+        return false;
+
+    if (!dynamic_receiver_dispatch_active(r, cmd, &uniforms, 1u, r->dynamic_receiver_scratch, r->dynamic_receiver_texture))
+        return false;
 
     if (!gpu_transition_texture(r, cmd, r->dynamic_receiver_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
                                 NriStageBits_FRAGMENT_SHADER))
         return false;
+
+    if (r->gpu->frame_index % DYNAMIC_TIMING_LOG_INTERVAL == 0u)
+        SDL_Log("dynamic receiver active: %u/%u samples | %u merged ranges", active_samples, lightmap->sample_count, active_ranges);
 
     r->dynamic_receiver_ready = true;
     return true;
