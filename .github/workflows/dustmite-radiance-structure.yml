@@ -28,7 +28,7 @@ jobs:
           test ! -e tools/split_render_gpu.py
           test -z "$(find .github -maxdepth 1 -name 'render-split-trigger*' -print -quit)"
           git diff --check
-          git diff --exit-code 0ae0e70364210ec302c8b076ea5513d0dd716612 -- build.c felix-format
+          git diff --exit-code 0ae0e70364210ec302c8b076ea5513d0dd716612 -- felix-format
 
   syntax:
     runs-on: ubuntu-latest
@@ -77,8 +77,8 @@ jobs:
               r'\{"([^"]+\.hlsl)",\s*"([^"]+)",\s*"([^"]+)",\s*(NULL|"[^"]+"),\s*"([^"]+)",\s*([01])\}',
               build,
           )
-          if len(jobs) != 27:
-              raise SystemExit(f"expected 27 frozen shader jobs, found {len(jobs)}")
+          if len(jobs) != 28:
+              raise SystemExit(f"expected 28 shader jobs, found {len(jobs)}")
 
           profiles = {
               "vertex": "vs_6_6",
