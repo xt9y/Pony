@@ -320,6 +320,9 @@ def main() -> None:
         "reference_world_layout(",
         "reference_bake_surface(",
         "renderer_update_reference_lighting(",
+        "reference_texture",
+        "reference_transform_revision",
+        "reference_lighting_revision",
         "renderer->reference_lighting_enabled = !renderer->reference_lighting_enabled",
     ):
         if needle not in render:
