@@ -108,6 +108,28 @@ def main() -> None:
             raise AssertionError(f"extra-model camera/placement convenience leaked: {needle}")
 
     fragment = text("shaders/fragment.hlsl")
+    bvh = text("bvh.c")
+    compute_base = text("shaders/compute_base.hlsl")
+    probe_wavefront = text("shaders/probe_wavefront.hlsl")
+
+    for needle in (
+        "texture_triangle_channel_average",
+        "transmission = fminf(fmaxf(mat->transmission_factor",
+        ".normal = {n.x, n.y, n.z, transmission}",
+        "bvh_triangle_transmissive",
+        "transmissive geometry:",
+    ):
+        if needle not in bvh:
+            raise AssertionError(f"transmissive bake visibility missing from BVH: {needle}")
+
+    for needle in ("triangle_is_transmissive", "triangle.normal.w >= 0.999f", "if (triangle_is_transmissive(triangle)) continue;"):
+        if needle not in compute_base:
+            raise AssertionError(f"transmissive lightmap visibility missing: {needle}")
+
+    for needle in ("probe_triangle_transmissive", "triangle.normal.w >= 0.999f", "if (probe_triangle_transmissive(triangle)) continue;"):
+        if needle not in probe_wavefront:
+            raise AssertionError(f"transmissive probe visibility missing: {needle}")
+
 
     advanced_material_fields = (
         "ior",

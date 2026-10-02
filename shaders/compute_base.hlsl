@@ -670,6 +670,10 @@ bool trace_ray_triangle(TraceRay ray, BvhTriangle tri, float max_t, out float hi
     return true;
 }
 
+bool triangle_is_transmissive(BvhTriangle triangle) {
+    return triangle.normal.w >= 0.999f;
+}
+
 bool trace_any(TraceRay ray) {
     uint node_index = 0u;
     while (node_index != INVALID_NODE) {
@@ -683,8 +687,11 @@ bool trace_any(TraceRay ray) {
         if (count != 0u) {
             uint first = node.meta.z;
             for (uint i = 0; i < count; ++i) {
+                BvhTriangle triangle = Triangles[first + i];
+                if (triangle_is_transmissive(triangle)) continue;
+
                 float t;
-                if (trace_ray_triangle(ray, Triangles[first + i], ray.tmax, t)) return true;
+                if (trace_ray_triangle(ray, triangle, ray.tmax, t)) return true;
             }
             node_index = node.meta.y;
             continue;
@@ -717,18 +724,21 @@ bool trace_closest(TraceRay ray, out TraceHit hit) {
             uint first = node.meta.z;
             for (uint i = 0; i < count; ++i) {
                 uint tri_index = first + i;
+                BvhTriangle triangle = Triangles[tri_index];
+                if (triangle_is_transmissive(triangle)) continue;
+
                 float t;
-                if (!trace_ray_triangle(ray, Triangles[tri_index], closest, t)) continue;
+                if (!trace_ray_triangle(ray, triangle, closest, t)) continue;
 
                 closest = t;
-                float3 normal = normalize(Triangles[tri_index].normal.xyz);
+                float3 normal = normalize(triangle.normal.xyz);
                 if (dot(normal, ray.direction) > 0.0f) normal = -normal;
 
                 hit.t = t;
                 hit.normal = normal;
-                hit.albedo = saturate(float3(Triangles[tri_index].a.w, Triangles[tri_index].b.w, Triangles[tri_index].c.w));
+                hit.albedo = saturate(float3(triangle.a.w, triangle.b.w, triangle.c.w));
                 hit.triangle_index = tri_index;
-                hit.emissive = max(Triangles[tri_index].emissive.rgb, 0.0f);
+                hit.emissive = max(triangle.emissive.rgb, 0.0f);
                 found = true;
             }
             node_index = node.meta.y;

@@ -43,6 +43,44 @@ static VEC3 texture_color_uv(const GLTF_SCENE *visual, SDL_Surface **images, int
     return v3(srgb_linear(pixel[0] / 255.0f), srgb_linear(pixel[1] / 255.0f), srgb_linear(pixel[2] / 255.0f));
 }
 
+static float texture_channel_uv(const GLTF_SCENE *visual, SDL_Surface **images, int32_t texture_index, float u, float v, uint32_t channel) {
+    if (texture_index < 0 || (uint32_t)texture_index >= visual->texture_count || channel > 3u) return 1.0f;
+
+    const int32_t image = visual->textures[texture_index].image;
+
+    if (image < 0 || (uint32_t)image >= visual->image_count || !images[image]) return 1.0f;
+
+    const SDL_Surface *surface = images[image];
+
+    u -= floorf(u);
+    v -= floorf(v);
+
+    const uint32_t x = (uint32_t)(u * surface->w);
+    const uint32_t y = (uint32_t)(v * surface->h);
+    const unsigned char *pixel = (const unsigned char *)surface->pixels + (size_t)y * surface->pitch + (size_t)x * 4u;
+
+    return pixel[channel] / 255.0f;
+}
+
+static float texture_triangle_channel_average(const GLTF_SCENE *visual, SDL_Surface **images, int32_t texture_index, const GLTF_VERTEX *vertices,
+                                              uint32_t channel) {
+    if (texture_index < 0) return 1.0f;
+
+    float sum = 0.0f;
+
+    for (uint32_t i = 0; i < 3u; ++i) sum += texture_channel_uv(visual, images, texture_index, vertices[i].u, vertices[i].v, channel);
+
+    const float u = (vertices[0].u + vertices[1].u + vertices[2].u) / 3.0f;
+    const float v = (vertices[0].v + vertices[1].v + vertices[2].v) / 3.0f;
+    sum += texture_channel_uv(visual, images, texture_index, u, v, channel);
+
+    return sum * 0.25f;
+}
+
+static bool bvh_triangle_transmissive(const BVH_TRIANGLE *triangle) {
+    return triangle && triangle->normal[3] >= 0.999f;
+}
+
 static VEC3 texture_color(const GLTF_SCENE *visual, SDL_Surface **images, int32_t texture_index, const GLTF_VERTEX *vertices) {
     const float u = (vertices[0].u + vertices[1].u + vertices[2].u) / 3.0f;
     const float v = (vertices[0].v + vertices[1].v + vertices[2].v) / 3.0f;
@@ -422,9 +460,13 @@ bool trace_any(const BVH *tree, TRACE_RAY ray) {
 
         if (node->meta[3]) {
             for (uint32_t i = 0; i < node->meta[3]; ++i) {
+                const BVH_TRIANGLE *triangle = &tree->triangles[node->meta[2] + i];
+
+                if (bvh_triangle_transmissive(triangle)) continue;
+
                 float t;
 
-                if (trace_triangle(ray, &tree->triangles[node->meta[2] + i], ray.tmax, &t)) return true;
+                if (trace_triangle(ray, triangle, ray.tmax, &t)) return true;
             }
 
             node_index = node->meta[1];
@@ -464,7 +506,7 @@ bool trace_closest(const BVH *tree, TRACE_RAY ray, TRACE_HIT *hit) {
                 const BVH_TRIANGLE *tri = &tree->triangles[triangle];
                 float t;
 
-                if (!trace_triangle(ray, tri, closest, &t)) continue;
+                if (bvh_triangle_transmissive(tri) || !trace_triangle(ray, tri, closest, &t)) continue;
 
                 closest = t;
                 VEC3 normal = v3_normalize(v3(tri->normal[0], tri->normal[1], tri->normal[2]));
@@ -566,6 +608,7 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
 
         VEC3 albedo = v3(0.72f, 0.72f, 0.72f);
         VEC3 emissive = v3(0, 0, 0);
+        float transmission = 0.0f;
 
         if (visual && i < visual->vertex_count / 3u) {
             uint32_t material = visual->vertices[i * 3u].material;
@@ -576,12 +619,15 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
                 albedo =
                     v3(mat->base_color[0] * (1.0f - mat->metallic), mat->base_color[1] * (1.0f - mat->metallic), mat->base_color[2] * (1.0f - mat->metallic));
                 emissive = v3(mat->emissive[0], mat->emissive[1], mat->emissive[2]);
+                transmission = fminf(fmaxf(mat->transmission_factor, 0.0f), 1.0f);
 
                 if (images) {
                     VEC3 tex = texture_color(visual, images, mat->base_color_texture, triangle);
                     VEC3 emissive_tex = texture_triangle_average(visual, images, mat->emissive_texture, triangle);
+                    const float transmission_tex = texture_triangle_channel_average(visual, images, mat->transmission_texture, triangle, 0u);
                     albedo = v3(albedo.x * tex.x, albedo.y * tex.y, albedo.z * tex.z);
                     emissive = v3(emissive.x * emissive_tex.x, emissive.y * emissive_tex.y, emissive.z * emissive_tex.z);
+                    transmission *= transmission_tex;
                 }
             }
         }
@@ -589,7 +635,7 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
         build[i].gpu = (BVH_TRIANGLE){.a = {a.x, a.y, a.z, albedo.x},
                                       .b = {b.x, b.y, b.z, albedo.y},
                                       .c = {c.x, c.y, c.z, albedo.z},
-                                      .normal = {n.x, n.y, n.z, 0.0f},
+                                      .normal = {n.x, n.y, n.z, transmission},
                                       .emissive = {emissive.x, emissive.y, emissive.z, 0.0f}};
 
         build[i].centroid = v3_scale(v3_add(v3_add(a, b), c), 1.0f / 3.0f);
@@ -598,6 +644,13 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
     }
 
     release_images(images, visual ? visual->image_count : 0);
+
+    uint32_t transmissive_triangles = 0u;
+
+    for (uint32_t i = 0; i < count; ++i)
+        if (bvh_triangle_transmissive(&build[i].gpu)) ++transmissive_triangles;
+
+    if (transmissive_triangles) SDL_Log("B: transmissive geometry: %u triangles pass bake visibility", transmissive_triangles);
 
     tree->triangle_count = count;
 
