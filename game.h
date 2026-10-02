@@ -564,6 +564,14 @@ struct RENDERER {
     NriBuffer *bvh_triangle_buffer;
     uint32_t bvh_triangle_count;
     float bvh_emissive_weight;
+
+    /* Permanent static-scene transport data used by bounded DYNAMIC caches. */
+    NriBuffer *dynamic_static_node_buffer;
+    NriBuffer *dynamic_static_triangle_buffer;
+    NriBuffer *dynamic_static_surface_buffer;
+    NriBuffer *dynamic_static_uv_buffer;
+    uint32_t dynamic_static_node_count;
+    uint32_t dynamic_static_triangle_count;
     NriBuffer *lightmap_sample_buffer;
     NriBuffer *lightmap_full_sample_buffer;
     NriBuffer *lightmap_sparse_sample_buffer;
