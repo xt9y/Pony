@@ -11,6 +11,7 @@
 
 #define DYNAMIC_LIGHTING_TEXELS_PER_UNIT 24u
 #define DYNAMIC_LIGHTING_MAX_SIZE 4096u
+#define DYNAMIC_INFLUENCE_LIMIT 8u
 #define DYNAMIC_SHADOW_SIZE 2048u
 
 typedef struct MAT4 {
@@ -304,6 +305,11 @@ typedef struct MATERIAL_UNIFORMS {
     float beam_origin[4];
     float beam_step[4];
     Uint32 beam_dims[4];
+
+    Uint32 dynamic_influence_meta[4];
+    float dynamic_influence_center_radius[DYNAMIC_INFLUENCE_LIMIT][4];
+    float dynamic_influence_diffuse[DYNAMIC_INFLUENCE_LIMIT][4];
+    float dynamic_influence_emissive[DYNAMIC_INFLUENCE_LIMIT][4];
 } MATERIAL_UNIFORMS;
 
 typedef struct DYNAMIC_SHADOW_UNIFORMS {
@@ -353,6 +359,10 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     OBJECT_ID object_id;
     const LIGHTMAP *layout;
     NriTexture *texture;
+    VEC3 local_center;
+    float local_radius;
+    VEC3 average_diffuse;
+    VEC3 average_emissive;
     uint32_t transform_revision;
     uint32_t lighting_revision;
 };
@@ -1628,6 +1638,43 @@ static bool render_dynamic_shadow_map(RENDERER *r, NriCommandBuffer *cmd, const 
     return true;
 }
 
+static uint32_t dynamic_influences(const RENDERER *r, MATERIAL_UNIFORMS *uniforms) {
+    if (!r || !r->scene || !uniforms) return 0u;
+
+    uint32_t count = 0u;
+
+    for (uint32_t i = 0; i < r->dynamic_lighting_count && count < DYNAMIC_INFLUENCE_LIMIT; ++i) {
+        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        const OBJECT *object = scene_object_by_id_const(r->scene, allocation->object_id);
+
+        if (!object || object->state != DYNAMIC || object->type != MODEL || allocation->local_radius <= 0.0f) continue;
+
+        const MAT4 model = m4_transform(object->transform, false);
+        const VEC3 center = m4_point(model, allocation->local_center);
+        const float scale = fmaxf(fabsf(object->transform.scale.x), fmaxf(fabsf(object->transform.scale.y), fabsf(object->transform.scale.z)));
+        const float radius = fmaxf(allocation->local_radius * scale, 1.0e-3f);
+
+        uniforms->dynamic_influence_center_radius[count][0] = center.x;
+        uniforms->dynamic_influence_center_radius[count][1] = center.y;
+        uniforms->dynamic_influence_center_radius[count][2] = center.z;
+        uniforms->dynamic_influence_center_radius[count][3] = radius;
+
+        uniforms->dynamic_influence_diffuse[count][0] = allocation->average_diffuse.x;
+        uniforms->dynamic_influence_diffuse[count][1] = allocation->average_diffuse.y;
+        uniforms->dynamic_influence_diffuse[count][2] = allocation->average_diffuse.z;
+        uniforms->dynamic_influence_diffuse[count][3] = 1.0f;
+
+        uniforms->dynamic_influence_emissive[count][0] = allocation->average_emissive.x;
+        uniforms->dynamic_influence_emissive[count][1] = allocation->average_emissive.y;
+        uniforms->dynamic_influence_emissive[count][2] = allocation->average_emissive.z;
+        uniforms->dynamic_influence_emissive[count][3] = 0.0f;
+        ++count;
+    }
+
+    uniforms->dynamic_influence_meta[0] = count;
+    return count;
+}
+
 static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATERIAL *material, const RENDER_FRAME *frame, const DRAW_RANGE *draw) {
     float dynamic_cache_valid = 0.0f;
 
@@ -1667,6 +1714,7 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
         .beam_dims = {r->beams.width, r->beams.height, r->beams.depth, r->beam_buffer ? 1u : 0u}};
 
     (void)dynamic_shadow_projection(r, frame, result.shadow_u_min, result.shadow_v_min, result.shadow_sun_max, result.shadow_extent_bias);
+    (void)dynamic_influences(r, &result);
     return result;
 }
 
@@ -2163,6 +2211,38 @@ static bool model_surface_layout(struct MODEL *model) {
     return true;
 }
 
+static void model_lighting_summary(const struct MODEL *model, VEC3 *diffuse, VEC3 *emissive) {
+    VEC3 diffuse_sum = v3(0.0f, 0.0f, 0.0f);
+    VEC3 emissive_sum = v3(0.0f, 0.0f, 0.0f);
+    uint32_t count = 0u;
+
+    if (model && model->visual && model->visual->materials && model->visual->material_count) {
+        const GLTF_SCENE *visual = model->visual;
+        const size_t triangle_count = visual->vertex_count / 3u;
+
+        for (size_t triangle = 0; triangle < triangle_count; ++triangle) {
+            const uint32_t material_index = visual->vertices[triangle * 3u].material;
+
+            if (material_index >= visual->material_count) continue;
+
+            const GLTF_MATERIAL *material = &visual->materials[material_index];
+            const float nonmetal = 1.0f - fminf(fmaxf(material->metallic, 0.0f), 1.0f);
+
+            diffuse_sum = v3_add(diffuse_sum, v3(material->base_color[0] * nonmetal, material->base_color[1] * nonmetal, material->base_color[2] * nonmetal));
+            emissive_sum = v3_add(emissive_sum, v3(material->emissive[0], material->emissive[1], material->emissive[2]));
+            ++count;
+        }
+    }
+
+    if (!count) {
+        diffuse_sum = v3(0.72f, 0.72f, 0.72f);
+        count = 1u;
+    }
+
+    if (diffuse) *diffuse = v3_scale(diffuse_sum, 1.0f / (float)count);
+    if (emissive) *emissive = v3_scale(emissive_sum, 1.0f / (float)count);
+}
+
 static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene) {
     uint32_t count = 0u;
 
@@ -2189,6 +2269,9 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         DYNAMIC_LIGHTING_ALLOCATION *allocation = &renderer->dynamic_lighting[out++];
         allocation->object_id = object->id;
         allocation->layout = model->surface_layout;
+        allocation->local_center = model->geometry->bounds.center;
+        allocation->local_radius = sqrtf(v3_len_sq(model->geometry->bounds.extents));
+        model_lighting_summary(model, &allocation->average_diffuse, &allocation->average_emissive);
         allocation->transform_revision = 0u;
         allocation->lighting_revision = 0u;
         allocation->texture = pixel_texture(renderer, 0, 0, 0, 255);
