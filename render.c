@@ -440,10 +440,12 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     VEC3 average_emissive;
     uint32_t transform_revision;
     uint32_t lighting_revision;
+    uint32_t scene_lighting_revision;
     uint32_t reference_transform_revision;
     uint32_t reference_lighting_revision;
     uint32_t pending_transform_revision;
     uint32_t pending_lighting_revision;
+    uint32_t pending_scene_lighting_revision;
     uint32_t sample_cursor;
     bool cache_needs_clear;
 };
@@ -1873,15 +1875,18 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
             return false;
 
         if (allocation->pending_transform_revision != object->transform_revision ||
-            allocation->pending_lighting_revision != object->lighting_revision) {
+            allocation->pending_lighting_revision != object->lighting_revision ||
+            allocation->pending_scene_lighting_revision != r->scene->lighting_revision) {
             allocation->pending_transform_revision = object->transform_revision;
             allocation->pending_lighting_revision = object->lighting_revision;
+            allocation->pending_scene_lighting_revision = r->scene->lighting_revision;
             allocation->sample_cursor = 0u;
             allocation->cache_needs_clear = true;
         }
 
         if (allocation->cache_needs_clear || allocation->sample_cursor < allocation->layout->sample_count ||
-            allocation->transform_revision != object->transform_revision || allocation->lighting_revision != object->lighting_revision)
+            allocation->transform_revision != object->transform_revision || allocation->lighting_revision != object->lighting_revision ||
+            allocation->scene_lighting_revision != r->scene->lighting_revision)
             ++dirty_count;
     }
 
@@ -1896,7 +1901,8 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
 
         const uint32_t total = allocation->layout->sample_count;
         if (!allocation->cache_needs_clear && allocation->sample_cursor >= total &&
-            allocation->transform_revision == object->transform_revision && allocation->lighting_revision == object->lighting_revision)
+            allocation->transform_revision == object->transform_revision && allocation->lighting_revision == object->lighting_revision &&
+            allocation->scene_lighting_revision == r->scene->lighting_revision)
             continue;
         if (allocation->sample_cursor > total) allocation->sample_cursor = 0u;
 
@@ -1949,6 +1955,7 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
             allocation->cache_needs_clear = false;
             allocation->transform_revision = object->transform_revision;
             allocation->lighting_revision = object->lighting_revision;
+            allocation->scene_lighting_revision = r->scene->lighting_revision;
         }
 
         if (count) {
@@ -2041,7 +2048,8 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
                     allocation->reference_lighting_revision == object->lighting_revision)
                     dynamic_cache_valid = 1.0f;
             } else if (allocation->texture && allocation->transform_revision == object->transform_revision &&
-                       allocation->lighting_revision == object->lighting_revision) {
+                       allocation->lighting_revision == object->lighting_revision &&
+                       allocation->scene_lighting_revision == r->scene->lighting_revision) {
                 dynamic_cache_valid = 1.0f;
             }
         }
@@ -2790,10 +2798,12 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         model_lighting_summary(model, &allocation->average_diffuse, &allocation->average_emissive);
         allocation->transform_revision = 0u;
         allocation->lighting_revision = 0u;
+        allocation->scene_lighting_revision = 0u;
         allocation->reference_transform_revision = 0u;
         allocation->reference_lighting_revision = 0u;
         allocation->pending_transform_revision = 0u;
         allocation->pending_lighting_revision = 0u;
+        allocation->pending_scene_lighting_revision = 0u;
         allocation->sample_cursor = 0u;
         allocation->cache_needs_clear = true;
 
