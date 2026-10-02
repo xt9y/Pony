@@ -11,7 +11,6 @@
 static const uint INVALID_NODE = 0xffffffffu;
 static const uint PHASE_DIRECT = 0u;
 static const uint PHASE_FILTER = 1u;
-static const uint PHASE_CLEAR = 2u;
 static const uint DYNAMIC_INSTANCE_LIMIT = 8u;
 static const uint EMISSIVE_SAMPLES = 32u;
 
@@ -337,8 +336,9 @@ float4 source_pixel(int2 p) {
 }
 
 float4 filtered_pixel(int2 p) {
+    const float generation = receiver_params.w;
     float4 center = source_pixel(p);
-    if (center.a == 0.0f) return 0.0f;
+    if (abs(center.a - generation) > 0.25f) return 0.0f;
 
     float3 sum = 0.0f;
     float alpha_sum = 0.0f;
@@ -348,7 +348,7 @@ float4 filtered_pixel(int2 p) {
         [unroll] for (int x = -1; x <= 1; ++x) {
             int2 q = clamp(p + int2(x, y), int2(0, 0), int2((int)dispatch_data.z - 1, (int)dispatch_data.w - 1));
             float4 c = source_pixel(q);
-            if (c.a == 0.0f) continue;
+            if (abs(c.a - generation) > 0.25f) continue;
 
             float difference = length(c.rgb - center.rgb);
             float weight = 1.0f / (1.0f + difference * 4.0f);
@@ -367,11 +367,6 @@ void dynamic_receiver_cs(uint3 id : SV_DispatchThreadID) {
     const uint item_count = dispatch_data.y;
     if (id.x >= item_count) return;
 
-    if (phase == PHASE_CLEAR) {
-        Output[uint2(id.x % dispatch_data.z, id.x / dispatch_data.z)] = 0.0f;
-        return;
-    }
-
     if (phase == PHASE_DIRECT) {
         SurfaceSample sample = Samples[id.x];
         uint pixel = asuint(sample.position.w);
@@ -381,7 +376,7 @@ void dynamic_receiver_cs(uint3 id : SV_DispatchThreadID) {
         float3 normal = normalize(sample.normal.xyz);
 
         if (!receiver_relevant(sample.position.xyz) || receiver_params.z <= 0.0f) {
-            Output[uint2(pixel % dispatch_data.z, pixel / dispatch_data.z)] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+            Output[uint2(pixel % dispatch_data.z, pixel / dispatch_data.z)] = float4(0.0f, 0.0f, 0.0f, receiver_params.w);
             return;
         }
 
@@ -392,7 +387,7 @@ void dynamic_receiver_cs(uint3 id : SV_DispatchThreadID) {
             emissive_sum += direct_emissive_stratified(sample.position.xyz, normal, seed, i, EMISSIVE_SAMPLES);
 
         Output[uint2(pixel % dispatch_data.z, pixel / dispatch_data.z)] =
-            float4(emissive_sum / (float)EMISSIVE_SAMPLES, 1.0f);
+            float4(emissive_sum / (float)EMISSIVE_SAMPLES, receiver_params.w);
         return;
     }
 
