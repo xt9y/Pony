@@ -85,10 +85,14 @@ gpu = re.sub(r"\bcompile_shader\s*\(", "gpu_load_shader(", gpu)
 gpu = re.sub(r"\bfree_shader\s*\(", "gpu_free_shader(", gpu)
 gpu = re.sub(r"\btexture_barrier\s*\(", "gpu_texture_barrier(", gpu)
 
-gpu = gpu.replace(
-    "NriShaderDesc gpu_load_shader(const char *path, const char *entrypoint, const char *define, NriStageBits stage) {\\n    (void)path;\\n",
-    "NriShaderDesc gpu_load_shader(const char *entrypoint, const char *define, NriStageBits stage) {\\n",
+gpu, shader_signature_count = re.subn(
+    r"NriShaderDesc gpu_load_shader\(const char \*path, const char \*entrypoint, const char \*define, NriStageBits stage\)\s*\{\s*\(void\)path;\s*",
+    "NriShaderDesc gpu_load_shader(const char *entrypoint, const char *define, NriStageBits stage) {\n    ",
+    gpu,
+    count=1,
 )
+if shader_signature_count != 1:
+    raise SystemExit("could not normalize gpu_load_shader signature")
 
 for name in ("gpu_load_shader", "gpu_free_shader", "gpu_texture_barrier"):
     gpu = re.sub(rf"(^|\n)static (?=[^\n]*\b{name}\s*\()", r"\1", gpu)
