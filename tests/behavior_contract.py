@@ -122,11 +122,11 @@ def main() -> None:
         if needle not in bvh:
             raise AssertionError(f"transmissive bake visibility missing from BVH: {needle}")
 
-    for needle in ("triangle_is_transmissive", "triangle.normal.w >= 0.999f", "if (triangle_is_transmissive(triangle)) continue;"):
+    for needle in ("triangle_is_transmissive", "tri.normal.w >= 0.999f", "if (triangle_is_transmissive(tri)) continue;"):
         if needle not in compute_base:
             raise AssertionError(f"transmissive lightmap visibility missing: {needle}")
 
-    for needle in ("probe_triangle_transmissive", "triangle.normal.w >= 0.999f", "if (probe_triangle_transmissive(triangle)) continue;"):
+    for needle in ("probe_triangle_transmissive", "triangle.normal.w >= 0.999f", "if (probe_triangle_transmissive(tri)) continue;"):
         if needle not in probe_wavefront:
             raise AssertionError(f"transmissive probe visibility missing: {needle}")
 
@@ -211,7 +211,7 @@ def main() -> None:
         "return argc > 1 ? 1 : argc;",
         "load_scene_model(&scene, &models[0], BASE_MODEL_PATH",
         "const char *path = argv[extra_start + i];",
-        "load_scene_model(&scene, &models[i + 1], path, transform_identity()",
+        "load_scene_model(&scene, &models[i + 1], path,",
         "scene_build_lightmap(&scene, LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE)",
         "scene_content_hash(&scene)",
         "bake_start(&renderer, &scene",

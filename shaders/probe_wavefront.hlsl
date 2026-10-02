@@ -380,8 +380,8 @@ GPU_BIND_U(0, 1) RWStructuredBuffer<float4> ProbeCoefficientsEmissive : register
 
 #if defined(BUILD_PROBE_VALIDATE_CS) || defined(BUILD_PROBE_PRIMARY_CS) || defined(BUILD_PROBE_PRIMARY_WAVE_CS) || defined(BUILD_PROBE_BOUNCE_CS) ||           \
     defined(BUILD_PROBE_BOUNCE_WAVE_CS) || defined(BUILD_PROBE_EMISSIVE_CS)
-bool probe_triangle_transmissive(PackedProbeTriangle triangle) {
-    return triangle.normal.w >= 0.999f;
+bool probe_triangle_transmissive(PackedProbeTriangle tri) {
+    return tri.normal.w >= 0.999f;
 }
 
 bool probe_trace_any(ProbeTraceRay ray) {
@@ -398,11 +398,11 @@ bool probe_trace_any(ProbeTraceRay ray) {
             uint first = node.meta0 & PROBE_FIRST_MASK;
             uint count = (node.meta0 >> 27u) & 0x0fu;
             for (uint i = 0u; i < count; ++i) {
-                PackedProbeTriangle triangle = PROBE_TRIANGLES[first + i];
-                if (probe_triangle_transmissive(triangle)) continue;
+                PackedProbeTriangle tri = PROBE_TRIANGLES[first + i];
+                if (probe_triangle_transmissive(tri)) continue;
 
                 float t;
-                if (probe_triangle_hit(ray, triangle, ray.tmax, t)) return true;
+                if (probe_triangle_hit(ray, tri, ray.tmax, t)) return true;
             }
             node_index = node.meta1;
         } else {
