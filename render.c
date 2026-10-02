@@ -422,18 +422,51 @@ static NriPipeline *make_surface_pipeline(RENDERER *r, NriCoreInterface *core, N
     return pipeline;
 }
 
+static NriPipeline *make_dynamic_shadow_pipeline(RENDERER *r, NriPipelineLayout *layout, const NriShaderDesc *vs) {
+    const NriVertexStreamDesc vb = {.bindingSlot = 0, .stepRate = NriVertexStreamStepRate_PER_VERTEX, .stride = (uint16_t)sizeof(RENDER_VERTEX)};
+    const NriVertexAttributeDesc position = {.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 0},
+                                             .vk = {.location = 0},
+                                             .offset = (uint32_t)offsetof(RENDER_VERTEX, x),
+                                             .format = NriFormat_RGB32_SFLOAT,
+                                             .streamIndex = 0};
+    const NriVertexInputDesc vertex_input = {.attributes = &position, .attributeNum = 1, .streams = &vb, .streamNum = 1};
+    const NriMultisampleDesc multisample = {.sampleMask = NRI_ALL, .sampleNum = 1};
+    const NriGraphicsPipelineDesc desc = {
+        .pipelineLayout = layout,
+        .vertexInput = &vertex_input,
+        .inputAssembly = {.topology = NriTopology_TRIANGLE_LIST},
+        .rasterization = {.fillMode = NriFillMode_SOLID, .cullMode = NriCullMode_NONE, .frontCounterClockwise = true, .depthClamp = false},
+        .multisample = &multisample,
+        .outputMerger = {.depth = {.compareOp = NriCompareOp_LESS, .write = true}, .depthStencilFormat = r->depth_format},
+        .shaders = vs,
+        .shaderNum = 1,
+        .cache = r->gpu->pipeline_cache};
+    NriPipeline *pipeline = NULL;
+
+    return r->gpu->core.CreateGraphicsPipeline(r->gpu->device, &desc, &pipeline) == NriResult_SUCCESS ? pipeline : NULL;
+}
+
+static bool create_dynamic_shadow_layout(RENDERER *r) {
+    static const NriDescriptorType object[] = {NriDescriptorType_CONSTANT_BUFFER};
+    const NriDescriptorType *sets[4] = {NULL, object, NULL, NULL};
+    const uint8_t counts[4] = {0, 1, 0, 0};
+
+    return gpu_create_pipeline_layout(r, &r->dynamic_shadow_layout, sets, counts, NriStageBits_VERTEX_SHADER);
+}
+
 static bool create_surface_layout(RENDERER *r) {
     static const NriDescriptorType camera[] = {NriDescriptorType_CONSTANT_BUFFER};
 
     static const NriDescriptorType material[] = {
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
-        NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
+        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER,
+        NriDescriptorType_SAMPLER};
 
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
 
     const NriDescriptorType *sets[4] = {NULL, camera, material, uniform};
-    const uint8_t counts[4] = {0, 1, 14, 1};
+    const uint8_t counts[4] = {0, 1, 16, 1};
 
     return gpu_create_pipeline_layout(r, &r->surface_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
