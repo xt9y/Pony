@@ -10,6 +10,7 @@
 #include <string.h>
 
 #define DYNAMIC_LIGHTING_TEXELS_PER_UNIT 24u
+#define DYNAMIC_LIGHTING_MIN_TEXELS_PER_UNIT 0.001f
 #define DYNAMIC_LIGHTING_MAX_SIZE 4096u
 #define DYNAMIC_INFLUENCE_LIMIT 8u
 #define DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u
@@ -2476,24 +2477,25 @@ static bool model_surface_layout(struct MODEL *model, uint32_t target_samples) {
         lmap_free(model->surface_layout);
     }
 
-    uint32_t density = DYNAMIC_LIGHTING_TEXELS_PER_UNIT;
+    float density = (float)DYNAMIC_LIGHTING_TEXELS_PER_UNIT;
 
     for (;;) {
-        if (!lmap_build(model->surface_layout, model->geometry, density, DYNAMIC_LIGHTING_MAX_SIZE)) return false;
-        if (model->surface_layout->sample_count <= target_samples || density <= 1u) break;
+        if (!lmap_build_density(model->surface_layout, model->geometry, density, DYNAMIC_LIGHTING_MAX_SIZE)) return false;
+        if (model->surface_layout->sample_count <= target_samples || density <= DYNAMIC_LIGHTING_MIN_TEXELS_PER_UNIT) break;
 
         const float ratio = sqrtf((float)target_samples / (float)model->surface_layout->sample_count);
-        uint32_t next = (uint32_t)floorf((float)density * ratio * 0.90f);
+        float next = density * ratio * 0.90f;
 
-        if (next >= density) next = density - 1u;
-        if (!next) next = 1u;
+        if (!(next < density)) next = density * 0.75f;
+        if (next < DYNAMIC_LIGHTING_MIN_TEXELS_PER_UNIT) next = DYNAMIC_LIGHTING_MIN_TEXELS_PER_UNIT;
 
         lmap_free(model->surface_layout);
         density = next;
     }
 
-    SDL_Log("dynamic surface layout: %u samples | %.2f texels/unit | target %u",
-            model->surface_layout->sample_count, model->surface_layout->texel_density, target_samples);
+    SDL_Log("dynamic surface layout: %u samples | %.4f texels/unit | target %u%s",
+            model->surface_layout->sample_count, model->surface_layout->texel_density, target_samples,
+            model->surface_layout->sample_count <= target_samples ? "" : " (chart-count limited)");
     return true;
 }
 
