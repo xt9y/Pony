@@ -889,7 +889,7 @@ float3 trace_path_core(float3 position, float3 normal, inout uint seed, bool inc
          * bounce traces the current scene instead; this is deliberately slow
          * and is the correctness oracle for runtime approximations.
          */
-        if (probe_dims_mode.w == 0u) {
+        if (bake_params.y >= 0.0f) {
             float validity;
             float3 cached = bake_probe_irradiance(position, normal, validity);
             if (validity >= 0.25f) {
