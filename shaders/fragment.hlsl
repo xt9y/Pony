@@ -386,6 +386,8 @@ float3 signed_dynamic_near_field(float3 position, float3 normal) {
     float3 sun = normalize(sun_direction.xyz);
 
     [loop] for (uint i = 0u; i < count; ++i) {
+        if (i == dynamic_influence_meta.y) continue;
+
         float3 center = dynamic_influence_center_radius[i].xyz;
         float radius = max(dynamic_influence_center_radius[i].w, 1.0e-3f);
         float3 axis_x = dynamic_influence_axis_x[i].xyz;
@@ -530,6 +532,8 @@ float3 dynamic_reflection_radiance(float3 origin, float3 direction, float roughn
     direction = normalize(direction);
 
     [loop] for (uint i = 0u; i < count; ++i) {
+        if (i == dynamic_influence_meta.y) continue;
+
         float hit_t;
         float3 hit_normal;
 
