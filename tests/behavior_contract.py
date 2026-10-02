@@ -359,6 +359,26 @@ def main() -> None:
         if needle not in render:
             raise AssertionError(f"stale dynamic cache rejection missing: {needle}")
 
+    for needle in (
+        "DYNAMIC_INFLUENCE_LIMIT",
+        "model_lighting_summary(",
+        "dynamic_influences(",
+        "dynamic_influence_center_radius",
+        "dynamic_influence_diffuse",
+        "dynamic_influence_emissive",
+    ):
+        if needle not in render:
+            raise AssertionError(f"dynamic near-field influence descriptor missing: {needle}")
+
+    for needle in (
+        "signed_dynamic_near_field(",
+        "outgoing - baseline",
+        "dynamic_flags.z > 0.5f",
+        "baked + signed_dynamic_near_field(input.world_position, geometric_normal)",
+    ):
+        if needle not in fragment:
+            raise AssertionError(f"signed static receiver correction missing: {needle}")
+
     cache = text("cache.c")
     for needle in ("DM_CACHE_VERSION 11u", "direct_pixels", "hash_bytes(hash, out->direct_pixels", "fwrite(data->direct_pixels"):
         if needle not in cache:
