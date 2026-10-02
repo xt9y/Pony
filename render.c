@@ -13,6 +13,7 @@
 #define DYNAMIC_LIGHTING_MIN_TEXELS_PER_UNIT 0.001f
 #define DYNAMIC_LIGHTING_MAX_SIZE 4096u
 #define DYNAMIC_INFLUENCE_LIMIT 8u
+#define DYNAMIC_TRACE_INSTANCE_LIMIT 8u
 #define DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u
 #define DYNAMIC_SHADOW_SIZE 2048u
 #define DYNAMIC_TIMESTAMP_BASE 8u
@@ -374,6 +375,11 @@ typedef struct DYNAMIC_SURFACE_UNIFORMS {
     float sky_zenith[4];
     float sky_horizon[4];
     float trace_params[4];
+
+    Uint32 dynamic_instance_data[4];
+    float dynamic_instance_inverse[DYNAMIC_TRACE_INSTANCE_LIMIT][16];
+    float dynamic_instance_normal[DYNAMIC_TRACE_INSTANCE_LIMIT][16];
+    Uint32 dynamic_instance_meta[DYNAMIC_TRACE_INSTANCE_LIMIT][4];
 } DYNAMIC_SURFACE_UNIFORMS;
 
 typedef struct SSAO_UNIFORMS {
@@ -423,8 +429,10 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     NriTexture *texture;
     NriTexture *reference_texture;
     NriBuffer *sample_buffer;
-    NriBuffer *self_node_buffer;
-    NriBuffer *self_triangle_buffer;
+    uint32_t dynamic_node_offset;
+    uint32_t dynamic_node_count;
+    uint32_t dynamic_triangle_offset;
+    uint32_t dynamic_triangle_count;
     VEC3 local_center;
     VEC3 local_extents;
     float local_radius;
@@ -1068,9 +1076,14 @@ static void release_dynamic_lighting(RENDERER *r) {
         release_texture(r, r->dynamic_lighting[i].texture);
         release_texture(r, r->dynamic_lighting[i].reference_texture);
         release_buffer(r, r->dynamic_lighting[i].sample_buffer);
-        release_buffer(r, r->dynamic_lighting[i].self_node_buffer);
-        release_buffer(r, r->dynamic_lighting[i].self_triangle_buffer);
     }
+
+    release_buffer(r, r->dynamic_object_node_buffer);
+    release_buffer(r, r->dynamic_object_triangle_buffer);
+    r->dynamic_object_node_buffer = NULL;
+    r->dynamic_object_triangle_buffer = NULL;
+    r->dynamic_object_node_count = 0u;
+    r->dynamic_object_triangle_count = 0u;
 
     free(r->dynamic_lighting);
     r->dynamic_lighting = NULL;
