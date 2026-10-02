@@ -47,7 +47,37 @@ def extract_braced(text: str, marker: str, semicolon: bool = False):
 
 
 def extract_function(text: str, marker: str):
-    return extract_braced(text, marker, False)
+    search = 0
+    while True:
+        start = text.find(marker, search)
+        if start < 0:
+            raise SystemExit(f"missing function definition: {marker}")
+
+        brace = text.find("{", start)
+        semicolon = text.find(";", start)
+        if brace >= 0 and (semicolon < 0 or brace < semicolon):
+            depth = 0
+            end = -1
+            for index in range(brace, len(text)):
+                char = text[index]
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = index + 1
+                        break
+
+            if end < 0:
+                raise SystemExit(f"unterminated function: {marker}")
+
+            while end < len(text) and text[end] == "\n":
+                end += 1
+
+            block = text[start:end].rstrip() + "\n\n"
+            return text[:start] + text[end:], block
+
+        search = start + len(marker)
 
 
 # Generic primitives stay in gpu.c but get explicit internal gpu_* names.
