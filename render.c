@@ -2035,6 +2035,14 @@ static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd) {
     r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
     r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (pixel_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
 
+    const NriAccessLayoutStage receiver_storage = {
+        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
+        .layout = NriLayout_SHADER_RESOURCE_STORAGE,
+        .stages = NriStageBits_COMPUTE_SHADER,
+    };
+
+    if (!gpu_texture_barrier(r, cmd, r->dynamic_receiver_texture, receiver_storage, receiver_storage)) return false;
+
     uniforms.dispatch_data[0] = 0u;
     uniforms.dispatch_data[1] = lightmap->sample_count;
 
@@ -3029,6 +3037,48 @@ static bool renderer_build_dynamic_static_transport(RENDERER *renderer, const SC
     return good;
 }
 
+static bool renderer_build_dynamic_receiver_cache(RENDERER *renderer, const SCENE *scene) {
+    if (!renderer || !scene || !scene->lightmap) return false;
+
+    release_dynamic_receiver_cache(renderer);
+
+    if (!renderer->dynamic_lighting_count) return true;
+
+    const LIGHTMAP *lightmap = scene->lightmap;
+    if (!lightmap->samples || !lightmap->sample_count || !lightmap->width || !lightmap->height) return false;
+
+    renderer->dynamic_receiver_sample_buffer =
+        gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, lightmap->samples,
+                          (size_t)lightmap->sample_count * sizeof(*lightmap->samples), sizeof(LMAP_SAMPLE));
+
+    renderer->dynamic_receiver_texture =
+        gpu_create_texture(renderer, NriFormat_RGBA16_SFLOAT,
+                           NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE,
+                           lightmap->width, lightmap->height);
+
+    renderer->dynamic_receiver_scratch =
+        gpu_create_texture(renderer, NriFormat_RGBA16_SFLOAT,
+                           NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE,
+                           lightmap->width, lightmap->height);
+
+    bool good = renderer->dynamic_receiver_sample_buffer && renderer->dynamic_receiver_texture && renderer->dynamic_receiver_scratch;
+
+    if (good)
+        good = gpu_clear_texture_zero(renderer, renderer->dynamic_receiver_texture, 8u, NriAccessBits_SHADER_RESOURCE,
+                                      NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER | NriStageBits_FRAGMENT_SHADER);
+
+    if (good)
+        good = gpu_clear_texture_zero(renderer, renderer->dynamic_receiver_scratch, 8u, NriAccessBits_SHADER_RESOURCE,
+                                      NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER);
+
+    if (!good) {
+        release_dynamic_receiver_cache(renderer);
+        return false;
+    }
+
+    return true;
+}
+
 static bool append_dynamic_bvh(BVH_NODE **nodes, uint32_t *node_count, BVH_TRIANGLE **triangles, uint32_t *triangle_count,
                                const BVH *tree, DYNAMIC_LIGHTING_ALLOCATION *allocation) {
     if (!nodes || !node_count || !triangles || !triangle_count || !tree || !allocation || !tree->node_count || !tree->triangle_count) return false;
@@ -3146,6 +3196,7 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         good = allocation->texture && allocation->sample_buffer && bvh_build(&tree, model->geometry, model->visual);
 
         if (good) {
+            allocation->emissive_weight = tree.emissive_weight;
             dynamic_emissive_samples(&tree, allocation);
             good = append_dynamic_bvh(&packed_nodes, &packed_node_count, &packed_triangles, &packed_triangle_count, &tree, allocation);
         }
@@ -3820,7 +3871,9 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
 
     renderer->scene = scene;
 
-    if (!renderer_build_scene(renderer, scene, scene->lightmap) || !renderer_build_dynamic_static_transport(renderer, scene)) {
+    if (!renderer_build_scene(renderer, scene, scene->lightmap) ||
+        !renderer_build_dynamic_static_transport(renderer, scene) ||
+        !renderer_build_dynamic_receiver_cache(renderer, scene)) {
         renderer->scene = NULL;
         return false;
     }
