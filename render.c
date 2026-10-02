@@ -449,6 +449,8 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     uint32_t pending_scene_lighting_revision;
     uint32_t sample_cursor;
     uint32_t sample_pass;
+    uint32_t acceptance_transform_revision;
+    uint32_t acceptance_scene_lighting_revision;
     bool cache_needs_clear;
 };
 
@@ -1862,7 +1864,7 @@ static uint32_t dynamic_trace_instances(const RENDERER *r, DYNAMIC_SURFACE_UNIFO
 
 static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame) {
     if (!r || !cmd || !frame) return false;
-    if (r->reference_lighting_enabled || !r->has_bake || !r->dynamic_lighting_count) return true;
+    if (!r->has_bake || !r->dynamic_lighting_count) return true;
     if (!r->dynamic_surface_pipeline || !r->beam_buffer || !r->dynamic_static_node_buffer || !r->dynamic_static_triangle_buffer ||
         !r->dynamic_static_surface_buffer || !r->dynamic_static_uv_buffer)
         return true;
@@ -2826,6 +2828,8 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         allocation->pending_scene_lighting_revision = 0u;
         allocation->sample_cursor = 0u;
         allocation->sample_pass = 0u;
+        allocation->acceptance_transform_revision = 0u;
+        allocation->acceptance_scene_lighting_revision = 0u;
         allocation->cache_needs_clear = true;
 
         allocation->texture =
@@ -3126,7 +3130,23 @@ static bool renderer_update_reference_lighting(RENDERER *r, const struct LIGHT *
                   allocation->reference_lighting_revision == object->lighting_revision;
     }
 
-    if (current) return true;
+    if (current) {
+        if (r->dynamic_lighting_count == 1u) {
+            DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[0];
+            const OBJECT *object = scene_object_by_id_const(scene, allocation->object_id);
+
+            if (object && allocation->reference_texture &&
+                allocation->sample_pass >= DYNAMIC_SURFACE_CONVERGENCE_PASSES &&
+                allocation->acceptance_transform_revision != object->transform_revision &&
+                allocation->acceptance_scene_lighting_revision != scene->lighting_revision) {
+                log_dynamic_matte_reference_error(r, allocation, object, allocation->reference_texture);
+                allocation->acceptance_transform_revision = object->transform_revision;
+                allocation->acceptance_scene_lighting_revision = scene->lighting_revision;
+            }
+        }
+
+        return true;
+    }
 
     r->sun = light->directional;
     r->sun.direction = v3_normalize(r->sun.direction);
@@ -3170,8 +3190,12 @@ static bool renderer_update_reference_lighting(RENDERER *r, const struct LIGHT *
         DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[0];
         const OBJECT *object = scene_object_by_id_const(scene, allocation->object_id);
 
-        if (object && dynamic_candidates && dynamic_candidates[0])
+        if (object && dynamic_candidates && dynamic_candidates[0] &&
+            allocation->sample_pass >= DYNAMIC_SURFACE_CONVERGENCE_PASSES) {
             log_dynamic_matte_reference_error(r, allocation, object, dynamic_candidates[0]);
+            allocation->acceptance_transform_revision = object->transform_revision;
+            allocation->acceptance_scene_lighting_revision = scene->lighting_revision;
+        }
     }
 
     bvh_free(&tree);
