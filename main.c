@@ -10,6 +10,8 @@
 #define BAKE_IDLE_GRACE_MS 180u
 #define BAKE_IDLE_RENDER_MS 200u
 #define BAKE_IDLE_SLEEP_MS 2u
+#define DYNAMIC_Z_AMPLITUDE 1.0f
+#define DYNAMIC_Z_PERIOD_SECONDS 4.0f
 #define BASE_MODEL_PATH "hospital_hallway.glb"
 
 static double elapsed_ms(Uint64 begin) {
@@ -186,19 +188,32 @@ int main(int argc, char **argv) {
 
     for (int i = 0; i < extra_model_count && !startup_stage; ++i) {
         const char *path = argv[extra_start + i];
-        OBJECT_STATE state = STATIC;
+        OBJECT_STATE state = DYNAMIC;
 
-        if (strncmp(path, "dynamic:", 8u) == 0) {
-            state = DYNAMIC;
+        if (strncmp(path, "static:", 7u) == 0) {
+            state = STATIC;
+            path += 7u;
+        } else if (strncmp(path, "dynamic:", 8u) == 0) {
             path += 8u;
         }
 
-        SDL_Log("loading extra model %d/%d: %s%s", i + 1, extra_model_count, state == DYNAMIC ? "DYNAMIC " : "", path);
+        SDL_Log("loading extra model %d/%d: %s%s", i + 1, extra_model_count, state == DYNAMIC ? "DYNAMIC " : "STATIC ", path);
 
         if (!load_scene_model(&scene, &models[i + 1], path, state, transform, &total_bin_size)) {
             startup_stage = "extra model load";
             startup_detail = SDL_GetError();
         }
+    }
+
+    OBJECT_ID animated_dynamic_id = 0u;
+    float animated_dynamic_base_z = 0.0f;
+
+    for (uint32_t i = 0; i < scene.object_count; ++i) {
+        if (scene.objects[i].type != MODEL || scene.objects[i].state != DYNAMIC) continue;
+
+        animated_dynamic_id = scene.objects[i].id;
+        animated_dynamic_base_z = scene.objects[i].transform.position.z;
+        break;
     }
 
     if (!startup_stage && !scene_add_light(&scene, &sun, STATIC, transform_identity())) startup_stage = "scene composition";
@@ -286,12 +301,13 @@ int main(int argc, char **argv) {
            lightmap.chart_count, lightmap.texel_density, lightmap.sample_count);
     printf("Lighting: %s. Press B to rebake this scene in the renderer.\n", cached ? "loaded saved bake" : "unbaked fallback");
     printf("Runtime: PBR + sun beams + volume probes -> HDR -> bloom -> ACES + GPU LUT\n");
-    printf("Extra models: pass after --; prefix with dynamic: for realtime lighting | arrows: move first dynamic model | LMB drag: orbit | wheel: zoom | B: rebake | F2: reference lighting | F5: fog on/off | F6: cache validity | F7: signed correction | Tab: wireframe | F11: fullscreen | Esc: quit\n");
+    printf("Extra models are DYNAMIC by default; prefix static: to bake one permanently | first dynamic model auto-oscillates Z by +/-1 | arrows: move/offset first dynamic model | LMB drag: orbit | wheel: zoom | B: rebake | F2: reference lighting | F5: fog on/off | F6: cache validity | F7: signed correction | Tab: wireframe | F11: fullscreen | Esc: quit\n");
 
     bool running = true;
     Uint64 last_frame_print = SDL_GetTicks();
     Uint64 last_input = SDL_GetTicks();
     Uint64 last_render = 0u;
+    const Uint64 dynamic_animation_start = SDL_GetTicks();
 
     while (running) {
         SDL_Event event;
@@ -329,13 +345,14 @@ int main(int argc, char **argv) {
                     else if (event.key.key == SDLK_RIGHT)
                         moved.position.x += 0.25f;
                     else if (event.key.key == SDLK_UP)
-                        moved.position.z -= 0.25f;
+                        animated_dynamic_base_z -= 0.25f;
                     else if (event.key.key == SDLK_DOWN)
-                        moved.position.z += 0.25f;
+                        animated_dynamic_base_z += 0.25f;
                     else
                         changed = false;
 
-                    if (changed) object_set_transform(dynamic, moved);
+                    if (changed && (event.key.key == SDLK_LEFT || event.key.key == SDLK_RIGHT))
+                        object_set_transform(dynamic, moved);
                 }
             }
 
@@ -349,6 +366,22 @@ int main(int argc, char **argv) {
         const bool render_due = !idle_bake || now - last_render >= BAKE_IDLE_RENDER_MS;
 
         if (render_due) {
+            if (animated_dynamic_id) {
+                OBJECT *animated = scene_object_by_id(&scene, animated_dynamic_id);
+
+                if (animated && animated->state == DYNAMIC && animated->type == MODEL) {
+                    const float seconds = (float)(now - dynamic_animation_start) * 0.001f;
+                    const float phase = seconds * (2.0f * (float)M_PI / DYNAMIC_Z_PERIOD_SECONDS);
+                    const float z = animated_dynamic_base_z + sinf(phase) * DYNAMIC_Z_AMPLITUDE;
+
+                    if (fabsf(animated->transform.position.z - z) > 1.0e-5f) {
+                        TRANSFORM moved = animated->transform;
+                        moved.position.z = z;
+                        object_set_transform(animated, moved);
+                    }
+                }
+            }
+
             const Uint64 frame_begin = SDL_GetPerformanceCounter();
 
             if (!renderer_frame(&renderer)) {
