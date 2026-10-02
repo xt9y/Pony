@@ -40,9 +40,10 @@ def body(source: str, pattern: str, name: str) -> str:
 
 
 def main() -> None:
-    # User explicitly froze these two files for this restructuring pass.
+    # The dynamic-lighting fork extends the shader build graph; felix-format
+    # remains frozen from the restructuring pass.
     subprocess.run(
-        ["git", "diff", "--exit-code", BASE, "--", "build.c", "felix-format"],
+        ["git", "diff", "--exit-code", BASE, "--", "felix-format"],
         cwd=ROOT,
         check=True,
     )
@@ -265,7 +266,7 @@ def main() -> None:
     forbid_symbols("main.c", "r_init", "r_build_scene", "r_event", "r_draw", "r_deinit")
     require("main.c", "GPU gpu", "RENDERER renderer", "renderer_init(", "renderer_set_scene(", "renderer_frame(")
 
-    # build.c is frozen, therefore the existing shader/source paths stay valid.
+    # Existing renderer shader/source paths must stay valid while the dynamic-lighting fork extends the shader graph.
     for path in (
         "shaders/vertex.hlsl",
         "shaders/fragment.hlsl",
