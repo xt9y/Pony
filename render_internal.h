@@ -38,6 +38,7 @@ NriDescriptor *gpu_create_buffer_view(RENDERER *renderer, NriBuffer *buffer, Nri
 NriDescriptor *gpu_create_texture_view(RENDERER *renderer, NriTexture *texture, NriTextureView type);
 NriDescriptor *gpu_create_sampler(RENDERER *renderer, NriFilter min_filter, NriFilter mag_filter, NriAddressMode address);
 bool gpu_init_worker(GPU *gpu);
+void gpu_clear_temporary(RENDERER *renderer);
 bool gpu_bind_descriptor_set(RENDERER *renderer, NriCommandBuffer *command_buffer, NriPipelineLayout *layout, NriBindPoint point, uint32_t set_index,
                              NriDescriptor *const *descriptors, uint32_t count);
 bool gpu_bind_uniform_data(RENDERER *renderer, NriCommandBuffer *command_buffer, NriPipelineLayout *layout, NriBindPoint point, uint32_t set,
