@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define FRAME_QUEUE_DEPTH 2u
+#define FRAME_QUEUE_DEPTH GPU_FRAME_QUEUE_DEPTH
 #define WORK_QUEUE_DEPTH 8u
 #define UNIFORM_RING_BYTES (1024u * 1024u)
 #define TIMESTAMP_CAPACITY 16u
