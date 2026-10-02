@@ -124,11 +124,27 @@ typedef struct GLTF_MATERIAL {
     float roughness;
     float normal_scale;
     float occlusion_strength;
+
+    float ior;
+    float transmission_factor;
+    float thickness_factor;
+    float attenuation_color[3];
+    float attenuation_distance;
+
+    float iridescence_factor;
+    float iridescence_ior;
+    float iridescence_thickness_min;
+    float iridescence_thickness_max;
+
     int32_t base_color_texture;
     int32_t metallic_roughness_texture;
     int32_t normal_texture;
     int32_t occlusion_texture;
     int32_t emissive_texture;
+    int32_t transmission_texture;
+    int32_t thickness_texture;
+    int32_t iridescence_texture;
+    int32_t iridescence_thickness_texture;
 } GLTF_MATERIAL;
 
 typedef struct GLTF_TEXTURE {
