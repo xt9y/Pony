@@ -298,6 +298,27 @@ def main() -> None:
         if needle not in bvh:
             raise AssertionError(f"BVH surface identity implementation missing: {needle}")
 
+    for needle in (
+        "reference_static_texture",
+        "reference_lighting_enabled",
+        "bake_full_transport",
+    ):
+        if needle not in game:
+            raise AssertionError(f"dynamic reference state missing: {needle}")
+
+    for needle in (
+        "reference_world_layout(",
+        "reference_bake_surface(",
+        "renderer_update_reference_lighting(",
+        "renderer->reference_lighting_enabled = !renderer->reference_lighting_enabled",
+        "bvh_build(&tree, &scene->geometry, &scene->visual)",
+    ):
+        if needle not in render:
+            raise AssertionError(f"dynamic reference path missing: {needle}")
+
+    if "probe_dims_mode.w == 0u" not in compute_base:
+        raise AssertionError("reference full-transport mode does not disable secondary probe reuse")
+
     bake = text("bake.c")
     for needle in ("job->scene = &scene->static_geometry;", "job->visual = &scene->static_visual;", "job->layout = scene->lightmap;"):
         if needle not in bake:
