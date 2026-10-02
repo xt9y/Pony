@@ -467,12 +467,13 @@ bool scene_compile(SCENE *scene) {
 
     geometry.vertices.buffer = calloc(mesh_vertex_count, sizeof(POINT));
     geometry.faces.buffer = calloc(mesh_face_count, sizeof(MESH_FACE));
+    BVH_SURFACE_REF *surface_refs = calloc(mesh_face_count, sizeof(*surface_refs));
     visual.vertices = calloc(visual_vertex_count, sizeof(*visual.vertices));
     visual.materials = calloc(material_count, sizeof(*visual.materials));
     visual.textures = texture_count ? calloc(texture_count, sizeof(*visual.textures)) : NULL;
     visual.images = image_count ? calloc(image_count, sizeof(*visual.images)) : NULL;
 
-    if (!geometry.vertices.buffer || !geometry.faces.buffer || !visual.vertices || !visual.materials || (texture_count && !visual.textures) ||
+    if (!geometry.vertices.buffer || !geometry.faces.buffer || !surface_refs || !visual.vertices || !visual.materials || (texture_count && !visual.textures) ||
         (image_count && !visual.images))
         goto fail;
 
@@ -518,6 +519,12 @@ bool scene_compile(SCENE *scene) {
             const VEC3 c = points[face.indices[2]].p;
             face.normal = v3_normalize(v3_cross(v3_sub(b, a), v3_sub(c, a)));
             faces[mesh_face_offset + i] = face;
+            surface_refs[mesh_face_offset + i] = (BVH_SURFACE_REF){
+                .object_id = object->id,
+                .local_triangle = (uint32_t)i,
+                .source_triangle = (uint32_t)(mesh_face_offset + i),
+                .material = source_visual->vertices[i * 3u].material + material_offset,
+            };
         }
 
         for (size_t i = 0; i < source_visual->vertex_count; ++i) {
@@ -573,14 +580,43 @@ bool scene_compile(SCENE *scene) {
 
     if (!scene_extract_static(scene, &geometry, &visual, &static_geometry, &static_visual)) goto fail;
 
+    BVH_SURFACE_REF *static_surface_refs = calloc(static_geometry.faces.count, sizeof(*static_surface_refs));
+    if (!static_surface_refs) goto fail;
+
+    uint32_t static_triangle = 0u;
+    for (uint32_t object_index = 0; object_index < scene->object_count; ++object_index) {
+        const OBJECT *object = &scene->objects[object_index];
+
+        if (object->type != MODEL || object->state != STATIC || !object->data) continue;
+
+        const struct MODEL *model = object->data;
+        for (uint32_t local_triangle = 0u; local_triangle < model->geometry->faces.count; ++local_triangle) {
+            const uint32_t source_triangle = object->geometry_face_offset + local_triangle;
+            static_surface_refs[static_triangle] = surface_refs[source_triangle];
+            static_surface_refs[static_triangle].source_triangle = static_triangle;
+            ++static_triangle;
+        }
+    }
+
+    if (static_triangle != static_geometry.faces.count) {
+        free(static_surface_refs);
+        goto fail;
+    }
+
     mesh_free(&scene->geometry);
     gltf_free(&scene->visual);
     mesh_free(&scene->static_geometry);
     gltf_free(&scene->static_visual);
+    free(scene->surface_refs);
+    free(scene->static_surface_refs);
     scene->geometry = geometry;
     scene->visual = visual;
     scene->static_geometry = static_geometry;
     scene->static_visual = static_visual;
+    scene->surface_refs = surface_refs;
+    scene->static_surface_refs = static_surface_refs;
+    scene->surface_ref_count = (uint32_t)mesh_face_count;
+    scene->static_surface_ref_count = (uint32_t)static_geometry.faces.count;
     scene->compiled = true;
 
     return true;
@@ -588,6 +624,7 @@ bool scene_compile(SCENE *scene) {
 fail:
     mesh_free(&geometry);
     gltf_free(&visual);
+    free(surface_refs);
     return false;
 }
 
@@ -637,6 +674,8 @@ void scene_free(SCENE *scene) {
     gltf_free(&scene->visual);
     mesh_free(&scene->static_geometry);
     gltf_free(&scene->static_visual);
+    free(scene->surface_refs);
+    free(scene->static_surface_refs);
     free(scene->objects);
 
     scene->objects = NULL;

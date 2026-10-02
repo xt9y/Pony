@@ -290,11 +290,11 @@ def main() -> None:
             raise AssertionError(f"static/dynamic bake separation missing: {needle}")
 
     bvh = text("bvh.c")
-    for needle in ("BVH_SURFACE_REF", "BVH_SURFACE_REF *surfaces;", "float barycentric[3];", "source_triangle", "bvh_hit_surface_uv"):
+    for needle in ("BVH_SURFACE_REF", "BVH_SURFACE_REF *surfaces;", "float barycentric[3];", "source_triangle", "local_triangle", "OBJECT_ID object_id", "bvh_hit_surface_uv"):
         if needle not in game:
             raise AssertionError(f"stable BVH surface-hit contract missing: {needle}")
 
-    for needle in ("build[i].surface", "best.barycentric[0]", "tree->surfaces[triangle]", "bvh_hit_surface_uv("):
+    for needle in ("build[i].surface", "surface_refs ? surface_refs[i]", "best.barycentric[0]", "tree->surfaces[triangle]", "bvh_hit_surface_uv(", "bvh_build_with_surfaces("):
         if needle not in bvh:
             raise AssertionError(f"BVH surface identity implementation missing: {needle}")
 
@@ -307,6 +307,7 @@ def main() -> None:
             raise AssertionError(f"dynamic reference state missing: {needle}")
 
     for needle in (
+        "scene->surface_refs",
         "reference_world_layout(",
         "reference_bake_surface(",
         "renderer_update_reference_lighting(",

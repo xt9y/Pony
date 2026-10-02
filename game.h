@@ -11,6 +11,7 @@
 
 typedef struct RENDERER RENDERER;
 typedef struct LIGHTMAP LIGHTMAP;
+typedef struct BVH_SURFACE_REF BVH_SURFACE_REF;
 typedef uint64_t OBJECT_ID;
 
 typedef struct VEC3 {
@@ -301,6 +302,16 @@ typedef struct SCENE {
     MESH static_geometry;
     GLTF_SCENE static_visual;
 
+    /*
+     * Stable triangle ownership maps for the flattened current and static
+     * views. BVH reordering copies these refs so a hit can always return to an
+     * object-local surface-cache coordinate.
+     */
+    BVH_SURFACE_REF *surface_refs;
+    BVH_SURFACE_REF *static_surface_refs;
+    uint32_t surface_ref_count;
+    uint32_t static_surface_ref_count;
+
     float radius;
     OBJECT_ID next_object_id;
     uint32_t object_count;
@@ -332,10 +343,12 @@ typedef struct BVH_TRIANGLE {
     float emissive[4];
 } BVH_TRIANGLE;
 
-typedef struct BVH_SURFACE_REF {
+struct BVH_SURFACE_REF {
+    OBJECT_ID object_id;
+    uint32_t local_triangle;
     uint32_t source_triangle;
     uint32_t material;
-} BVH_SURFACE_REF;
+};
 
 typedef struct BVH_NODE {
     float min[4];
@@ -374,6 +387,7 @@ typedef struct TRACE_HIT {
 bool trace_any(const BVH *tree, TRACE_RAY ray);
 bool trace_closest(const BVH *tree, TRACE_RAY ray, TRACE_HIT *hit);
 bool bvh_hit_surface_uv(const BVH *tree, const GLTF_SCENE *visual, const TRACE_HIT *hit, float *u, float *v);
+bool bvh_build_with_surfaces(BVH *tree, const MESH *mesh, const GLTF_SCENE *visual, const BVH_SURFACE_REF *surfaces, uint32_t surface_count);
 bool bvh_build(BVH *tree, const MESH *mesh, const GLTF_SCENE *visual);
 void bvh_free(BVH *tree);
 

@@ -2048,7 +2048,7 @@ static bool renderer_update_reference_lighting(RENDERER *r, const struct LIGHT *
     Uint64 started = SDL_GetPerformanceCounter();
     BVH tree = {0};
 
-    if (!bvh_build(&tree, &scene->geometry, &scene->visual)) return false;
+    if (!bvh_build_with_surfaces(&tree, &scene->geometry, &scene->visual, scene->surface_refs, scene->surface_ref_count)) return false;
 
     NriTexture *static_candidate = NULL;
     NriTexture **dynamic_candidates = r->dynamic_lighting_count ? calloc(r->dynamic_lighting_count, sizeof(*dynamic_candidates)) : NULL;

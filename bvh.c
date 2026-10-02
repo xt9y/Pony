@@ -137,6 +137,10 @@ static bool reserve_nodes(BVH *tree, uint32_t count) {
     return true;
 }
 
+bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
+    return bvh_build_with_surfaces(tree, m, visual, NULL, 0u);
+}
+
 static uint32_t new_node(BVH *tree) {
 
     if (!reserve_nodes(tree, tree->node_count + 1u)) return UINT32_MAX;
@@ -568,9 +572,10 @@ void bvh_free(BVH *tree) {
     memset(tree, 0, sizeof(*tree));
 }
 
-bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
+bool bvh_build_with_surfaces(BVH *tree, const MESH *m, const GLTF_SCENE *visual, const BVH_SURFACE_REF *surface_refs, uint32_t surface_count) {
 
     if (!tree || !m || !m->faces.count || !m->vertices.count || m->faces.count > UINT32_MAX) return false;
+    if (surface_refs && surface_count != m->faces.count) return false;
 
     bvh_free(tree);
 
@@ -666,7 +671,9 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
                                       .c = {c.x, c.y, c.z, albedo.z},
                                       .normal = {n.x, n.y, n.z, transmission},
                                       .emissive = {emissive.x, emissive.y, emissive.z, 0.0f}};
-        build[i].surface = (BVH_SURFACE_REF){
+        build[i].surface = surface_refs ? surface_refs[i] : (BVH_SURFACE_REF){
+            .object_id = 0,
+            .local_triangle = i,
             .source_triangle = i,
             .material = visual && i < visual->vertex_count / 3u ? visual->vertices[i * 3u].material : UINT32_MAX,
         };
