@@ -52,6 +52,28 @@ SurfaceOutput surface_vs(SurfaceInput input) {
     output.view_depth = -view_position.z;
     return output;
 }
+#elif defined(BUILD_DYNAMIC_SHADOW_VS)
+GPU_BIND_B(0, 1) cbuffer DynamicShadowData : register(b0, space1) {
+    float4x4 shadow_model;
+    float4 shadow_u_min;
+    float4 shadow_v_min;
+    float4 shadow_sun_max;
+    float4 shadow_extent;
+};
+
+struct DynamicShadowInput {
+    float3 position : TEXCOORD0;
+};
+
+float4 dynamic_shadow_vs(DynamicShadowInput input) : SV_Position {
+    float3 world = mul(shadow_model, float4(input.position, 1.0f)).xyz;
+    float2 uv = (float2(dot(world, shadow_u_min.xyz), dot(world, shadow_v_min.xyz)) - float2(shadow_u_min.w, shadow_v_min.w)) /
+                max(shadow_extent.xy, float2(1.0e-6f, 1.0e-6f));
+    float depth = (shadow_sun_max.w - dot(world, shadow_sun_max.xyz)) / max(shadow_extent.z, 1.0e-6f);
+
+    uv.y = 1.0f - uv.y;
+    return float4(uv * 2.0f - 1.0f, saturate(depth), 1.0f);
+}
 #elif defined(BUILD_FULLSCREEN_VS)
 struct FullscreenOutput {
     float4 position : SV_Position;
