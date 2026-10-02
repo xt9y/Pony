@@ -344,7 +344,7 @@ void lmap_free(LIGHTMAP *lm) {
     memset(lm, 0, sizeof(*lm));
 }
 
-bool lmap_build(LIGHTMAP *lm, const MESH *m, uint32_t preferred_texels_per_unit, uint32_t max_size) {
+bool lmap_build_density(LIGHTMAP *lm, const MESH *m, float preferred_texels_per_unit, uint32_t max_size) {
 
     if (!lm || !m || !m->faces.count || !m->vertices.count || m->faces.count > UINT32_MAX || m->vertices.count > UINT32_MAX || max_size < 256u) return false;
 
@@ -477,7 +477,7 @@ bool lmap_build(LIGHTMAP *lm, const MESH *m, uint32_t preferred_texels_per_unit,
             charts[i].density_scale = 0.75f;
     }
 
-    float density = preferred_texels_per_unit ? (float)preferred_texels_per_unit : 16.0f;
+    float density = preferred_texels_per_unit > 0.0f ? preferred_texels_per_unit : 16.0f;
 
     uint32_t width = 0, height = 0;
 
@@ -713,4 +713,8 @@ fail:
     lmap_free(lm);
 
     return false;
+}
+
+bool lmap_build(LIGHTMAP *lm, const MESH *m, uint32_t preferred_texels_per_unit, uint32_t max_size) {
+    return lmap_build_density(lm, m, preferred_texels_per_unit ? (float)preferred_texels_per_unit : 16.0f, max_size);
 }
