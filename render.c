@@ -385,6 +385,7 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     OBJECT_ID object_id;
     const LIGHTMAP *layout;
     NriTexture *texture;
+    NriTexture *reference_texture;
     NriBuffer *sample_buffer;
     VEC3 local_center;
     float local_radius;
@@ -392,6 +393,8 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     VEC3 average_emissive;
     uint32_t transform_revision;
     uint32_t lighting_revision;
+    uint32_t reference_transform_revision;
+    uint32_t reference_lighting_revision;
     uint32_t pending_transform_revision;
     uint32_t pending_lighting_revision;
     uint32_t sample_cursor;
@@ -1007,6 +1010,7 @@ static void release_dynamic_lighting(RENDERER *r) {
 
     for (uint32_t i = 0; i < r->dynamic_lighting_count; ++i) {
         release_texture(r, r->dynamic_lighting[i].texture);
+        release_texture(r, r->dynamic_lighting[i].reference_texture);
         release_buffer(r, r->dynamic_lighting[i].sample_buffer);
     }
 
@@ -1848,9 +1852,16 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
         const DYNAMIC_LIGHTING_ALLOCATION *allocation = dynamic_lighting_find_const(r, draw->object_id);
         const OBJECT *object = scene_object_by_id_const(r->scene, draw->object_id);
 
-        if (allocation && allocation->texture && object && allocation->transform_revision == object->transform_revision &&
-            allocation->lighting_revision == object->lighting_revision)
-            dynamic_cache_valid = 1.0f;
+        if (allocation && object) {
+            if (r->reference_lighting_enabled) {
+                if (allocation->reference_texture && allocation->reference_transform_revision == object->transform_revision &&
+                    allocation->reference_lighting_revision == object->lighting_revision)
+                    dynamic_cache_valid = 1.0f;
+            } else if (allocation->texture && allocation->transform_revision == object->transform_revision &&
+                       allocation->lighting_revision == object->lighting_revision) {
+                dynamic_cache_valid = 1.0f;
+            }
+        }
     }
 
     MATERIAL_UNIFORMS result = (MATERIAL_UNIFORMS){
@@ -1915,7 +1926,13 @@ static bool draw_surface_range(RENDERER *r, NriCommandBuffer *cmd, const RENDER_
 
     if (draw->object_id) {
         DYNAMIC_LIGHTING_ALLOCATION *allocation = dynamic_lighting_find(r, draw->object_id);
-        if (allocation && allocation->texture) lighting = allocation->texture;
+
+        if (allocation) {
+            if (r->reference_lighting_enabled && allocation->reference_texture)
+                lighting = allocation->reference_texture;
+            else if (allocation->texture)
+                lighting = allocation->texture;
+        }
     }
 
     if (!bind_camera_resources(r, cmd, &camera, sizeof(camera)) ||
@@ -2442,6 +2459,8 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         model_lighting_summary(model, &allocation->average_diffuse, &allocation->average_emissive);
         allocation->transform_revision = 0u;
         allocation->lighting_revision = 0u;
+        allocation->reference_transform_revision = 0u;
+        allocation->reference_lighting_revision = 0u;
         allocation->pending_transform_revision = 0u;
         allocation->pending_lighting_revision = 0u;
         allocation->sample_cursor = 0u;
@@ -2556,7 +2575,9 @@ static bool renderer_update_reference_lighting(RENDERER *r, const struct LIGHT *
         const DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
         const OBJECT *object = scene_object_by_id_const(scene, allocation->object_id);
 
-        current = object && allocation->transform_revision == object->transform_revision && allocation->lighting_revision == object->lighting_revision;
+        current = object && allocation->reference_texture &&
+                  allocation->reference_transform_revision == object->transform_revision &&
+                  allocation->reference_lighting_revision == object->lighting_revision;
     }
 
     if (current) return true;
@@ -2618,13 +2639,10 @@ static bool renderer_update_reference_lighting(RENDERER *r, const struct LIGHT *
         DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
         const OBJECT *object = scene_object_by_id_const(scene, allocation->object_id);
 
-        release_texture(r, allocation->texture);
-        allocation->texture = dynamic_candidates[i];
-        allocation->transform_revision = object->transform_revision;
-        allocation->lighting_revision = object->lighting_revision;
-        allocation->pending_transform_revision = object->transform_revision;
-        allocation->pending_lighting_revision = object->lighting_revision;
-        allocation->sample_cursor = allocation->layout ? allocation->layout->sample_count : 0u;
+        release_texture(r, allocation->reference_texture);
+        allocation->reference_texture = dynamic_candidates[i];
+        allocation->reference_transform_revision = object->transform_revision;
+        allocation->reference_lighting_revision = object->lighting_revision;
     }
 
     free(dynamic_candidates);
@@ -2805,17 +2823,6 @@ static void renderer_handle_event(RENDERER *renderer, const SDL_Event *event) {
         if (!event->key.repeat && event->key.key == SDLK_TAB) renderer->show_debug = !renderer->show_debug;
         if (!event->key.repeat && event->key.key == SDLK_F2) {
             renderer->reference_lighting_enabled = !renderer->reference_lighting_enabled;
-
-            if (!renderer->reference_lighting_enabled) {
-                for (uint32_t i = 0; i < renderer->dynamic_lighting_count; ++i) {
-                    renderer->dynamic_lighting[i].transform_revision = 0u;
-                    renderer->dynamic_lighting[i].lighting_revision = 0u;
-                    renderer->dynamic_lighting[i].pending_transform_revision = 0u;
-                    renderer->dynamic_lighting[i].pending_lighting_revision = 0u;
-                    renderer->dynamic_lighting[i].sample_cursor = 0u;
-                }
-            }
-
             SDL_Log("dynamic reference lighting: %s", renderer->reference_lighting_enabled ? "enabled" : "disabled");
         }
         if (!event->key.repeat && event->key.key == SDLK_F5) renderer->show_volume = !renderer->show_volume;
