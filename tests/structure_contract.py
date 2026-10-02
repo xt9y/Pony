@@ -81,6 +81,10 @@ def main() -> None:
         "NriBuffer *upload_probes(",
         "NriBuffer *upload_beams(",
         "bool download_lightmap(",
+        "bool upload_bvh(",
+        "void release_bake_resources(",
+        "bool bake_worker_init(",
+        "void bake_worker_deinit(",
     )
 
     gpu = body(gpu_header, r"typedef struct GPU\s*\{(.*?)\}\s*GPU;", "GPU")
@@ -112,6 +116,42 @@ def main() -> None:
         raise AssertionError(f"GPU missing low-level ownership: {missing_gpu}")
     if leaked_renderer:
         raise AssertionError(f"RENDERER still owns low-level GPU state: {leaked_renderer}")
+
+    forbid(
+        "gpu.c",
+        "static bool create_bake_layout(",
+        "static bool create_lightmap_queue_layouts(",
+        "static bool create_probe_layout(",
+        "bool bake_bind_resources_ex(",
+        "bool bake_bind_resources(",
+        "bool bake_bind_probe_resources(",
+        "bool bake_read_probe_buffer(",
+        "bool bake_worker_init(",
+        "void bake_worker_deinit(",
+        "bool bake_lightmap(",
+        "bool bake_probe_grid_fast(",
+        "bool bake_probe_grid(",
+    )
+    require(
+        "bake.c",
+        "static bool create_bake_layout(",
+        "static bool create_lightmap_queue_layouts(",
+        "static bool create_probe_layout(",
+        "bool bake_gpu_layouts_init(",
+        "static bool bake_bind_resources_ex(",
+        "static bool bake_worker_init(",
+        "static void bake_worker_deinit(",
+        "bool bake_lightmap(",
+        "bool bake_probe_grid_fast(",
+        "bool bake_probe_grid(",
+    )
+    require(
+        "render_internal.h",
+        "bool gpu_init_worker(GPU *gpu);",
+        "bool upload_bvh(RENDERER *renderer, const BVH *tree);",
+        "bool bake_gpu_layouts_init(RENDERER *renderer);",
+        "void bake_gpu_layouts_deinit(RENDERER *renderer);",
+    )
 
     require(
         "render.c",
