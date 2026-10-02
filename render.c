@@ -125,6 +125,12 @@ static VEC3 m4_point(MAT4 matrix, VEC3 p) {
               matrix.m[2] * p.x + matrix.m[6] * p.y + matrix.m[10] * p.z + matrix.m[14]);
 }
 
+static VEC3 m4_vector(MAT4 matrix, VEC3 v) {
+    return v3(matrix.m[0] * v.x + matrix.m[4] * v.y + matrix.m[8] * v.z,
+              matrix.m[1] * v.x + matrix.m[5] * v.y + matrix.m[9] * v.z,
+              matrix.m[2] * v.x + matrix.m[6] * v.y + matrix.m[10] * v.z);
+}
+
 static MAT4 m4_inverse_transform(TRANSFORM transform) {
     const MAT4 normal = m4_transform(transform, true);
     MAT4 inverse = m4_identity();
@@ -2822,9 +2828,9 @@ static float dynamic_rgba16f_alpha(const Uint8 *pixels, uint32_t pixel) {
     return dynamic_half_to_float(alpha);
 }
 
-static void log_dynamic_matte_reference_error(RENDERER *r, const BVH *current_tree, const DYNAMIC_LIGHTING_ALLOCATION *allocation,
-                                              const OBJECT *object, NriTexture *reference_texture) {
-    if (!r || !current_tree || !allocation || !allocation->layout || !object || !reference_texture || !allocation->texture) return;
+static void log_dynamic_matte_reference_error(RENDERER *r, const DYNAMIC_LIGHTING_ALLOCATION *allocation, const OBJECT *object,
+                                              NriTexture *reference_texture) {
+    if (!r || !allocation || !allocation->layout || !object || !reference_texture || !allocation->texture || !object->data) return;
 
     if (allocation->transform_revision != object->transform_revision || allocation->lighting_revision != object->lighting_revision) {
         SDL_Log("dynamic acceptance object %u: runtime cache is not current; comparison skipped", allocation->object_id);
@@ -2849,7 +2855,18 @@ static void log_dynamic_matte_reference_error(RENDERER *r, const BVH *current_tr
         return;
     }
 
+    const struct MODEL *model_data = object->data;
+    BVH self_tree = {0};
+
+    if (!model_data->geometry || !model_data->visual || !bvh_build(&self_tree, model_data->geometry, model_data->visual)) {
+        free(runtime);
+        free(reference);
+        SDL_Log("dynamic acceptance object %u: self BVH build failed", allocation->object_id);
+        return;
+    }
+
     const MAT4 model = m4_transform(object->transform, false);
+    const MAT4 inverse_model = m4_inverse_transform(object->transform);
     const MAT4 normal_model = m4_transform(object->transform, true);
     const VEC3 sun = v3_normalize(r->sun.direction);
     const float epsilon = fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f);
@@ -2889,14 +2906,15 @@ static void log_dynamic_matte_reference_error(RENDERER *r, const BVH *current_tr
         const float cached_visibility = fminf(fmaxf((alpha - visibility_floor) / (1.0f - visibility_floor), 0.0f), 1.0f);
         const float n_dot_l = fmaxf(v3_dot(normal, sun), 0.0f);
 
-        TRACE_RAY shadow = {
-            .origin = v3_add(position, v3_scale(normal, epsilon)),
+        const VEC3 world_origin = v3_add(position, v3_scale(normal, epsilon));
+        TRACE_RAY local_shadow = {
+            .origin = m4_point(inverse_model, world_origin),
             .tmin = epsilon,
-            .direction = sun,
+            .direction = m4_vector(inverse_model, sun),
             .tmax = 1.0e20f,
         };
 
-        const float current_visibility = trace_any(current_tree, shadow) ? 0.0f : 1.0f;
+        const float current_visibility = trace_any(&self_tree, local_shadow) ? 0.0f : 1.0f;
         const VEC3 direct =
             v3_scale(r->sun.color, r->sun.intensity * n_dot_l * cached_visibility * (current_visibility - 1.0f));
         runtime_rgb = v3(fmaxf(runtime_rgb.x + direct.x, 0.0f), fmaxf(runtime_rgb.y + direct.y, 0.0f), fmaxf(runtime_rgb.z + direct.z, 0.0f));
@@ -2932,6 +2950,7 @@ static void log_dynamic_matte_reference_error(RENDERER *r, const BVH *current_tr
     SDL_Log("dynamic acceptance object %u: matte cache coverage %.1f%% | RGB MAE %.5f | RMSE %.5f | NRMSE %.2f%% | max %.5f",
             allocation->object_id, coverage, mae, rmse, nrmse * 100.0, maximum);
 
+    bvh_free(&self_tree);
     free(runtime);
     free(reference);
 }
@@ -3000,7 +3019,7 @@ static bool renderer_update_reference_lighting(RENDERER *r, const struct LIGHT *
         const OBJECT *object = scene_object_by_id_const(scene, allocation->object_id);
 
         if (object && dynamic_candidates && dynamic_candidates[0])
-            log_dynamic_matte_reference_error(r, &tree, allocation, object, dynamic_candidates[0]);
+            log_dynamic_matte_reference_error(r, allocation, object, dynamic_candidates[0]);
     }
 
     bvh_free(&tree);
