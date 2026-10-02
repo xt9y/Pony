@@ -379,6 +379,24 @@ def main() -> None:
         if needle not in fragment:
             raise AssertionError(f"signed static receiver correction missing: {needle}")
 
+    compute = text("shaders/compute.hlsl")
+    for needle in (
+        "Texture2D<float> DynamicShadow",
+        "volume_dynamic_shadow_visibility(",
+        "dynamic_visibility = volume_dynamic_shadow_visibility(world_midpoint)",
+        "visibility_shape * dynamic_visibility",
+    ):
+        if needle not in compute:
+            raise AssertionError(f"dynamic volumetric shadowing missing: {needle}")
+
+    for needle in (
+        "NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER",
+        "shadow_texel_enabled",
+        "dynamic_shadow_projection(r, frame, u.shadow_u_min",
+    ):
+        if needle not in render:
+            raise AssertionError(f"dynamic volumetric binding missing: {needle}")
+
     cache = text("cache.c")
     for needle in ("DM_CACHE_VERSION 11u", "direct_pixels", "hash_bytes(hash, out->direct_pixels", "fwrite(data->direct_pixels"):
         if needle not in cache:
