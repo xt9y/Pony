@@ -475,17 +475,22 @@ def main() -> None:
         if needle not in cache:
             raise AssertionError(f"versioned separated direct-light cache missing: {needle}")
 
-    for needle in ("baked_direct_texture", "upload_direct_lightmap", "src, 19"):
+    for needle in ("baked_direct_texture", "upload_direct_lightmap"):
         if needle not in game + render + text("bake.c"):
-            raise AssertionError(f"persistent baked direct term missing: {needle}")
+            raise AssertionError(f"persistent separated direct-light term missing: {needle}")
+
+    if "exact_baked_direct * (dynamic_visibility - 1.0f)" in fragment or "Texture2D<float4> BakedDirect" in fragment:
+        raise AssertionError("dynamic sun shadows must not erase emissive direct-light energy")
+    if "static_direct * cached_sun_visibility * (dynamic_visibility - 1.0f)" not in fragment:
+        raise AssertionError("static receiver sun correction must use explicit baked sun visibility only")
 
     for needle in (
-        "Texture2D<float4> BakedDirect",
-        "exact_baked_direct",
-        "exact_baked_direct * (dynamic_visibility - 1.0f)",
+        "cached_sun_visibility",
+        "if (self_any(shadow))",
+        "lighting = max(lighting - baked_sun, 0.0f)",
     ):
-        if needle not in fragment:
-            raise AssertionError(f"surface shader does not modulate exact baked direct term: {needle}")
+        if needle not in dynamic_surface:
+            raise AssertionError(f"dynamic cache does not feed self-shadowed static bounce: {needle}")
 
     bake = text("bake.c")
     for needle in ("job->scene = &scene->static_geometry;", "job->visual = &scene->static_visual;", "job->layout = scene->lightmap;"):
