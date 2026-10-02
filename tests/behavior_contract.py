@@ -478,6 +478,8 @@ def main() -> None:
         "dynamic_influence_axis_z",
         "dynamic_influence_diffuse",
         "dynamic_influence_emissive",
+        "uniforms->dynamic_influence_meta[1] = current",
+        "dynamic_influences(r, &result, draw ? draw->object_id : 0u)",
     ):
         if needle not in render:
             raise AssertionError(f"dynamic near-field influence descriptor missing: {needle}")
@@ -486,6 +488,7 @@ def main() -> None:
         "dynamic_proxy_reflection_hit(",
         "dynamic_reflection_radiance(",
         "dynamic_reflection_weight",
+        "if (i == dynamic_influence_meta.y) continue",
         "reflected = lerp(reflected, dynamic_reflection, dynamic_reflection_weight)",
     ):
         if needle not in fragment:
