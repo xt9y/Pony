@@ -368,6 +368,10 @@ def main() -> None:
     dynamic_surface = text("shaders/dynamic_surface.hlsl")
     for needle in (
         "DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u",
+        "renderer_build_dynamic_static_transport(",
+        "dynamic_static_node_buffer",
+        "dynamic_static_surface_buffer",
+        "dynamic_static_uv_buffer",
         "update_dynamic_surface_caches(",
         "pending_transform_revision",
         "pending_lighting_revision",
@@ -381,8 +385,17 @@ def main() -> None:
 
     for needle in (
         "BUILD_DYNAMIC_SURFACE_CS",
+        "DYNAMIC_RAYS_PER_SAMPLE = 8u",
         "StructuredBuffer<SurfaceSample> Samples",
-        "probe_irradiance(",
+        "StructuredBuffer<BvhNode> Nodes",
+        "StructuredBuffer<BvhTriangle> Triangles",
+        "StructuredBuffer<StaticSurfaceRef> SurfaceRefs",
+        "StructuredBuffer<float2> StaticUVs",
+        "Texture2D<float4> StaticLightmap",
+        "static_closest(",
+        "static_lightmap_uv(",
+        "static_outgoing(",
+        "trace_static_indirect(",
         "beam_visibility(",
         "encoded_visibility",
         "Output[uint2(pixel % texture_width, pixel / texture_width)]",
