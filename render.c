@@ -15,14 +15,14 @@
 #define DYNAMIC_LIGHTING_MAX_SIZE 4096u
 #define DYNAMIC_INFLUENCE_LIMIT 8u
 #define DYNAMIC_TRACE_INSTANCE_LIMIT 8u
-#define DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u
+#define DYNAMIC_SURFACE_SAMPLES_PER_FRAME 512u
 #define DYNAMIC_SURFACE_CONVERGENCE_PASSES 4u
 #define DYNAMIC_RECEIVER_IRRADIANCE_FLOOR 0.00075f
 #define DYNAMIC_RECEIVER_GRID_MIN_CELL_SIZE 0.5f
 #define DYNAMIC_RECEIVER_GRID_TARGET_AXIS 48.0f
 #define DYNAMIC_RECEIVER_GRID_MAX_CELLS 262144u
-#define DYNAMIC_RECEIVER_SAMPLE_BUDGET 12288u
-#define DYNAMIC_SHADOW_SIZE 2048u
+#define DYNAMIC_RECEIVER_SAMPLE_BUDGET 4096u
+#define DYNAMIC_SHADOW_SIZE 1024u
 #define DYNAMIC_TIMESTAMP_BASE 4u
 #define DYNAMIC_TIMESTAMP_STRIDE 6u
 #define DYNAMIC_TIMING_LOG_INTERVAL 30u
@@ -849,12 +849,6 @@ static bool bind_dynamic_receiver_sets(RENDERER *r, NriCommandBuffer *cmd, NriTe
 
     return gpu_bind_descriptor_set(r, cmd, r->dynamic_receiver_layout, NriBindPoint_COMPUTE, 0, src, 7) &&
            gpu_bind_descriptor_set(r, cmd, r->dynamic_receiver_layout, NriBindPoint_COMPUTE, 1, &dst, 1);
-}
-
-static bool bind_dynamic_receiver_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *output,
-                                            const DYNAMIC_RECEIVER_UNIFORMS *uniforms) {
-    return uniforms && bind_dynamic_receiver_sets(r, cmd, source, output) &&
-           gpu_bind_uniform_data(r, cmd, r->dynamic_receiver_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
 }
 
 static bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
@@ -2043,6 +2037,26 @@ static uint32_t dynamic_receiver_instances(RENDERER *r, DYNAMIC_RECEIVER_UNIFORM
     return count;
 }
 
+static bool dynamic_receiver_cell_visible(const DYNAMIC_RECEIVER_UNIFORMS *uniforms, VEC3 center, float radius) {
+    if (!uniforms) return false;
+
+    const float *m = uniforms->view_projection;
+    const float clip_x = m[0] * center.x + m[4] * center.y + m[8] * center.z + m[12];
+    const float clip_y = m[1] * center.x + m[5] * center.y + m[9] * center.z + m[13];
+    const float clip_w = m[3] * center.x + m[7] * center.y + m[11] * center.z + m[15];
+
+    const float radius_x = radius * (fabsf(m[0]) + fabsf(m[4]) + fabsf(m[8]));
+    const float radius_y = radius * (fabsf(m[1]) + fabsf(m[5]) + fabsf(m[9]));
+    const float radius_w = radius * (fabsf(m[3]) + fabsf(m[7]) + fabsf(m[11]));
+    const float far_w = clip_w + radius_w;
+    const float margin = 1.35f;
+
+    if (far_w <= 1.0e-5f) return false;
+    if (clip_x - radius_x > margin * far_w || clip_x + radius_x < -margin * far_w) return false;
+    if (clip_y - radius_y > margin * far_w || clip_y + radius_y < -margin * far_w) return false;
+    return true;
+}
+
 static uint32_t dynamic_receiver_mark_active_cells(RENDERER *r, const DYNAMIC_RECEIVER_UNIFORMS *uniforms, uint32_t *active_samples) {
     if (active_samples) *active_samples = 0u;
     if (!r || !uniforms || !r->dynamic_receiver_grid_offsets || !r->dynamic_receiver_grid_marks ||
@@ -2060,7 +2074,6 @@ static uint32_t dynamic_receiver_mark_active_cells(RENDERER *r, const DYNAMIC_RE
     const float cell_size = r->dynamic_receiver_grid_cell_size;
     const uint32_t dim_x = r->dynamic_receiver_grid_dims[0];
     const uint32_t dim_y = r->dynamic_receiver_grid_dims[1];
-    const uint32_t dim_z = r->dynamic_receiver_grid_dims[2];
     const uint32_t count = uniforms->dynamic_instance_data[0];
 
     for (uint32_t instance = 0u; instance < count; ++instance) {
@@ -2123,6 +2136,14 @@ static uint32_t dynamic_receiver_mark_active_cells(RENDERER *r, const DYNAMIC_RE
                     }
 
                     if (distance2 > radius2) continue;
+
+                    const VEC3 cell_center = v3(
+                        r->dynamic_receiver_grid_min[0] + ((float)x + 0.5f) * cell_size,
+                        r->dynamic_receiver_grid_min[1] + ((float)y + 0.5f) * cell_size,
+                        r->dynamic_receiver_grid_min[2] + ((float)z + 0.5f) * cell_size);
+                    const float cell_radius = 0.8660254037844386f * cell_size;
+
+                    if (!dynamic_receiver_cell_visible(uniforms, cell_center, cell_radius)) continue;
 
                     const uint32_t cell = (uint32_t)x + dim_x * ((uint32_t)y + dim_y * (uint32_t)z);
                     r->dynamic_receiver_grid_marks[cell] = mark;
