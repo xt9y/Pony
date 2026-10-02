@@ -1813,12 +1813,14 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         release_texture(r, r->default_normal);
 
         if (r->material_sampler) gpu->core.DestroyDescriptor(r->material_sampler);
+        if (r->dynamic_shadow_sampler) gpu->core.DestroyDescriptor(r->dynamic_shadow_sampler);
 
         release_buffer(r, r->vertex_buffer);
         release_bake_resources(r);
         release_buffer(r, r->volume_probe_buffer);
         release_buffer(r, r->beam_buffer);
         release_texture(r, r->depth_texture);
+        release_texture(r, r->dynamic_shadow_texture);
         release_texture(r, r->lightmap_texture);
         release_texture(r, r->baked_direct_texture);
 
@@ -1826,6 +1828,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         if (r->sky_pipeline) gpu->core.DestroyPipeline(r->sky_pipeline);
         if (r->solid_pipeline) gpu->core.DestroyPipeline(r->solid_pipeline);
         if (r->transmission_pipeline) gpu->core.DestroyPipeline(r->transmission_pipeline);
+        if (r->dynamic_shadow_pipeline) gpu->core.DestroyPipeline(r->dynamic_shadow_pipeline);
         if (r->line_pipeline) gpu->core.DestroyPipeline(r->line_pipeline);
 
         destroy_pipeline_layouts(r);
