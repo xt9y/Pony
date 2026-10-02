@@ -137,6 +137,29 @@ def main() -> None:
         raise AssertionError("probe emissive sampling must emit from both triangle sides")
 
 
+    bake = text("bake.c")
+
+    for needle in (
+        "LIGHTMAP_EMISSIVE_MAX_SAMPLES 32u",
+        "lightmap emissive mesh samples: %u per direct texel",
+        "(float)LIGHTMAP_EMISSIVE_MAX_SAMPLES",
+    ):
+        if needle not in bake:
+            raise AssertionError(f"dedicated lightmap mesh-light budget missing: {needle}")
+
+    for needle in (
+        "direct_emissive_target",
+        "direct_emissive_stratified",
+        "emissive_data.x > 0.0f ? min((uint)emissive_data.w, 64u) : 0u",
+        "direct += emissive_sum / (float)emissive_count",
+    ):
+        if needle not in compute_base:
+            raise AssertionError(f"dedicated lightmap mesh-light sampler missing: {needle}")
+
+    if "100u, 32u" not in main:
+        raise AssertionError("emissive lightmap sample budget missing from bake cache hash")
+
+
     advanced_material_fields = (
         "ior",
         "transmission_factor",
