@@ -12,6 +12,7 @@
 #define DYNAMIC_LIGHTING_TEXELS_PER_UNIT 24u
 #define DYNAMIC_LIGHTING_MAX_SIZE 4096u
 #define DYNAMIC_INFLUENCE_LIMIT 8u
+#define DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u
 #define DYNAMIC_SHADOW_SIZE 2048u
 
 typedef struct MAT4 {
@@ -320,6 +321,25 @@ typedef struct DYNAMIC_SHADOW_UNIFORMS {
     float shadow_extent[4];
 } DYNAMIC_SHADOW_UNIFORMS;
 
+typedef struct DYNAMIC_SURFACE_UNIFORMS {
+    float model[16];
+    float normal_model[16];
+
+    Uint32 sample_offset;
+    Uint32 sample_count;
+    Uint32 texture_width;
+    Uint32 texture_height;
+
+    float probe_origin_spacing[4];
+    Uint32 probe_dims[4];
+    float beam_origin[4];
+    float beam_step[4];
+    Uint32 beam_dims[4];
+
+    float sun_direction_intensity[4];
+    float sun_color_visibility_floor[4];
+} DYNAMIC_SURFACE_UNIFORMS;
+
 typedef struct SSAO_UNIFORMS {
     Uint32 width, height, ao_width, ao_height;
     float tan_half_fov, aspect, radius, bias;
@@ -365,12 +385,16 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     OBJECT_ID object_id;
     const LIGHTMAP *layout;
     NriTexture *texture;
+    NriBuffer *sample_buffer;
     VEC3 local_center;
     float local_radius;
     VEC3 average_diffuse;
     VEC3 average_emissive;
     uint32_t transform_revision;
     uint32_t lighting_revision;
+    uint32_t pending_transform_revision;
+    uint32_t pending_lighting_revision;
+    uint32_t sample_cursor;
 };
 
 struct RENDER_MATERIAL {
@@ -474,6 +498,13 @@ static bool create_dynamic_shadow_layout(RENDERER *r) {
     const uint8_t counts[4] = {0, 1, 0, 0};
 
     return gpu_create_pipeline_layout(r, &r->dynamic_shadow_layout, sets, counts, NriStageBits_VERTEX_SHADER);
+}
+
+static bool create_dynamic_surface_layout(RENDERER *r) {
+    static const NriDescriptorType sources[] = {NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
+                                                NriDescriptorType_STRUCTURED_BUFFER};
+
+    return gpu_create_compute_layout(r, &r->dynamic_surface_layout, sources, 3, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_surface_layout(RENDERER *r) {
@@ -950,8 +981,10 @@ static NriTexture *resolve_texture(RENDERER *r, const GLTF_SCENE *visual, int32_
 static void release_dynamic_lighting(RENDERER *r) {
     if (!r) return;
 
-    for (uint32_t i = 0; i < r->dynamic_lighting_count; ++i)
+    for (uint32_t i = 0; i < r->dynamic_lighting_count; ++i) {
         release_texture(r, r->dynamic_lighting[i].texture);
+        release_buffer(r, r->dynamic_lighting[i].sample_buffer);
+    }
 
     free(r->dynamic_lighting);
     r->dynamic_lighting = NULL;
@@ -1411,7 +1444,7 @@ static bool fx_apply(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *swap, floa
 }
 
 static bool create_pipeline_layouts(RENDERER *r) {
-    return create_surface_layout(r) && create_dynamic_shadow_layout(r) && create_line_layout(r) && create_sky_layout(r) && bake_gpu_layouts_init(r) &&
+    return create_surface_layout(r) && create_dynamic_shadow_layout(r) && create_dynamic_surface_layout(r) && create_line_layout(r) && create_sky_layout(r) && bake_gpu_layouts_init(r) &&
            create_ssao_layout(r) && create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) && create_volume_compose_layout(r) &&
            create_compose_layout(r);
 }
@@ -1421,7 +1454,7 @@ static void destroy_pipeline_layouts(RENDERER *r) {
 
     bake_gpu_layouts_deinit(r);
 
-    NriPipelineLayout **layouts[] = {&r->surface_layout, &r->dynamic_shadow_layout, &r->line_layout, &r->sky_layout, &r->ssao_layout,
+    NriPipelineLayout **layouts[] = {&r->surface_layout, &r->dynamic_shadow_layout, &r->dynamic_surface_layout, &r->line_layout, &r->sky_layout, &r->ssao_layout,
                                      &r->bloom_layout,   &r->grade_layout,          &r->volume_layout, &r->volume_compose_layout,
                                      &r->compose_layout};
 
@@ -1479,6 +1512,8 @@ bool renderer_gpu_resources_init(RENDERER *r) {
     r->solid_pipeline = make_surface_pipeline(r, &r->gpu->core, r->surface_layout, &surface_vs, &surface_ps, false);
     r->transmission_pipeline = make_surface_pipeline(r, &r->gpu->core, r->surface_layout, &surface_vs, &surface_ps, true);
     r->dynamic_shadow_pipeline = make_dynamic_shadow_pipeline(r, r->dynamic_shadow_layout, &dynamic_shadow_vs);
+    r->dynamic_surface_pipeline =
+        gpu_compile_compute(r, r->dynamic_surface_layout, "shaders/dynamic_surface.hlsl", "dynamic_surface_cs", "BUILD_DYNAMIC_SURFACE_CS");
     r->line_pipeline = make_line_pipeline(r, r->line_layout, &line_vs, &line_ps);
     r->sky_pipeline = make_sky_pipeline(r, r->sky_layout, &sky_vs, &sky_ps);
 
@@ -1499,7 +1534,7 @@ bool renderer_gpu_resources_init(RENDERER *r) {
     r->surface_beam_fallback_buffer =
         gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_beam, sizeof(fallback_beam), sizeof(fallback_beam));
 
-    if (!r->solid_pipeline || !r->transmission_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_shadow_sampler ||
+    if (!r->solid_pipeline || !r->transmission_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_surface_pipeline || !r->dynamic_shadow_sampler ||
         !r->surface_probe_fallback_buffer || !r->surface_beam_fallback_buffer || !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
         renderer_gpu_resources_deinit(r);
         return false;
@@ -1940,6 +1975,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         if (r->solid_pipeline) gpu->core.DestroyPipeline(r->solid_pipeline);
         if (r->transmission_pipeline) gpu->core.DestroyPipeline(r->transmission_pipeline);
         if (r->dynamic_shadow_pipeline) gpu->core.DestroyPipeline(r->dynamic_shadow_pipeline);
+        if (r->dynamic_surface_pipeline) gpu->core.DestroyPipeline(r->dynamic_surface_pipeline);
         if (r->line_pipeline) gpu->core.DestroyPipeline(r->line_pipeline);
 
         destroy_pipeline_layouts(r);
@@ -2293,9 +2329,18 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         model_lighting_summary(model, &allocation->average_diffuse, &allocation->average_emissive);
         allocation->transform_revision = 0u;
         allocation->lighting_revision = 0u;
-        allocation->texture = pixel_texture(renderer, 0, 0, 0, 255);
+        allocation->pending_transform_revision = 0u;
+        allocation->pending_lighting_revision = 0u;
+        allocation->sample_cursor = 0u;
+        allocation->texture =
+            gpu_create_texture(renderer, NriFormat_RGBA16_SFLOAT,
+                               NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE,
+                               allocation->layout->width, allocation->layout->height);
+        allocation->sample_buffer =
+            gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, allocation->layout->samples,
+                              (size_t)allocation->layout->sample_count * sizeof(*allocation->layout->samples), sizeof(LMAP_SAMPLE));
 
-        if (!allocation->texture) {
+        if (!allocation->texture || !allocation->sample_buffer) {
             renderer->dynamic_lighting_count = out;
             release_dynamic_lighting(renderer);
             return false;
