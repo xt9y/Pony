@@ -1,5 +1,6 @@
 #include "game.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -80,6 +81,17 @@ static bool load_scene_model(SCENE *scene, MODEL_ASSET *asset, const char *path,
     return true;
 }
 
+static void transform_rotate_y(TRANSFORM *transform, float degrees)
+{
+    float radians = degrees * 3.14159265359f / 180.0f;
+    float half = radians * 0.5f;
+
+    transform->rotation[0] = 0.0f;
+    transform->rotation[1] = sinf(half);
+    transform->rotation[2] = 0.0f;
+    transform->rotation[3] = cosf(half);
+}
+
 int main(int argc, char **argv) {
     const int extra_start = extra_model_start(argc, argv);
     const int extra_model_count = argc - extra_start;
@@ -148,6 +160,14 @@ int main(int argc, char **argv) {
     const char *startup_detail = NULL;
     size_t total_bin_size = 0;
 
+    TRANSFORM t = {
+        .position = {-4.0f, 5.0f, -2.0f},
+        .scale = {13.0f, 13.0f, 13.0f},
+        .rotation = {0.0f, 0.0f, 0.0f}
+    };
+    
+    transform_rotate_y(&t, 90.0f);
+    
     if (!load_scene_model(&scene, &models[0], BASE_MODEL_PATH, transform_identity(), &total_bin_size)) {
         startup_stage = "base model load";
         startup_detail = SDL_GetError();
@@ -158,7 +178,7 @@ int main(int argc, char **argv) {
 
         SDL_Log("loading extra model %d/%d: %s", i + 1, extra_model_count, path);
 
-        if (!load_scene_model(&scene, &models[i + 1], path, transform_identity(), &total_bin_size)) {
+        if (!load_scene_model(&scene, &models[i + 1], path, t/* transform_identity() */, &total_bin_size)) {
             startup_stage = "extra model load";
             startup_detail = SDL_GetError();
         }
