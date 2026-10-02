@@ -12,7 +12,7 @@ static const uint INVALID_NODE = 0xffffffffu;
 static const uint PHASE_DIRECT = 0u;
 static const uint PHASE_FILTER = 1u;
 static const uint DYNAMIC_INSTANCE_LIMIT = 8u;
-static const uint EMISSIVE_SAMPLES = 32u;
+static const uint EMISSIVE_SAMPLES = 8u;
 
 struct SurfaceSample {
     float4 position;
@@ -53,6 +53,7 @@ GPU_BIND_B(0, 2) cbuffer DynamicReceiverData : register(b0, space2) {
     uint4 dispatch_data;
     uint4 dynamic_instance_data;
     float4 receiver_params;
+    float4 temporal_params;
 
     float4x4 dynamic_instance_model[DYNAMIC_INSTANCE_LIMIT];
     float4x4 dynamic_instance_inverse[DYNAMIC_INSTANCE_LIMIT];
@@ -314,7 +315,7 @@ float3 direct_emissive_target(float3 position, float3 normal, inout uint seed, f
     shadow.direction = direction;
     shadow.tmax = max(epsilon, distance - 2.0f * epsilon);
 
-    if (static_any(shadow) || dynamic_any(shadow)) return 0.0f;
+    if (dynamic_any(shadow) || static_any(shadow)) return 0.0f;
 
     const float triangle_probability = (triangle_weight * area_scale) / total_weight;
     const float pdf_area = triangle_probability / world_area;
@@ -380,14 +381,22 @@ void dynamic_receiver_cs(uint3 id : SV_DispatchThreadID) {
             return;
         }
 
-        uint seed = hash_u32(pixel ^ 0xb5297a4du);
+        uint generation = (uint)receiver_params.w;
+        uint seed = hash_u32(pixel ^ 0xb5297a4du ^ hash_u32(generation * 0x68bc21ebu));
         float3 emissive_sum = 0.0f;
 
         [loop] for (uint i = 0u; i < EMISSIVE_SAMPLES; ++i)
             emissive_sum += direct_emissive_stratified(sample.position.xyz, normal, seed, i, EMISSIVE_SAMPLES);
 
+        float3 current = emissive_sum / (float)EMISSIVE_SAMPLES;
+        float4 history = Source.Load(int3(uint2(pixel % dispatch_data.z, pixel / dispatch_data.z), 0));
+        uint previous_generation = generation > 1u ? generation - 1u : 1024u;
+        float history_valid = abs(history.a - (float)previous_generation) <= 0.25f ? 1.0f : 0.0f;
+        float history_weight = saturate(temporal_params.x) * history_valid;
+        float3 accumulated = lerp(current, max(history.rgb, 0.0f), history_weight);
+
         Output[uint2(pixel % dispatch_data.z, pixel / dispatch_data.z)] =
-            float4(emissive_sum / (float)EMISSIVE_SAMPLES, receiver_params.w);
+            float4(accumulated, receiver_params.w);
         return;
     }
 
