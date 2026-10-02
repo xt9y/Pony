@@ -451,6 +451,121 @@ float3 signed_dynamic_near_field(float3 position, float3 normal) {
     return correction;
 }
 
+bool dynamic_proxy_reflection_hit(float3 origin, float3 direction, uint index, out float hit_t, out float3 hit_normal) {
+    float3 center = dynamic_influence_center_radius[index].xyz;
+    float3 axis_x = dynamic_influence_axis_x[index].xyz;
+    float3 axis_y = dynamic_influence_axis_y[index].xyz;
+    float3 axis_z = dynamic_influence_axis_z[index].xyz;
+
+    float extent_x = length(axis_x);
+    float extent_y = length(axis_y);
+    float extent_z = length(axis_z);
+
+    hit_t = 0.0f;
+    hit_normal = 0.0f;
+
+    if (extent_x <= 1.0e-5f || extent_y <= 1.0e-5f || extent_z <= 1.0e-5f) return false;
+
+    float3 basis_x = axis_x / extent_x;
+    float3 basis_y = axis_y / extent_y;
+    float3 basis_z = axis_z / extent_z;
+    float3 relative = origin - center;
+    float3 local_origin = float3(dot(relative, basis_x), dot(relative, basis_y), dot(relative, basis_z));
+    float3 local_direction = float3(dot(direction, basis_x), dot(direction, basis_y), dot(direction, basis_z));
+    float3 extents = float3(extent_x, extent_y, extent_z);
+
+    /* Skip the proxy containing the shading point, which is normally self. */
+    if (all(abs(local_origin) <= extents * 1.001f)) return false;
+
+    float t_min = 1.0e-4f;
+    float t_max = 1.0e20f;
+
+    [unroll] for (uint axis = 0u; axis < 3u; ++axis) {
+        float d = local_direction[axis];
+
+        if (abs(d) < 1.0e-7f) {
+            if (abs(local_origin[axis]) > extents[axis]) return false;
+            continue;
+        }
+
+        float a = (-extents[axis] - local_origin[axis]) / d;
+        float b = ( extents[axis] - local_origin[axis]) / d;
+        if (a > b) {
+            float temporary = a;
+            a = b;
+            b = temporary;
+        }
+
+        t_min = max(t_min, a);
+        t_max = min(t_max, b);
+        if (t_min > t_max) return false;
+    }
+
+    if (t_max <= 1.0e-4f) return false;
+    hit_t = t_min > 1.0e-4f ? t_min : t_max;
+    if (hit_t <= 1.0e-4f) return false;
+
+    float3 local_hit = local_origin + local_direction * hit_t;
+    float3 normalized_hit = local_hit / max(extents, 1.0e-5f.xxx);
+    float3 absolute_hit = abs(normalized_hit);
+
+    if (absolute_hit.x >= absolute_hit.y && absolute_hit.x >= absolute_hit.z)
+        hit_normal = basis_x * (normalized_hit.x >= 0.0f ? 1.0f : -1.0f);
+    else if (absolute_hit.y >= absolute_hit.z)
+        hit_normal = basis_y * (normalized_hit.y >= 0.0f ? 1.0f : -1.0f);
+    else
+        hit_normal = basis_z * (normalized_hit.z >= 0.0f ? 1.0f : -1.0f);
+
+    if (dot(hit_normal, direction) > 0.0f) hit_normal = -hit_normal;
+    return true;
+}
+
+float3 dynamic_reflection_radiance(float3 origin, float3 direction, float roughness, out float blend_weight) {
+    uint count = min(dynamic_influence_meta.x, 8u);
+    float closest = 1.0e20f;
+    uint best = 0u;
+    float3 best_normal = 0.0f;
+    bool found = false;
+
+    direction = normalize(direction);
+
+    [loop] for (uint i = 0u; i < count; ++i) {
+        float hit_t;
+        float3 hit_normal;
+
+        if (!dynamic_proxy_reflection_hit(origin, direction, i, hit_t, hit_normal) || hit_t >= closest) continue;
+
+        closest = hit_t;
+        best = i;
+        best_normal = hit_normal;
+        found = true;
+    }
+
+    if (!found) {
+        blend_weight = 0.0f;
+        return 0.0f;
+    }
+
+    float3 hit_position = origin + direction * closest;
+    float3 indirect = surface_probe_irradiance(hit_position, best_normal) / PI;
+    float3 sun = normalize(sun_direction.xyz);
+    float sun_visibility = static_beam_visibility(hit_position);
+    float n_dot_l = saturate(dot(best_normal, sun));
+    float3 direct = sun_color.rgb * roughness_normal_ao_sun.w * n_dot_l * sun_visibility;
+
+    float3 outgoing =
+        dynamic_influence_diffuse[best].rgb * max(indirect + direct, 0.0f) +
+        max(dynamic_influence_emissive[best].rgb, 0.0f);
+
+    /*
+     * This is deliberately a bounded glossy hook, not a second lighting path.
+     * Rough surfaces lean back toward the environment because the OBB hit is
+     * only a single-direction proxy rather than a filtered reflection field.
+     */
+    blend_weight = saturate(1.0f - roughness * roughness);
+    return outgoing;
+}
+
 float3 environment_radiance(float3 direction, float roughness) {
     direction = normalize(direction);
 
@@ -613,7 +728,12 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     float3 legacy_environment = f0 * (0.025f + 0.10f * (1.0f - roughness)) * material_ao *
                                 (camera_position.w > 0.5f ? saturate(baked_luma * 2.0f) : 1.0f);
 
-    float3 reflected = environment_radiance(reflect(-v, n), roughness);
+    float3 reflection_direction = reflect(-v, n);
+    float3 reflected = environment_radiance(reflection_direction, roughness);
+    float dynamic_reflection_weight = 0.0f;
+    float3 dynamic_reflection = dynamic_reflection_radiance(input.world_position + n * 1.0e-3f, reflection_direction, roughness,
+                                                            dynamic_reflection_weight);
+    reflected = lerp(reflected, dynamic_reflection, dynamic_reflection_weight);
     float3 physical_environment = reflected * view_f * material_ao * (1.0f - 0.35f * roughness);
     float advanced_weight = max(iridescence, transmission);
     float3 environment_specular = lerp(legacy_environment, physical_environment, advanced_weight);
