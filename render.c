@@ -2398,7 +2398,7 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
         DYNAMIC_TIMESTAMP_BASE + (uint32_t)(r->gpu->frame_index % GPU_FRAME_QUEUE_DEPTH) * DYNAMIC_TIMESTAMP_STRIDE;
 
     if (r->gpu->frame_index >= GPU_FRAME_QUEUE_DEPTH && r->gpu->frame_index % DYNAMIC_TIMING_LOG_INTERVAL == 0u) {
-        gpu_timestamp_log(r, timing_base, "dynamic surface cache");
+        gpu_timestamp_log(r, timing_base, "dynamic lighting caches");
         gpu_timestamp_log(r, timing_base + 2u, "dynamic shadow map");
     }
 
