@@ -2099,7 +2099,8 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
         .shadow_texel_enabled = {r->dynamic_shadow_size ? 1.0f / (float)r->dynamic_shadow_size : 1.0f,
                                  r->dynamic_shadow_size ? 1.0f / (float)r->dynamic_shadow_size : 1.0f,
                                  r->dynamic_shadow_ready ? 1.0f : 0.0f, 0.0f},
-        .dynamic_flags = {draw && draw->object_id ? 1.0f : 0.0f, dynamic_cache_valid, r->reference_lighting_enabled ? 1.0f : 0.0f, 0.0f},
+        .dynamic_flags = {draw && draw->object_id ? 1.0f : 0.0f, dynamic_cache_valid, r->reference_lighting_enabled ? 1.0f : 0.0f,
+                          (float)r->debug_view},
         .probe_origin_spacing = {r->volume_probes.origin.x, r->volume_probes.origin.y, r->volume_probes.origin.z, r->volume_probes.spacing},
         .probe_dims = {r->volume_probes.count_x, r->volume_probes.count_y, r->volume_probes.count_z, r->volume_probe_buffer ? 1u : 0u},
         .beam_origin = {r->beams.origin.x, r->beams.origin.y, r->beams.origin.z, 0.0f},
@@ -3422,6 +3423,10 @@ static void renderer_handle_event(RENDERER *renderer, const SDL_Event *event) {
             const uint32_t view = (uint32_t)(event->key.key - SDLK_F1) + 1u;
             renderer->debug_view = renderer->debug_view == view ? 0u : view;
         }
+        if (!event->key.repeat && event->key.key == SDLK_F6)
+            renderer->debug_view = renderer->debug_view == 5u ? 0u : 5u;
+        if (!event->key.repeat && event->key.key == SDLK_F7)
+            renderer->debug_view = renderer->debug_view == 6u ? 0u : 6u;
         break;
 
     default:
