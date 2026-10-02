@@ -2093,7 +2093,12 @@ static bool bake_write_fast_seed(BAKE_JOB *job, PROBE_GRID *probes, BEAM_GRID *b
 
     bake_set_phase(BAKE_PHASE_SEED, 0u, 0u, 0u);
 
-    return cache_write(job->worker_path, job->scene_hash, stale_layout, job->volume_hash, job->beam_hash, &seed);
+    if (!cache_write(job->worker_path, job->scene_hash, stale_layout, job->volume_hash, job->beam_hash, &seed)) {
+        if (!*SDL_GetError()) SDL_SetError("fast probe seed cache write failed");
+        return false;
+    }
+
+    return true;
 }
 
 static bool bake_prepare_fast_components(BAKE_JOB *job, RENDERER *worker) {
