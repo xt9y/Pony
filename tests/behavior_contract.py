@@ -214,14 +214,26 @@ def main() -> None:
         if needle not in fragment:
             raise AssertionError(f"advanced material shader path missing: {needle}")
 
+    transport = text("shaders/transport.hlsl")
+
     for needle in (
-        "float3 visible_emissive(float3 emissive)",
+        "transport_visible_emissive",
         "const float knee = 4.0f;",
         "const float white = 12.0f;",
-        "visible_emissive(emissive)",
+        "transport_emitted_radiance",
+        "transport_diffuse_albedo",
+        "transport_diffuse_response",
+        "transport_offset_surface",
     ):
-        if needle not in fragment:
-            raise AssertionError(f"visible emissive compression missing: {needle}")
+        if needle not in transport:
+            raise AssertionError(f"shared transport contract missing: {needle}")
+
+    for path in ("shaders/fragment.hlsl", "shaders/compute_base.hlsl", "shaders/probe_wavefront.hlsl"):
+        if '#include "transport.hlsl"' not in text(path):
+            raise AssertionError(f"{path}: shared transport include missing")
+
+    if "transport_visible_emissive(emissive)" not in fragment:
+        raise AssertionError("visible emissive compression must stay presentation-only")
 
     for field in ("layout_hash", "volume_hash", "beam_hash", "object_probes", "volume_probes", "beams"):
         if field not in game:

@@ -6,6 +6,8 @@
 #define GPU_STORAGE_RGBA16F [[vk::image_format("rgba16f")]]
 #endif
 
+#include "transport.hlsl"
+
 #if defined(BUILD_SURFACE_FS)
 GPU_BIND_T(0, 2) Texture2D<float4> BaseColor : register(t0, space2);
 GPU_BIND_T(1, 2) Texture2D<float4> MetallicRoughness : register(t1, space2);
@@ -59,12 +61,6 @@ struct SurfaceOutput {
 };
 
 static const float PI = 3.14159265358979323846f;
-
-float3 srgb_to_linear(float3 c) {
-    float3 low = c / 12.92f;
-    float3 high = pow((c + 0.055f) / 1.055f, 2.4f);
-    return lerp(high, low, step(c, float3(0.04045f, 0.04045f, 0.04045f)));
-}
 
 float distribution_ggx(float n_dot_h, float roughness) {
     float a = roughness * roughness;
@@ -252,23 +248,11 @@ float3 sample_transmitted_scene(float2 uv, float roughness) {
     return result * 0.125f;
 }
 
-float3 visible_emissive(float3 emissive) {
-    const float knee = 4.0f;
-    const float white = 12.0f;
-
-    float luminance = dot(emissive, float3(0.2126f, 0.7152f, 0.0722f));
-    if (luminance <= knee) return emissive;
-
-    float mapped = knee + (white - knee) * (1.0f - exp(-(luminance - knee) / (white - knee)));
-    return emissive * (mapped / max(luminance, 1.0e-4f));
-}
-
-
 SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     SurfaceOutput output;
 
     float4 base_sample = BaseColor.Sample(MaterialSampler, input.uv);
-    float3 base = srgb_to_linear(base_sample.rgb) * base_color_factor.rgb;
+    float3 base = transport_srgb_to_linear(base_sample.rgb) * base_color_factor.rgb;
 
     float4 mr = MetallicRoughness.Sample(MaterialSampler, input.uv);
     float metallic = saturate(emissive_metallic.w * mr.b);
@@ -276,7 +260,7 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
 
     float ao_sample = Occlusion.Sample(MaterialSampler, input.uv).r;
     float material_ao = lerp(1.0f, ao_sample, saturate(roughness_normal_ao_sun.z));
-    float3 emissive = srgb_to_linear(Emissive.Sample(MaterialSampler, input.uv).rgb) * emissive_metallic.rgb;
+    float3 emissive = transport_srgb_to_linear(Emissive.Sample(MaterialSampler, input.uv).rgb) * emissive_metallic.rgb;
 
     float3 n = mapped_normal(input, roughness_normal_ao_sun.y);
     if (!front_face) n = -n;
@@ -336,7 +320,8 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
 
     float transmission_weight = transmission * (1.0f - metallic);
     float iridescence_energy = lerp(1.0f, 1.0f - max(view_f.r, max(view_f.g, view_f.b)), iridescence);
-    float3 diffuse = base * baked * material_ao * (1.0f - metallic) * (1.0f - transmission_weight) * iridescence_energy;
+    float3 diffuse_albedo = transport_diffuse_albedo(base, metallic);
+    float3 diffuse = transport_diffuse_response(diffuse_albedo, baked) * material_ao * (1.0f - transmission_weight) * iridescence_energy;
     float3 transmitted = 0.0f.xxx;
 
     if (transmission_weight > 0.0f) {
@@ -352,7 +337,7 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
         transmitted = scene * attenuation * base * transmission_weight * (1.0f - view_f);
     }
 
-    output.hdr = float4(max(diffuse + direct_specular + environment_specular + transmitted + visible_emissive(emissive), 0.0f),
+    output.hdr = float4(max(diffuse + direct_specular + environment_specular + transmitted + transport_visible_emissive(emissive), 0.0f),
                         base_sample.a * base_color_factor.a);
     output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f, max(input.view_depth, 0.0f));
 

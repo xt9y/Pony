@@ -6,6 +6,8 @@
 #define GPU_STORAGE_RGBA16F [[vk::image_format("rgba16f")]]
 #endif
 
+#include "transport.hlsl"
+
 #if defined(BUILD_PROBE_PREP_CS) || defined(BUILD_PROBE_RESET_CS) || defined(BUILD_PROBE_VALIDATE_CS) || defined(BUILD_PROBE_PRIMARY_CS) ||                    \
     defined(BUILD_PROBE_PRIMARY_WAVE_CS) || defined(BUILD_PROBE_BOUNCE_CS) || defined(BUILD_PROBE_BOUNCE_WAVE_CS) || defined(BUILD_PROBE_ARGS_CS) ||           \
     defined(BUILD_PROBE_REDUCE_CS) || defined(BUILD_PROBE_EMISSIVE_CS)
@@ -723,7 +725,7 @@ float3 probe_direct_sun(float3 position, float3 normal, inout uint seed) {
     if (probe_sun_hint(position, visible)) {
         if (!visible) return 0.0f;
     } else {
-        ProbeTraceRay ray = probe_make_ray(position + normal * bake_params.x, direction, bake_params.x, 1.0e20f);
+        ProbeTraceRay ray = probe_make_ray(transport_offset_surface(position, normal, bake_params.x), direction, bake_params.x, 1.0e20f);
         if (probe_trace_any(ray)) return 0.0f;
     }
 
@@ -766,7 +768,7 @@ float3 probe_direct_emissive(float3 position, float3 normal, inout uint seed) {
     const float emitter_cosine = abs(dot(normalize(tri.normal.xyz), -direction));
     if (receiver_cosine <= 0.0f || emitter_cosine <= 0.0f) return 0.0f;
 
-    ProbeTraceRay shadow = probe_make_ray(position + normal * bake_params.x, direction, bake_params.x, max(bake_params.x, distance - 2.0f * bake_params.x));
+    ProbeTraceRay shadow = probe_make_ray(transport_offset_surface(position, normal, bake_params.x), direction, bake_params.x, max(bake_params.x, distance - 2.0f * bake_params.x));
     if (probe_trace_any(shadow)) return 0.0f;
 
     const float pdf_area = (triangle_weight / total_weight) / area;
@@ -791,7 +793,7 @@ float3 probe_direct_emissive(float3 position, float3 normal, inout uint seed) {
     radiance += throughput * probe_direct_emissive(position, normal, seed);
 
     float3 direction = probe_cosine_hemisphere(normal, seed);
-    ProbeTraceRay ray = probe_make_ray(position + normal * bake_params.x, direction, bake_params.x, 1.0e20f);
+    ProbeTraceRay ray = probe_make_ray(transport_offset_surface(position, normal, bake_params.x), direction, bake_params.x, 1.0e20f);
     ProbeTraceHit hit;
     if (!probe_trace_closest(ray, hit)) {
         radiance += throughput * probe_sky(direction);
@@ -804,7 +806,7 @@ float3 probe_direct_emissive(float3 position, float3 normal, inout uint seed) {
         return;
     }
 
-    throughput *= hit.albedo;
+    throughput *= transport_bounce_albedo(hit.albedo);
     state = probe_pack_state(ray.origin + ray.direction * hit.t, hit.normal, throughput, radiance, result_index);
 
     uint slot;

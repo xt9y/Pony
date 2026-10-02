@@ -1,3 +1,5 @@
+#include "transport.hlsl"
+
 #if defined(BUILD_VOLUME_CS)
 GPU_BIND_T(0, 0) Texture2D<float4> NormalDepth : register(t0, space0);
 GPU_BIND_S(0, 0) SamplerState DepthSampler : register(s0, space0);
@@ -757,7 +759,7 @@ float3 direct_sun(float3 position, float3 normal, inout uint seed) {
     float n_dot_l = saturate(dot(normal, direction));
     if (n_dot_l <= 0.0f) return 0.0f;
 
-    TraceRay ray = make_trace_ray(position + normal * bake_params.x, direction, bake_params.x, 1.0e20f);
+    TraceRay ray = make_trace_ray(transport_offset_surface(position, normal, bake_params.x), direction, bake_params.x, 1.0e20f);
     if (trace_any(ray)) return 0.0f;
 
     return sun_color_radius.rgb * (sun_direction_intensity.w * n_dot_l);
@@ -802,7 +804,7 @@ float3 direct_emissive_target(float3 position, float3 normal, inout uint seed, f
     const float emitter_cosine = abs(dot(normalize(tri.normal.xyz), -direction));
     if (receiver_cosine <= 0.0f || emitter_cosine <= 0.0f) return 0.0f;
 
-    TraceRay shadow = make_trace_ray(position + normal * bake_params.x, direction, bake_params.x, max(bake_params.x, distance - 2.0f * bake_params.x));
+    TraceRay shadow = make_trace_ray(transport_offset_surface(position, normal, bake_params.x), direction, bake_params.x, max(bake_params.x, distance - 2.0f * bake_params.x));
     if (trace_any(shadow)) return 0.0f;
 
     const float pdf_area = (triangle_weight / total_weight) / area;
@@ -861,7 +863,7 @@ float3 trace_path_core(float3 position, float3 normal, inout uint seed, bool inc
         if (bounce != 0u || include_primary_sun) radiance += throughput * direct_lighting(position, normal, seed);
 
         float3 direction = cosine_hemisphere(normal, seed);
-        TraceRay ray = make_trace_ray(position + normal * bake_params.x, direction, bake_params.x, 1.0e20f);
+        TraceRay ray = make_trace_ray(transport_offset_surface(position, normal, bake_params.x), direction, bake_params.x, 1.0e20f);
         TraceHit hit;
 
         if (!trace_closest(ray, hit)) {
@@ -869,7 +871,7 @@ float3 trace_path_core(float3 position, float3 normal, inout uint seed, bool inc
             break;
         }
 
-        throughput *= hit.albedo;
+        throughput *= transport_bounce_albedo(hit.albedo);
         position = ray.origin + ray.direction * hit.t;
         normal = hit.normal;
 #if (defined(BUILD_LIGHTMAP_CS) || defined(BUILD_LIGHTMAP_WAVE_CS))
@@ -1124,7 +1126,7 @@ groupshared uint ProbeContinue;
                 float3 incoming;
                 if (trace_closest(ray, hit)) {
                     float3 position = ray.origin + ray.direction * hit.t;
-                    incoming = hit.emissive + trace_path(position, hit.normal, seed) * (hit.albedo / PI);
+                    incoming = transport_emitted_radiance(hit.emissive) + trace_path(position, hit.normal, seed) * (hit.albedo / PI);
                 } else {
                     incoming = sky_radiance(d);
                 }
