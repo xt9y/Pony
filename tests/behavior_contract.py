@@ -71,7 +71,7 @@ def main() -> None:
     bake_array = re.search(r"constuint32_tbake_settings\[\]=\{(.*?)\};", main_c)
     if not bake_array:
         raise AssertionError("bake_settings array missing")
-    if bake_array.group(1) != "LIGHTMAP_TEXELS_PER_UNIT,LIGHTMAP_MAX_SIZE,128u,3u,4u,32u,2u,32u,8u,50u,75u,1u,4u,16u,2u,1u,1u,4u,995u,25u,60u,100u":
+    if bake_array.group(1) != "LIGHTMAP_TEXELS_PER_UNIT,LIGHTMAP_MAX_SIZE,128u,3u,4u,32u,2u,32u,8u,50u,75u,1u,4u,16u,2u,1u,1u,4u,995u,25u,60u,100u,32u":
         raise AssertionError("bake_settings values/order changed")
 
     volume_array = re.search(r"constfloatvolume_bake_settings\[\]=\{(.*?)\};", main_c)
