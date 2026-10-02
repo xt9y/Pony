@@ -1508,8 +1508,102 @@ static bool build_transmission_draws(RENDERER *r) {
     return true;
 }
 
-static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATERIAL *material, const RENDER_FRAME *frame) {
-    return (MATERIAL_UNIFORMS){
+static bool dynamic_shadow_projection(const RENDERER *r, const RENDER_FRAME *frame, float shadow_u_min[4], float shadow_v_min[4],
+                                      float shadow_sun_max[4], float shadow_extent_bias[4]) {
+    if (!r || !frame || !r->beams.width || !r->beams.height || !r->beams.depth || r->beams.step.x <= 0.0f || r->beams.step.y <= 0.0f ||
+        r->beams.step.z <= 0.0f)
+        return false;
+
+    const VEC3 sun = v3_normalize(frame->sun.direction);
+    VEC3 u = v3_normalize(v3_cross(v3(0.0f, 1.0f, 0.0f), sun));
+
+    if (v3_len_sq(u) < 0.5f) u = v3_normalize(v3_cross(v3(1.0f, 0.0f, 0.0f), sun));
+    if (v3_len_sq(u) < 0.5f) return false;
+
+    const VEC3 v = v3_cross(sun, u);
+    const float span_x = r->beams.step.x * (float)r->beams.width;
+    const float span_y = r->beams.step.y * (float)r->beams.height;
+    const float span_z = r->beams.step.z * (float)r->beams.depth;
+
+    if (span_x <= 0.0f || span_y <= 0.0f || span_z <= 0.0f) return false;
+
+    shadow_u_min[0] = u.x;
+    shadow_u_min[1] = u.y;
+    shadow_u_min[2] = u.z;
+    shadow_u_min[3] = r->beams.origin.x;
+    shadow_v_min[0] = v.x;
+    shadow_v_min[1] = v.y;
+    shadow_v_min[2] = v.z;
+    shadow_v_min[3] = r->beams.origin.y;
+    shadow_sun_max[0] = sun.x;
+    shadow_sun_max[1] = sun.y;
+    shadow_sun_max[2] = sun.z;
+    shadow_sun_max[3] = r->beams.origin.z + span_z;
+    shadow_extent_bias[0] = span_x;
+    shadow_extent_bias[1] = span_y;
+    shadow_extent_bias[2] = span_z;
+    shadow_extent_bias[3] = 2.0f / (float)DYNAMIC_SHADOW_SIZE;
+    return true;
+}
+
+static bool render_dynamic_shadow_map(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame) {
+    if (!r || !cmd || !frame) return false;
+
+    r->dynamic_shadow_ready = false;
+
+    bool has_dynamic = false;
+    for (uint32_t i = 0; i < r->draw_count; ++i) {
+        if (r->draws[i].object_id && !material_transmissive(&r->materials[r->draws[i].material])) {
+            has_dynamic = true;
+            break;
+        }
+    }
+
+    if (!has_dynamic) return true;
+
+    DYNAMIC_SHADOW_UNIFORMS base = {0};
+
+    if (!dynamic_shadow_projection(r, frame, base.shadow_u_min, base.shadow_v_min, base.shadow_sun_max, base.shadow_extent)) return true;
+    if (!begin_dynamic_shadow_rendering(r, cmd)) return false;
+
+    const NriVertexBufferDesc vertex = {.buffer = r->vertex_buffer, .offset = 0, .stride = sizeof(RENDER_VERTEX)};
+    r->gpu->core.CmdSetVertexBuffers(cmd, 0, &vertex, 1);
+    r->gpu->core.CmdSetPipeline(cmd, r->dynamic_shadow_pipeline);
+
+    for (uint32_t i = 0; i < r->draw_count; ++i) {
+        const DRAW_RANGE *draw = &r->draws[i];
+
+        if (!draw->object_id || material_transmissive(&r->materials[draw->material])) continue;
+
+        const OBJECT *object = scene_object_by_id_const(r->scene, draw->object_id);
+        if (!object || object->state != DYNAMIC) {
+            r->gpu->core.CmdEndRendering(cmd);
+            return false;
+        }
+
+        DYNAMIC_SHADOW_UNIFORMS uniforms = base;
+        const MAT4 model = m4_transform(object->transform, false);
+        memcpy(uniforms.model, model.m, sizeof(uniforms.model));
+
+        if (!gpu_bind_uniform_data(r, cmd, r->dynamic_shadow_layout, NriBindPoint_GRAPHICS, 1, &uniforms, sizeof(uniforms))) {
+            r->gpu->core.CmdEndRendering(cmd);
+            return false;
+        }
+
+        r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){.vertexNum = draw->count, .instanceNum = 1, .baseVertex = draw->first, .baseInstance = 0});
+    }
+
+    r->gpu->core.CmdEndRendering(cmd);
+
+    if (!gpu_transition_texture(r, cmd, r->dynamic_shadow_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_FRAGMENT_SHADER))
+        return false;
+
+    r->dynamic_shadow_ready = true;
+    return true;
+}
+
+static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATERIAL *material, const RENDER_FRAME *frame, const DRAW_RANGE *draw) {
+    MATERIAL_UNIFORMS result = (MATERIAL_UNIFORMS){
         .base_color_factor = {material->data.base_color[0], material->data.base_color[1], material->data.base_color[2], material->data.base_color[3]},
         .emissive_metallic = {material->data.emissive[0], material->data.emissive[1], material->data.emissive[2], material->data.metallic},
         .roughness_normal_ao_sun = {material->data.roughness, material->data.normal_scale, material->data.occlusion_strength, frame->sun.intensity},
@@ -1524,7 +1618,14 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
         .camera_up_tan = {frame->up.x, frame->up.y, frame->up.z, frame->tan_half_fov},
         .camera_forward = {frame->forward.x, frame->forward.y, frame->forward.z, 0.0f},
         .sky_zenith = {frame->sky.zenith.x, frame->sky.zenith.y, frame->sky.zenith.z, frame->sky.intensity},
-        .sky_horizon = {frame->sky.horizon.x, frame->sky.horizon.y, frame->sky.horizon.z, 1.0f}};
+        .sky_horizon = {frame->sky.horizon.x, frame->sky.horizon.y, frame->sky.horizon.z, 1.0f},
+        .shadow_texel_enabled = {r->dynamic_shadow_size ? 1.0f / (float)r->dynamic_shadow_size : 1.0f,
+                                 r->dynamic_shadow_size ? 1.0f / (float)r->dynamic_shadow_size : 1.0f,
+                                 r->dynamic_shadow_ready ? 1.0f : 0.0f, 0.0f},
+        .dynamic_flags = {draw && draw->object_id ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f}};
+
+    (void)dynamic_shadow_projection(r, frame, result.shadow_u_min, result.shadow_v_min, result.shadow_sun_max, result.shadow_extent_bias);
+    return result;
 }
 
 static CAMERA_UNIFORMS camera_uniforms_for_draw(const RENDERER *r, const RENDER_FRAME *frame, const DRAW_RANGE *draw) {
@@ -1552,7 +1653,7 @@ static CAMERA_UNIFORMS camera_uniforms_for_draw(const RENDERER *r, const RENDER_
 static bool draw_surface_range(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame, const DRAW_RANGE *draw, NriTexture *scene_color,
                                NriDescriptor *scene_sampler) {
     const RENDER_MATERIAL *material = &r->materials[draw->material];
-    const MATERIAL_UNIFORMS uniforms = material_uniforms(r, material, frame);
+    const MATERIAL_UNIFORMS uniforms = material_uniforms(r, material, frame, draw);
     const CAMERA_UNIFORMS camera = camera_uniforms_for_draw(r, frame, draw);
     NriTexture *lighting = r->reference_lighting_enabled && r->reference_static_texture ? r->reference_static_texture : r->lightmap_texture;
 
@@ -1591,6 +1692,7 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     NriCommandBuffer *cmd = NULL;
 
     if (!gpu_begin_render_frame(r, &queued_frame, &cmd, &swap, &swap_index)) goto failed_frame;
+    if (!render_dynamic_shadow_map(r, cmd, frame)) goto failed_frame;
 
     CAMERA_UNIFORMS camera = {0};
 
