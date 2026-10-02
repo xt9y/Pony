@@ -51,3 +51,58 @@ jobs:
             echo "checking $file"
             cc -std=c11 -Wall -Wextra -Wpedantic -Werror=implicit-function-declaration -fsyntax-only $CFLAGS "$file"
           done
+
+  shaders:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: install dxc
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-noble.list https://packages.lunarg.com/vulkan/lunarg-vulkan-noble.list
+          sudo apt-get update
+          sudo apt-get install -y dxc spirv-tools
+      - name: compile frozen shader matrix
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import re
+          import subprocess
+          import tempfile
+
+          build = pathlib.Path("build.c").read_text(encoding="utf-8")
+          jobs = re.findall(
+              r'\{"([^"]+\.hlsl)",\s*"([^"]+)",\s*"([^"]+)",\s*(NULL|"[^"]+"),\s*"([^"]+)",\s*([01])\}',
+              build,
+          )
+          if len(jobs) != 27:
+              raise SystemExit(f"expected 27 frozen shader jobs, found {len(jobs)}")
+
+          profiles = {
+              "vertex": "vs_6_6",
+              "fragment": "ps_6_6",
+              "compute": "cs_6_6",
+          }
+
+          with tempfile.TemporaryDirectory() as temporary:
+              root = pathlib.Path(temporary)
+              for path, entry, define, fallback, stage, wave in jobs:
+                  output = root / f"{define}.spv"
+                  command = [
+                      "dxc",
+                      "-spirv",
+                      "-fspv-target-env=vulkan1.2",
+                      "-T", profiles[stage],
+                      "-E", entry,
+                      "-I", "shaders",
+                      f"-D{define}",
+                      path,
+                      "-Fo", str(output),
+                  ]
+                  print(" ".join(command))
+                  subprocess.run(command, check=True)
+                  subprocess.run(["spirv-val", "--target-env", "vulkan1.2", str(output)], check=True)
+
+          print("all 27 frozen Dustmite shader jobs compile and validate")
+          PY
