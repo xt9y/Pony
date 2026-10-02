@@ -753,16 +753,24 @@ bool trace_closest(TraceRay ray, out TraceHit hit) {
     return found;
 }
 
-float3 direct_sun(float3 position, float3 normal, inout uint seed) {
+float3 direct_sun_visibility(float3 position, float3 normal, inout uint seed, out float visibility) {
     float3 center = normalize(sun_direction_intensity.xyz);
     float3 direction = sample_sun(center, sun_color_radius.w, seed);
     float n_dot_l = saturate(dot(normal, direction));
+
+    visibility = 0.0f;
     if (n_dot_l <= 0.0f) return 0.0f;
 
     TraceRay ray = make_trace_ray(transport_offset_surface(position, normal, bake_params.x), direction, bake_params.x, 1.0e20f);
     if (trace_any(ray)) return 0.0f;
 
+    visibility = 1.0f;
     return sun_color_radius.rgb * (sun_direction_intensity.w * n_dot_l);
+}
+
+float3 direct_sun(float3 position, float3 normal, inout uint seed) {
+    float visibility;
+    return direct_sun_visibility(position, normal, seed, visibility);
 }
 float3 direct_emissive_target(float3 position, float3 normal, inout uint seed, float target01) {
     const float total_weight = emissive_data.x;
@@ -905,6 +913,7 @@ float4 filtered_pixel(int2 p) {
     if (center.a == 0.0f) return 0.0f;
 
     float3 sum = 0.0f;
+    float alpha_sum = 0.0f;
     float total = 0.0f;
     [unroll] for (int y = -1; y <= 1; ++y) {
         [unroll] for (int x = -1; x <= 1; ++x) {
@@ -914,17 +923,19 @@ float4 filtered_pixel(int2 p) {
             float difference = length(c.rgb - center.rgb);
             float weight = 1.0f / (1.0f + difference * 4.0f);
             sum += c.rgb * weight;
+            alpha_sum += c.a * weight;
             total += weight;
         }
     }
-    return float4(total > 0.0f ? sum / total : center.rgb, 1.0f);
+    return total > 0.0f ? float4(sum / total, alpha_sum / total) : center;
 }
 
 float4 dilated_pixel(int2 p) {
     float4 center = source_pixel(p);
-    if (center.a != 0.0f) return float4(center.rgb, 1.0f);
+    if (center.a != 0.0f) return center;
 
     float3 sum = 0.0f;
+    float alpha_sum = 0.0f;
     float count = 0.0f;
     [unroll] for (int y = -1; y <= 1; ++y) {
         [unroll] for (int x = -1; x <= 1; ++x) {
@@ -932,10 +943,11 @@ float4 dilated_pixel(int2 p) {
             float4 c = source_pixel(q);
             if (c.a == 0.0f) continue;
             sum += c.rgb;
+            alpha_sum += c.a;
             count += 1.0f;
         }
     }
-    return count > 0.0f ? float4(sum / count, 1.0f) : 0.0f;
+    return count > 0.0f ? float4(sum / count, alpha_sum / count) : 0.0f;
 }
 
 [numthreads(64, 1, 1)] void lightmap_cs(uint3 dispatch_id
@@ -961,16 +973,22 @@ float4 dilated_pixel(int2 p) {
         float3 normal = normalize(sample.normal.xyz);
 
         uint sun_seed = hash_u32(pixel ^ 0x4f03d2b1u);
-        float3 sun_a = direct_sun(sample.position.xyz, normal, sun_seed);
-        float3 sun_b = direct_sun(sample.position.xyz, normal, sun_seed);
-        float3 sun_c = direct_sun(sample.position.xyz, normal, sun_seed);
-        float3 sun_d = direct_sun(sample.position.xyz, normal, sun_seed);
+        float visibility_a, visibility_b, visibility_c, visibility_d;
+        float3 sun_a = direct_sun_visibility(sample.position.xyz, normal, sun_seed, visibility_a);
+        float3 sun_b = direct_sun_visibility(sample.position.xyz, normal, sun_seed, visibility_b);
+        float3 sun_c = direct_sun_visibility(sample.position.xyz, normal, sun_seed, visibility_c);
+        float3 sun_d = direct_sun_visibility(sample.position.xyz, normal, sun_seed, visibility_d);
         float3 sun_sum = sun_a + sun_b + sun_c + sun_d;
+        float visibility_sum = visibility_a + visibility_b + visibility_c + visibility_d;
         uint sun_count = 4u;
         float3 sun_mean = sun_sum * 0.25f;
 
         if (length(sun_a - sun_mean) + length(sun_b - sun_mean) + length(sun_c - sun_mean) + length(sun_d - sun_mean) > 0.02f) {
-            for (uint i = 0u; i < 12u; ++i) sun_sum += direct_sun(sample.position.xyz, normal, sun_seed);
+            for (uint i = 0u; i < 12u; ++i) {
+                float visibility;
+                sun_sum += direct_sun_visibility(sample.position.xyz, normal, sun_seed, visibility);
+                visibility_sum += visibility;
+            }
             sun_count = 16u;
         }
 
@@ -985,7 +1003,10 @@ float4 dilated_pixel(int2 p) {
 
         if (emissive_count > 0u) direct += emissive_sum / (float)emissive_count;
 
-        Output[uint2(pixel % lightmap_width, pixel / lightmap_width)] = float4(direct, 1.0f);
+        const float visibility_floor = 1.0f / 1024.0f;
+        float sun_visibility = visibility_sum / (float)sun_count;
+        float encoded_visibility = visibility_floor + sun_visibility * (1.0f - visibility_floor);
+        Output[uint2(pixel % lightmap_width, pixel / lightmap_width)] = float4(direct, encoded_visibility);
         return;
     }
 
@@ -993,7 +1014,7 @@ float4 dilated_pixel(int2 p) {
         uint2 p = uint2(index % lightmap_width, index / lightmap_width);
         float4 indirect = source_pixel(int2(p));
         float4 direct = Direct.SampleLevel(DirectSampler, (float2(p) + 0.5f) / float2(lightmap_width, lightmap_height), 0.0f);
-        Output[p] = indirect.a != 0.0f ? float4(indirect.rgb + direct.rgb, 1.0f) : 0.0f;
+        Output[p] = indirect.a != 0.0f ? float4(indirect.rgb + direct.rgb, direct.a) : 0.0f;
         return;
     }
 

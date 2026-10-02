@@ -297,8 +297,9 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     float g = geometry_schlick(n_dot_v, roughness) * geometry_schlick(n_dot_l, roughness);
     float3 specular = d * g * f / max(4.0f * n_dot_v * max(n_dot_l, 0.001f), 1.0e-4f);
 
-    float3 baked = camera_position.w > 0.5f ? max(Lightmap.Sample(LightmapSampler, front_face ? input.lightmap_uv : input.back_lightmap_uv).rgb, 0.0f)
-                                            : float3(0.12f, 0.12f, 0.12f);
+    float4 baked_sample = camera_position.w > 0.5f ? Lightmap.Sample(LightmapSampler, front_face ? input.lightmap_uv : input.back_lightmap_uv)
+                                                    : float4(0.12f, 0.12f, 0.12f, 1.0f);
+    float3 baked = max(baked_sample.rgb, 0.0f);
 
     if (camera_position.w > 1.5f) {
         output.hdr = float4(baked, 1.0f);
@@ -307,7 +308,10 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     }
 
     float baked_luma = dot(baked, float3(0.2126f, 0.7152f, 0.0722f));
-    float sun_visibility = camera_position.w > 0.5f ? saturate(baked_luma * 0.55f) : 1.0f;
+    const float visibility_floor = 1.0f / 1024.0f;
+    float sun_visibility = camera_position.w > 0.5f
+                               ? saturate((baked_sample.a - visibility_floor) / (1.0f - visibility_floor))
+                               : 1.0f;
     float3 direct_specular = specular * sun_color.rgb * roughness_normal_ao_sun.w * n_dot_l * sun_visibility;
 
     float3 legacy_environment = f0 * (0.025f + 0.10f * (1.0f - roughness)) * material_ao *

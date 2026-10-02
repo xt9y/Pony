@@ -319,6 +319,19 @@ def main() -> None:
     if "probe_dims_mode.w == 0u" not in compute_base:
         raise AssertionError("reference full-transport mode does not disable secondary probe reuse")
 
+    for needle in (
+        "direct_sun_visibility(",
+        "encoded_visibility",
+        "float4(indirect.rgb + direct.rgb, direct.a)",
+    ):
+        if needle not in compute_base:
+            raise AssertionError(f"explicit baked sun visibility missing: {needle}")
+
+    if "baked_luma * 0.55f" in fragment:
+        raise AssertionError("brightness-derived sun visibility heuristic must not return")
+    if "baked_sample.a - visibility_floor" not in fragment:
+        raise AssertionError("surface shader does not consume explicit sun visibility")
+
     bake = text("bake.c")
     for needle in ("job->scene = &scene->static_geometry;", "job->visual = &scene->static_visual;", "job->layout = scene->lightmap;"):
         if needle not in bake:
