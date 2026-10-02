@@ -529,15 +529,36 @@ def main() -> None:
             raise AssertionError(f"dynamic lighting debug visualization missing: {needle}")
 
     for needle in (
-        "signed_dynamic_near_field(",
-        "projected_area",
-        "surface_probe_irradiance(closest, object_normal)",
-        "outgoing - baseline",
-        "dynamic_flags.z > 0.5f",
-        "baked + signed_dynamic_near_field(input.world_position, geometric_normal)",
+        "DYNAMIC_EMISSIVE_SAMPLES_PER_OBJECT 4u",
+        "dynamic_emissive_samples(",
+        "dynamic_emissive_sample_position",
+        "dynamic_emissive_sample_power",
+        "dynamic_instance_inverse",
+        "dynamic_instance_meta",
+        "src, 20",
+    ):
+        if needle not in render:
+            raise AssertionError(f"geometry-backed dynamic emissive receiver data missing: {needle}")
+
+    for needle in (
+        "StructuredBuffer<BvhNode> DynamicNodes",
+        "StructuredBuffer<BvhTriangle> DynamicTriangles",
+        "dynamic_instance_occluded(",
+        "dynamic_geometry_occluded(",
+        "dynamic_emissive_direct(",
+        "if (emissive_luma > 1.0e-6f) continue",
+        "baked + dynamic_correction",
+        "dynamic_correction = dynamic_emissive_direct(input.world_position, geometric_normal)",
     ):
         if needle not in fragment:
-            raise AssertionError(f"signed static receiver correction missing: {needle}")
+            raise AssertionError(f"geometry-backed dynamic emissive receiver lighting missing: {needle}")
+
+    for forbidden in (
+        "signed_dynamic_near_field(",
+        "outgoing - baseline",
+    ):
+        if forbidden in fragment:
+            raise AssertionError(f"proxy receiver subtraction regression returned: {forbidden}")
 
     compute = text("shaders/compute.hlsl")
     for needle in (
