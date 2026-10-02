@@ -421,7 +421,9 @@ float3 trace_static_indirect(float3 position, float3 normal, uint sample_id) {
     float epsilon = max(trace_params.x, 1.0e-5f);
 
     [loop] for (uint ray_index = 0u; ray_index < DYNAMIC_RAYS_PER_SAMPLE; ++ray_index) {
-        uint seed = hash_u32((sample_id + 1u) * 0x9e3779b9u ^ (ray_index + 1u) * 0x85ebca6bu);
+        uint pass_index = (uint)max(trace_params.w, 0.0f);
+        uint seed = hash_u32((sample_id + 1u) * 0x9e3779b9u ^ (ray_index + 1u) * 0x85ebca6bu ^
+                             (pass_index + 1u) * 0xc2b2ae35u);
         float3 direction = cosine_hemisphere(normal, seed);
         TraceRay ray;
         ray.origin = position + normal * epsilon;
@@ -551,7 +553,10 @@ void dynamic_surface_cs(uint3 id : SV_DispatchThreadID) {
     float visibility_floor = max(sun_color_visibility_floor.w, 1.0f / 65504.0f);
     float encoded_visibility = visibility_floor + visibility * (1.0f - visibility_floor);
 
-    Output[uint2(pixel % texture_width, pixel / texture_width)] = float4(max(indirect + direct, 0.0f), encoded_visibility);
+    uint2 output_pixel = uint2(pixel % texture_width, pixel / texture_width);
+    float4 current = float4(max(indirect + direct, 0.0f), encoded_visibility);
+    float blend = saturate(trace_params.z);
+    Output[output_pixel] = lerp(Output[output_pixel], current, blend);
 }
 
 #endif
