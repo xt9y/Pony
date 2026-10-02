@@ -15,6 +15,7 @@
 #define DYNAMIC_INFLUENCE_LIMIT 8u
 #define DYNAMIC_TRACE_INSTANCE_LIMIT 8u
 #define DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u
+#define DYNAMIC_SURFACE_CONVERGENCE_PASSES 4u
 #define DYNAMIC_SHADOW_SIZE 2048u
 #define DYNAMIC_TIMESTAMP_BASE 8u
 #define DYNAMIC_TIMESTAMP_STRIDE 4u
@@ -447,6 +448,7 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     uint32_t pending_lighting_revision;
     uint32_t pending_scene_lighting_revision;
     uint32_t sample_cursor;
+    uint32_t sample_pass;
     bool cache_needs_clear;
 };
 
@@ -1881,10 +1883,12 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
             allocation->pending_lighting_revision = object->lighting_revision;
             allocation->pending_scene_lighting_revision = r->scene->lighting_revision;
             allocation->sample_cursor = 0u;
+            allocation->sample_pass = 0u;
             allocation->cache_needs_clear = true;
         }
 
-        if (allocation->cache_needs_clear || allocation->sample_cursor < allocation->layout->sample_count ||
+        if (allocation->cache_needs_clear || allocation->sample_pass < DYNAMIC_SURFACE_CONVERGENCE_PASSES ||
+            allocation->sample_cursor < allocation->layout->sample_count ||
             allocation->transform_revision != object->transform_revision || allocation->lighting_revision != object->lighting_revision ||
             allocation->scene_lighting_revision != r->scene->lighting_revision)
             ++dirty_count;
@@ -1900,8 +1904,9 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
         if (!object) return false;
 
         const uint32_t total = allocation->layout->sample_count;
-        if (!allocation->cache_needs_clear && allocation->sample_cursor >= total &&
-            allocation->transform_revision == object->transform_revision && allocation->lighting_revision == object->lighting_revision &&
+        if (!allocation->cache_needs_clear && allocation->sample_pass >= DYNAMIC_SURFACE_CONVERGENCE_PASSES &&
+            allocation->sample_cursor >= total && allocation->transform_revision == object->transform_revision &&
+            allocation->lighting_revision == object->lighting_revision &&
             allocation->scene_lighting_revision == r->scene->lighting_revision)
             continue;
         if (allocation->sample_cursor > total) allocation->sample_cursor = 0u;
@@ -1925,7 +1930,8 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
             .sun_color_visibility_floor = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, 1.0f / 1024.0f},
             .sky_zenith = {frame->sky.zenith.x, frame->sky.zenith.y, frame->sky.zenith.z, frame->sky.intensity},
             .sky_horizon = {frame->sky.horizon.x, frame->sky.horizon.y, frame->sky.horizon.z, 1.0f},
-            .trace_params = {fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f), 0.0f, 0.0f, 0.0f},
+            .trace_params = {fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f), 0.0f,
+                             1.0f / (float)(allocation->sample_pass + 1u), (float)allocation->sample_pass},
         };
 
         memcpy(uniforms.model, model.m, sizeof(uniforms.model));
@@ -1956,6 +1962,7 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
             allocation->transform_revision = object->transform_revision;
             allocation->lighting_revision = object->lighting_revision;
             allocation->scene_lighting_revision = r->scene->lighting_revision;
+            allocation->sample_pass = 0u;
         }
 
         if (count) {
@@ -1969,6 +1976,15 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
 
             allocation->sample_cursor += count;
             budget -= count;
+        }
+
+        if (allocation->sample_cursor >= total && total) {
+            allocation->sample_pass++;
+
+            if (allocation->sample_pass < DYNAMIC_SURFACE_CONVERGENCE_PASSES)
+                allocation->sample_cursor = 0u;
+            else
+                allocation->sample_cursor = total;
         }
 
         if (!gpu_transition_texture(r, cmd, allocation->texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
@@ -2809,6 +2825,7 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         allocation->pending_lighting_revision = 0u;
         allocation->pending_scene_lighting_revision = 0u;
         allocation->sample_cursor = 0u;
+        allocation->sample_pass = 0u;
         allocation->cache_needs_clear = true;
 
         allocation->texture =
