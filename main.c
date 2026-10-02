@@ -67,11 +67,11 @@ static int extra_model_start(int argc, char **argv) {
     return argc > 1 ? 1 : argc;
 }
 
-static bool load_scene_model(SCENE *scene, MODEL_ASSET *asset, const char *path, TRANSFORM transform, size_t *total_bin_size) {
+static bool load_scene_model(SCENE *scene, MODEL_ASSET *asset, const char *path, OBJECT_STATE state, TRANSFORM transform, size_t *total_bin_size) {
     if (!scene || !asset || !path) return false;
     if (!model_load(asset, path)) return false;
 
-    if (!scene_add_model(scene, &asset->model, STATIC, transform)) {
+    if (!scene_add_model(scene, &asset->model, state, transform)) {
         SDL_SetError("could not add %s to scene", path);
         return false;
     }
@@ -179,17 +179,23 @@ int main(int argc, char **argv) {
     TRANSFORM transform = barn_lamp;
     // TRANSFORM transform = cornell;
 
-    if (!load_scene_model(&scene, &models[0], BASE_MODEL_PATH, transform_identity(), &total_bin_size)) {
+    if (!load_scene_model(&scene, &models[0], BASE_MODEL_PATH, STATIC, transform_identity(), &total_bin_size)) {
         startup_stage = "base model load";
         startup_detail = SDL_GetError();
     }
 
     for (int i = 0; i < extra_model_count && !startup_stage; ++i) {
         const char *path = argv[extra_start + i];
+        OBJECT_STATE state = STATIC;
 
-        SDL_Log("loading extra model %d/%d: %s", i + 1, extra_model_count, path);
+        if (strncmp(path, "dynamic:", 8u) == 0) {
+            state = DYNAMIC;
+            path += 8u;
+        }
 
-        if (!load_scene_model(&scene, &models[i + 1], path, transform, &total_bin_size)) {
+        SDL_Log("loading extra model %d/%d: %s%s", i + 1, extra_model_count, state == DYNAMIC ? "DYNAMIC " : "", path);
+
+        if (!load_scene_model(&scene, &models[i + 1], path, state, transform, &total_bin_size)) {
             startup_stage = "extra model load";
             startup_detail = SDL_GetError();
         }
@@ -280,7 +286,7 @@ int main(int argc, char **argv) {
            lightmap.chart_count, lightmap.texel_density, lightmap.sample_count);
     printf("Lighting: %s. Press B to rebake this scene in the renderer.\n", cached ? "loaded saved bake" : "unbaked fallback");
     printf("Runtime: PBR + sun beams + volume probes -> HDR -> bloom -> ACES + GPU LUT\n");
-    printf("Extra models: pass them after -- | LMB drag: orbit | wheel: zoom | B: rebake | F5: fog on/off | Tab: wireframe | F11: fullscreen | Esc: quit\n");
+    printf("Extra models: pass after --; prefix with dynamic: for realtime lighting | arrows: move first dynamic model | LMB drag: orbit | wheel: zoom | B: rebake | F2: reference lighting | F5: fog on/off | Tab: wireframe | F11: fullscreen | Esc: quit\n");
 
     bool running = true;
     Uint64 last_frame_print = SDL_GetTicks();
@@ -303,6 +309,33 @@ int main(int argc, char **argv) {
                     if (!bake_start(&renderer, &scene, bake_path, scene_hash, layout_hash, volume_hash, beam_hash)) {
                         SDL_Log("B: could not start rebake: %s", *SDL_GetError() ? SDL_GetError() : "unknown error");
                     }
+                }
+
+                OBJECT *dynamic = NULL;
+
+                for (uint32_t i = 0; i < scene.object_count; ++i) {
+                    if (scene.objects[i].type == MODEL && scene.objects[i].state == DYNAMIC) {
+                        dynamic = &scene.objects[i];
+                        break;
+                    }
+                }
+
+                if (dynamic) {
+                    TRANSFORM moved = dynamic->transform;
+                    bool changed = true;
+
+                    if (event.key.key == SDLK_LEFT)
+                        moved.position.x -= 0.25f;
+                    else if (event.key.key == SDLK_RIGHT)
+                        moved.position.x += 0.25f;
+                    else if (event.key.key == SDLK_UP)
+                        moved.position.z -= 0.25f;
+                    else if (event.key.key == SDLK_DOWN)
+                        moved.position.z += 0.25f;
+                    else
+                        changed = false;
+
+                    if (changed) object_set_transform(dynamic, moved);
                 }
             }
 
