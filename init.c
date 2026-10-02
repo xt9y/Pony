@@ -80,6 +80,12 @@ bool model_load(MODEL_ASSET *asset, const char *path) {
 void model_free(MODEL_ASSET *asset) {
     if (!asset) return;
 
+    if (asset->model.surface_layout) {
+        lmap_free(asset->model.surface_layout);
+        free(asset->model.surface_layout);
+        asset->model.surface_layout = NULL;
+    }
+
     gltf_free(&asset->visual);
     mesh_free(&asset->geometry);
     glb_free(&asset->document);

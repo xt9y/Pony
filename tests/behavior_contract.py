@@ -270,10 +270,18 @@ def main() -> None:
             raise AssertionError(f"multi-model main path missing: {needle}")
 
     render = text("render.c")
-    if "renderer_build_scene(renderer, &scene->geometry, &scene->visual, scene->lightmap)" not in render:
-        raise AssertionError("renderer does not consume compiled multi-model scene")
+    for needle in (
+        "renderer_build_scene(renderer, scene, scene->lightmap)",
+        "model_surface_layout(",
+        "renderer_allocate_dynamic_lighting(",
+        "camera_uniforms_for_draw(",
+        "dynamic_lighting_find(",
+        "draw->object_id",
+    ):
+        if needle not in render:
+            raise AssertionError(f"instance-aware renderer path missing: {needle}")
 
-    for needle in ("MESH static_geometry;", "GLTF_SCENE static_visual;", "OBJECT_ID id;", "transform_revision", "lighting_revision"):
+    for needle in ("MESH static_geometry;", "GLTF_SCENE static_visual;", "OBJECT_ID id;", "transform_revision", "lighting_revision", "LIGHTMAP *surface_layout;", "OBJECT_ID object_id;"):
         if needle not in game:
             raise AssertionError(f"dynamic-lighting scene contract missing: {needle}")
 

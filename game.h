@@ -186,6 +186,12 @@ typedef enum OBJECT_TYPE { MODEL, LIGHT } OBJECT_TYPE;
 struct MODEL {
     MESH *geometry;
     GLTF_SCENE *visual;
+
+    /*
+     * Reusable object-space surface parameterization. Multiple instances share
+     * this layout, but each DYNAMIC OBJECT owns a separate lighting cache.
+     */
+    LIGHTMAP *surface_layout;
 };
 
 typedef struct MODEL_ASSET {
@@ -434,6 +440,7 @@ void cache_free(CACHED_LIGHTMAP *data);
 
 typedef struct PROBE_WAVEFRONT_SCRATCH PROBE_WAVEFRONT_SCRATCH;
 typedef struct RENDER_MATERIAL RENDER_MATERIAL;
+typedef struct DYNAMIC_LIGHTING_ALLOCATION DYNAMIC_LIGHTING_ALLOCATION;
 
 typedef struct FX_STATE {
     RENDERER *owner;
@@ -472,6 +479,7 @@ typedef struct DRAW_RANGE {
     uint32_t first;
     uint32_t count;
     uint32_t material;
+    OBJECT_ID object_id;
     VEC3 center;
 } DRAW_RANGE;
 
@@ -558,6 +566,9 @@ struct RENDERER {
     uint32_t draw_count;
     DRAW_RANGE *transmission_draws;
     uint32_t transmission_draw_count;
+
+    DYNAMIC_LIGHTING_ALLOCATION *dynamic_lighting;
+    uint32_t dynamic_lighting_count;
 
     RENDER_VERTEX *vertices;
     uint32_t vertex_count;

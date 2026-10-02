@@ -8,6 +8,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define DYNAMIC_LIGHTING_TEXELS_PER_UNIT 24u
+#define DYNAMIC_LIGHTING_MAX_SIZE 4096u
+
 typedef struct MAT4 {
     float m[16];
 } MAT4;
@@ -63,6 +66,55 @@ static MAT4 m4_mul(MAT4 a, MAT4 b) {
     }
 
     return result;
+}
+
+static MAT4 m4_transform(TRANSFORM transform, bool normal_matrix) {
+    const float qx = transform.rotation[0];
+    const float qy = transform.rotation[1];
+    const float qz = transform.rotation[2];
+    const float qw = transform.rotation[3];
+    const float qn = sqrtf(qx * qx + qy * qy + qz * qz + qw * qw);
+    const float x = qn > FLT_EPSILON ? qx / qn : 0.0f;
+    const float y = qn > FLT_EPSILON ? qy / qn : 0.0f;
+    const float z = qn > FLT_EPSILON ? qz / qn : 0.0f;
+    const float w = qn > FLT_EPSILON ? qw / qn : 1.0f;
+
+    float sx = transform.scale.x;
+    float sy = transform.scale.y;
+    float sz = transform.scale.z;
+
+    if (normal_matrix) {
+        sx = fabsf(sx) > FLT_EPSILON ? 1.0f / sx : 0.0f;
+        sy = fabsf(sy) > FLT_EPSILON ? 1.0f / sy : 0.0f;
+        sz = fabsf(sz) > FLT_EPSILON ? 1.0f / sz : 0.0f;
+    }
+
+    MAT4 result = m4_identity();
+    result.m[0] = (1.0f - 2.0f * (y * y + z * z)) * sx;
+    result.m[1] = (2.0f * (x * y + w * z)) * sx;
+    result.m[2] = (2.0f * (x * z - w * y)) * sx;
+
+    result.m[4] = (2.0f * (x * y - w * z)) * sy;
+    result.m[5] = (1.0f - 2.0f * (x * x + z * z)) * sy;
+    result.m[6] = (2.0f * (y * z + w * x)) * sy;
+
+    result.m[8] = (2.0f * (x * z + w * y)) * sz;
+    result.m[9] = (2.0f * (y * z - w * x)) * sz;
+    result.m[10] = (1.0f - 2.0f * (x * x + y * y)) * sz;
+
+    if (!normal_matrix) {
+        result.m[12] = transform.position.x;
+        result.m[13] = transform.position.y;
+        result.m[14] = transform.position.z;
+    }
+
+    return result;
+}
+
+static VEC3 m4_point(MAT4 matrix, VEC3 p) {
+    return v3(matrix.m[0] * p.x + matrix.m[4] * p.y + matrix.m[8] * p.z + matrix.m[12],
+              matrix.m[1] * p.x + matrix.m[5] * p.y + matrix.m[9] * p.z + matrix.m[13],
+              matrix.m[2] * p.x + matrix.m[6] * p.y + matrix.m[10] * p.z + matrix.m[14]);
 }
 
 static MAT4 m4_perspective(float fov_y, float aspect, float znear, float zfar) {
@@ -206,6 +258,8 @@ static bool make_probe_grid(const MESH *mesh, float spacing, PROBE_GRID *grid) {
 typedef struct CAMERA_UNIFORMS {
     float mvp[16];
     float view[16];
+    float model[16];
+    float normal_model[16];
 } CAMERA_UNIFORMS;
 
 typedef struct SKY_UNIFORMS {
@@ -271,6 +325,14 @@ typedef struct VOLUME_COMPOSE_UNIFORMS {
     float volume_filter[4];
     Uint32 volume_strides[4];
 } VOLUME_COMPOSE_UNIFORMS;
+
+struct DYNAMIC_LIGHTING_ALLOCATION {
+    OBJECT_ID object_id;
+    const LIGHTMAP *layout;
+    NriTexture *texture;
+    uint32_t transform_revision;
+    uint32_t lighting_revision;
+};
 
 struct RENDER_MATERIAL {
     GLTF_MATERIAL data;
@@ -769,8 +831,30 @@ static NriTexture *resolve_texture(RENDERER *r, const GLTF_SCENE *visual, int32_
     return r->image_textures[image];
 }
 
+static void release_dynamic_lighting(RENDERER *r) {
+    if (!r) return;
+
+    for (uint32_t i = 0; i < r->dynamic_lighting_count; ++i)
+        release_texture(r, r->dynamic_lighting[i].texture);
+
+    free(r->dynamic_lighting);
+    r->dynamic_lighting = NULL;
+    r->dynamic_lighting_count = 0u;
+}
+
+static DYNAMIC_LIGHTING_ALLOCATION *dynamic_lighting_find(RENDERER *r, OBJECT_ID object_id) {
+    if (!r || !object_id) return NULL;
+
+    for (uint32_t i = 0; i < r->dynamic_lighting_count; ++i)
+        if (r->dynamic_lighting[i].object_id == object_id) return &r->dynamic_lighting[i];
+
+    return NULL;
+}
+
 static void release_scene_resources(RENDERER *r) {
     if (!r || !r->gpu->device) return;
+
+    release_dynamic_lighting(r);
 
     if (r->image_textures) {
         for (uint32_t i = 0; i < r->image_texture_count; ++i) release_texture(r, r->image_textures[i]);
@@ -1272,18 +1356,25 @@ static bool material_transmissive(const RENDER_MATERIAL *material) {
     return material && material->data.transmission_factor > 0.0f;
 }
 
-static float draw_distance_sq(const DRAW_RANGE *draw, VEC3 eye) {
-    VEC3 delta = v3_sub(draw->center, eye);
+static VEC3 draw_world_center(const RENDERER *r, const DRAW_RANGE *draw) {
+    if (!r || !draw || !draw->object_id || !r->scene) return draw ? draw->center : v3(0.0f, 0.0f, 0.0f);
+
+    const OBJECT *object = scene_object_by_id_const(r->scene, draw->object_id);
+    return object ? m4_point(m4_transform(object->transform, false), draw->center) : draw->center;
+}
+
+static float draw_distance_sq(const RENDERER *r, const DRAW_RANGE *draw, VEC3 eye) {
+    VEC3 delta = v3_sub(draw_world_center(r, draw), eye);
     return v3_len_sq(delta);
 }
 
 static void sort_transmission_draws(RENDERER *r, VEC3 eye) {
     for (uint32_t i = 1; i < r->transmission_draw_count; ++i) {
         DRAW_RANGE value = r->transmission_draws[i];
-        float distance = draw_distance_sq(&value, eye);
+        float distance = draw_distance_sq(r, &value, eye);
         uint32_t j = i;
 
-        while (j > 0 && draw_distance_sq(&r->transmission_draws[j - 1u], eye) < distance) {
+        while (j > 0 && draw_distance_sq(r, &r->transmission_draws[j - 1u], eye) < distance) {
             r->transmission_draws[j] = r->transmission_draws[j - 1u];
             --j;
         }
@@ -1331,12 +1422,42 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
         .sky_horizon = {frame->sky.horizon.x, frame->sky.horizon.y, frame->sky.horizon.z, 1.0f}};
 }
 
+static CAMERA_UNIFORMS camera_uniforms_for_draw(const RENDERER *r, const RENDER_FRAME *frame, const DRAW_RANGE *draw) {
+    CAMERA_UNIFORMS camera = {0};
+    MAT4 model = m4_identity();
+    MAT4 normal_model = m4_identity();
+
+    memcpy(camera.mvp, frame->mvp, sizeof(camera.mvp));
+    memcpy(camera.view, frame->view, sizeof(camera.view));
+
+    if (r && r->scene && draw && draw->object_id) {
+        const OBJECT *object = scene_object_by_id_const(r->scene, draw->object_id);
+
+        if (object) {
+            model = m4_transform(object->transform, false);
+            normal_model = m4_transform(object->transform, true);
+        }
+    }
+
+    memcpy(camera.model, model.m, sizeof(camera.model));
+    memcpy(camera.normal_model, normal_model.m, sizeof(camera.normal_model));
+    return camera;
+}
+
 static bool draw_surface_range(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame, const DRAW_RANGE *draw, NriTexture *scene_color,
                                NriDescriptor *scene_sampler) {
     const RENDER_MATERIAL *material = &r->materials[draw->material];
     const MATERIAL_UNIFORMS uniforms = material_uniforms(r, material, frame);
+    const CAMERA_UNIFORMS camera = camera_uniforms_for_draw(r, frame, draw);
+    NriTexture *lighting = r->lightmap_texture;
 
-    if (!bind_surface_resources(r, cmd, material, r->lightmap_texture, scene_color, r->material_sampler, r->lightmap_sampler, scene_sampler, &uniforms,
+    if (draw->object_id) {
+        DYNAMIC_LIGHTING_ALLOCATION *allocation = dynamic_lighting_find(r, draw->object_id);
+        if (allocation && allocation->texture) lighting = allocation->texture;
+    }
+
+    if (!bind_camera_resources(r, cmd, &camera, sizeof(camera)) ||
+        !bind_surface_resources(r, cmd, material, lighting, scene_color, r->material_sampler, r->lightmap_sampler, scene_sampler, &uniforms,
                                 sizeof(uniforms)))
         return false;
 
@@ -1370,6 +1491,9 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
 
     memcpy(camera.mvp, frame->mvp, sizeof(camera.mvp));
     memcpy(camera.view, frame->view, sizeof(camera.view));
+    MAT4 identity = m4_identity();
+    memcpy(camera.model, identity.m, sizeof(camera.model));
+    memcpy(camera.normal_model, identity.m, sizeof(camera.normal_model));
 
     const SKY_UNIFORMS sky = {.camera_right = {frame->right.x * frame->tan_half_fov * frame->aspect, frame->right.y * frame->tan_half_fov * frame->aspect,
                                                frame->right.z * frame->tan_half_fov * frame->aspect, 0},
@@ -1389,8 +1513,6 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     const NriVertexBufferDesc vertex = {.buffer = r->vertex_buffer, .offset = 0, .stride = sizeof(RENDER_VERTEX)};
     r->gpu->core.CmdSetVertexBuffers(cmd, 0, &vertex, 1);
     r->gpu->core.CmdSetPipeline(cmd, r->solid_pipeline);
-
-    if (!bind_camera_resources(r, cmd, &camera, sizeof(camera))) goto failed_frame;
 
     for (uint32_t i = 0; i < r->draw_count; ++i) {
         const DRAW_RANGE *draw = &r->draws[i];
@@ -1416,8 +1538,6 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
 
         r->gpu->core.CmdSetVertexBuffers(cmd, 0, &vertex, 1);
         r->gpu->core.CmdSetPipeline(cmd, r->transmission_pipeline);
-
-        if (!bind_camera_resources(r, cmd, &camera, sizeof(camera))) goto failed_frame;
 
         sort_transmission_draws(r, frame->eye);
 
@@ -1464,6 +1584,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
     free(r->vertices);
     free(r->draws);
     free(r->transmission_draws);
+    release_dynamic_lighting(r);
     free_probe_grid(&r->volume_probes);
     beam_free(&r->beams);
 
@@ -1751,12 +1872,74 @@ bool renderer_rebake_current_scene(RENDERER *renderer, const MESH *mesh, const G
     return good;
 }
 
-static bool renderer_build_scene(RENDERER *renderer, const MESH *mesh, const GLTF_SCENE *visual, const LIGHTMAP *lightmap) {
-    if (!renderer || !mesh || !visual || !lightmap || !visual->vertex_count || visual->vertex_count % 3u || visual->vertex_count / 3u != mesh->faces.count ||
-        !visual->material_count || !lightmap->uvs) {
-        SDL_Log("render/lightmap geometry mismatch");
+static bool model_surface_layout(struct MODEL *model) {
+    if (!model || !model->geometry || !model->visual) return false;
+    if (model->surface_layout) return true;
+
+    model->surface_layout = calloc(1, sizeof(*model->surface_layout));
+    if (!model->surface_layout) return false;
+
+    if (!lmap_build(model->surface_layout, model->geometry, DYNAMIC_LIGHTING_TEXELS_PER_UNIT, DYNAMIC_LIGHTING_MAX_SIZE)) {
+        free(model->surface_layout);
+        model->surface_layout = NULL;
         return false;
     }
+
+    return true;
+}
+
+static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene) {
+    uint32_t count = 0u;
+
+    for (uint32_t i = 0; i < scene->object_count; ++i)
+        if (scene->objects[i].type == MODEL && scene->objects[i].state == DYNAMIC && scene->objects[i].data) ++count;
+
+    if (!count) return true;
+
+    renderer->dynamic_lighting = calloc(count, sizeof(*renderer->dynamic_lighting));
+    if (!renderer->dynamic_lighting) return false;
+
+    for (uint32_t i = 0, out = 0; i < scene->object_count; ++i) {
+        OBJECT *object = &scene->objects[i];
+
+        if (object->type != MODEL || object->state != DYNAMIC || !object->data) continue;
+
+        struct MODEL *model = object->data;
+
+        if (!model_surface_layout(model)) {
+            release_dynamic_lighting(renderer);
+            return false;
+        }
+
+        DYNAMIC_LIGHTING_ALLOCATION *allocation = &renderer->dynamic_lighting[out++];
+        allocation->object_id = object->id;
+        allocation->layout = model->surface_layout;
+        allocation->transform_revision = 0u;
+        allocation->lighting_revision = 0u;
+        allocation->texture = pixel_texture(renderer, 0, 0, 0, 255);
+
+        if (!allocation->texture) {
+            renderer->dynamic_lighting_count = out;
+            release_dynamic_lighting(renderer);
+            return false;
+        }
+
+        renderer->dynamic_lighting_count = out;
+    }
+
+    return renderer->dynamic_lighting_count == count;
+}
+
+static bool renderer_build_scene(RENDERER *renderer, SCENE *scene, const LIGHTMAP *lightmap) {
+    if (!renderer || !scene || !lightmap || !scene->static_visual.vertex_count || scene->static_visual.vertex_count % 3u ||
+        scene->static_visual.vertex_count / 3u != scene->static_geometry.faces.count || !scene->visual.material_count || !lightmap->uvs) {
+        SDL_Log("render/static-lightmap geometry mismatch");
+        return false;
+    }
+
+    const MESH *mesh = &scene->geometry;
+    const GLTF_SCENE *visual = &scene->visual;
+    const GLTF_SCENE *static_visual = &scene->static_visual;
 
     renderer->target = mesh->bounds.center;
     renderer->scene_radius = fmaxf(mesh->bounds.extents.x, fmaxf(mesh->bounds.extents.y, mesh->bounds.extents.z));
@@ -1765,23 +1948,35 @@ static bool renderer_build_scene(RENDERER *renderer, const MESH *mesh, const GLT
 
     renderer->distance = renderer->scene_radius * 2.15f;
 
+    uint32_t draw_capacity = visual->material_count;
+
+    for (uint32_t i = 0; i < scene->object_count; ++i) {
+        const OBJECT *object = &scene->objects[i];
+
+        if (object->type != MODEL || object->state != DYNAMIC || !object->data) continue;
+
+        const struct MODEL *model = object->data;
+        if (UINT32_MAX - draw_capacity < model->visual->material_count) return false;
+        draw_capacity += model->visual->material_count;
+    }
+
     free(renderer->draws);
-    renderer->draws = calloc(visual->material_count, sizeof(*renderer->draws));
+    renderer->draws = calloc(draw_capacity ? draw_capacity : 1u, sizeof(*renderer->draws));
 
     if (!renderer->draws) return false;
 
     renderer->draw_count = 0;
     renderer->vertex_count = 0;
 
-    const size_t triangle_count = visual->vertex_count / 3u;
+    const size_t static_triangle_count = static_visual->vertex_count / 3u;
 
-    for (uint32_t material = 0; material < visual->material_count; ++material) {
+    for (uint32_t material = 0; material < static_visual->material_count; ++material) {
         const uint32_t first = renderer->vertex_count;
         VEC3 center = v3(0.0f, 0.0f, 0.0f);
-        uint32_t center_count = 0;
+        uint32_t center_count = 0u;
 
-        for (size_t triangle = 0; triangle < triangle_count; ++triangle) {
-            const GLTF_VERTEX *vertices = &visual->vertices[triangle * 3u];
+        for (size_t triangle = 0; triangle < static_triangle_count; ++triangle) {
+            const GLTF_VERTEX *vertices = &static_visual->vertices[triangle * 3u];
 
             if (vertices[0].material != material) continue;
 
@@ -1798,7 +1993,54 @@ static bool renderer_build_scene(RENDERER *renderer, const MESH *mesh, const GLT
 
         if (count) {
             renderer->draws[renderer->draw_count++] =
-                (DRAW_RANGE){.first = first, .count = count, .material = material, .center = v3_scale(center, 1.0f / (float)center_count)};
+                (DRAW_RANGE){.first = first, .count = count, .material = material, .object_id = 0, .center = v3_scale(center, 1.0f / (float)center_count)};
+        }
+    }
+
+    for (uint32_t object_index = 0; object_index < scene->object_count; ++object_index) {
+        OBJECT *object = &scene->objects[object_index];
+
+        if (object->type != MODEL || object->state != DYNAMIC || !object->data) continue;
+
+        struct MODEL *model = object->data;
+
+        if (!model_surface_layout(model)) return false;
+
+        const LIGHTMAP *layout = model->surface_layout;
+        const size_t triangle_count = model->visual->vertex_count / 3u;
+
+        if (!layout->uvs || triangle_count != model->geometry->faces.count) return false;
+
+        for (uint32_t local_material = 0; local_material < model->visual->material_count; ++local_material) {
+            const uint32_t first = renderer->vertex_count;
+            VEC3 center = v3(0.0f, 0.0f, 0.0f);
+            uint32_t center_count = 0u;
+
+            for (size_t triangle = 0; triangle < triangle_count; ++triangle) {
+                const GLTF_VERTEX *vertices = &model->visual->vertices[triangle * 3u];
+
+                if (vertices[0].material != local_material) continue;
+
+                const LMAP_UV *uv = &layout->uvs[triangle * 6u];
+
+                if (!push_surface(renderer, &vertices[0], uv[0]) || !push_surface(renderer, &vertices[1], uv[1]) || !push_surface(renderer, &vertices[2], uv[2]))
+                    return false;
+
+                center = v3_add(center, v3_add(v3_add(vertices[0].position, vertices[1].position), vertices[2].position));
+                center_count += 3u;
+            }
+
+            const uint32_t count = renderer->vertex_count - first;
+
+            if (count) {
+                const uint32_t material = object->material_offset + local_material;
+
+                if (material >= visual->material_count) return false;
+
+                renderer->draws[renderer->draw_count++] =
+                    (DRAW_RANGE){.first = first, .count = count, .material = material, .object_id = object->id,
+                                 .center = v3_scale(center, 1.0f / (float)center_count)};
+            }
         }
     }
 
@@ -1806,18 +2048,19 @@ static bool renderer_build_scene(RENDERER *renderer, const MESH *mesh, const GLT
 
     const COLOR4 wire = {0.18f, 0.95f, 0.24f, 1.0f};
 
-    for (size_t triangle = 0; triangle < triangle_count; ++triangle) {
-        const GLTF_VERTEX *vertices = &visual->vertices[triangle * 3u];
+    for (size_t triangle = 0; triangle < static_triangle_count; ++triangle) {
+        const GLTF_VERTEX *vertices = &static_visual->vertices[triangle * 3u];
 
         if (!add_wire_triangle(renderer, vertices[0].position, vertices[1].position, vertices[2].position, wire)) return false;
     }
 
     renderer->debug_vertex_count = renderer->vertex_count - renderer->debug_vertex_start;
 
-    if (!upload_scene(renderer, visual) || !build_transmission_draws(renderer)) return false;
+    if (!upload_scene(renderer, visual) || !renderer_allocate_dynamic_lighting(renderer, scene) || !build_transmission_draws(renderer)) return false;
 
     renderer->has_bake = false;
-    SDL_Log("materials: %u | material draw ranges: %u | embedded images: %u", renderer->material_count, renderer->draw_count, renderer->image_texture_count);
+    SDL_Log("materials: %u | draw ranges: %u | dynamic lighting allocations: %u | embedded images: %u", renderer->material_count, renderer->draw_count,
+            renderer->dynamic_lighting_count, renderer->image_texture_count);
 
     return true;
 }
@@ -1955,9 +2198,13 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
         return false;
     }
 
-    if (!renderer_build_scene(renderer, &scene->geometry, &scene->visual, scene->lightmap)) return false;
-
     renderer->scene = scene;
+
+    if (!renderer_build_scene(renderer, scene, scene->lightmap)) {
+        renderer->scene = NULL;
+        return false;
+    }
+
     scene->radius = renderer->scene_radius;
 
     return true;
@@ -1969,6 +2216,17 @@ void renderer_event(RENDERER *renderer, const SDL_Event *event) {
 
 bool renderer_frame(RENDERER *renderer) {
     if (!renderer || !renderer->scene) return false;
+
+    if (!renderer->scene->lightmap_valid) {
+        SDL_SetError("static scene lightmap is stale; rebuild it before rendering");
+        return false;
+    }
+
+    /*
+     * A DYNAMIC transform dirties only the current CPU trace view. GPU vertices
+     * stay object-space and consume the live instance transform below.
+     */
+    if (!scene_compile(renderer->scene)) return false;
 
     struct LIGHT *light = scene_directional_light(renderer->scene);
 
