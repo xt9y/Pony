@@ -1947,6 +1947,135 @@ static uint32_t dynamic_trace_instances(const RENDERER *r, DYNAMIC_SURFACE_UNIFO
     return count;
 }
 
+static uint32_t dynamic_receiver_instances(const RENDERER *r, DYNAMIC_RECEIVER_UNIFORMS *uniforms) {
+    if (!r || !r->scene || !uniforms) return 0u;
+
+    uint32_t count = 0u;
+    float cumulative_weight = 0.0f;
+
+    for (uint32_t i = 0; i < r->dynamic_lighting_count && count < DYNAMIC_TRACE_INSTANCE_LIMIT; ++i) {
+        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        const OBJECT *object = scene_object_by_id_const(r->scene, allocation->object_id);
+
+        if (!object || object->state != DYNAMIC || object->type != MODEL ||
+            !allocation->dynamic_node_count || !allocation->dynamic_triangle_count)
+            continue;
+
+        const MAT4 model = m4_transform(object->transform, false);
+        const MAT4 inverse = m4_inverse_transform(object->transform);
+
+        memcpy(uniforms->dynamic_instance_model[count], model.m, sizeof(model.m));
+        memcpy(uniforms->dynamic_instance_inverse[count], inverse.m, sizeof(inverse.m));
+
+        uniforms->dynamic_instance_meta[count][0] = allocation->dynamic_node_offset;
+        uniforms->dynamic_instance_meta[count][1] = allocation->dynamic_node_count;
+        uniforms->dynamic_instance_meta[count][2] = allocation->dynamic_triangle_offset;
+        uniforms->dynamic_instance_meta[count][3] = allocation->dynamic_triangle_count;
+
+        const float scale_x = sqrtf(model.m[0] * model.m[0] + model.m[1] * model.m[1] + model.m[2] * model.m[2]);
+        const float scale_y = sqrtf(model.m[4] * model.m[4] + model.m[5] * model.m[5] + model.m[6] * model.m[6]);
+        const float scale_z = sqrtf(model.m[8] * model.m[8] + model.m[9] * model.m[9] + model.m[10] * model.m[10]);
+        const float area_scale = fmaxf((scale_x * scale_y + scale_x * scale_z + scale_y * scale_z) / 3.0f, 1.0e-8f);
+        const float world_weight = fmaxf(allocation->emissive_weight, 0.0f) * area_scale;
+
+        cumulative_weight += world_weight;
+        uniforms->dynamic_instance_emissive[count][0] = fmaxf(allocation->emissive_weight, 0.0f);
+        uniforms->dynamic_instance_emissive[count][1] = cumulative_weight;
+        uniforms->dynamic_instance_emissive[count][2] = area_scale;
+        uniforms->dynamic_instance_emissive[count][3] = world_weight > 0.0f ? 1.0f : 0.0f;
+
+        const VEC3 center = m4_point(model, allocation->local_center);
+        const VEC3 axis_x =
+            v3(model.m[0] * allocation->local_extents.x, model.m[1] * allocation->local_extents.x, model.m[2] * allocation->local_extents.x);
+        const VEC3 axis_y =
+            v3(model.m[4] * allocation->local_extents.y, model.m[5] * allocation->local_extents.y, model.m[6] * allocation->local_extents.y);
+        const VEC3 axis_z =
+            v3(model.m[8] * allocation->local_extents.z, model.m[9] * allocation->local_extents.z, model.m[10] * allocation->local_extents.z);
+        const float radius = fmaxf(sqrtf(v3_len_sq(axis_x) + v3_len_sq(axis_y) + v3_len_sq(axis_z)), 1.0e-3f);
+
+        uniforms->dynamic_instance_center_radius[count][0] = center.x;
+        uniforms->dynamic_instance_center_radius[count][1] = center.y;
+        uniforms->dynamic_instance_center_radius[count][2] = center.z;
+        uniforms->dynamic_instance_center_radius[count][3] = radius;
+
+        ++count;
+    }
+
+    uniforms->dynamic_instance_data[0] = count;
+    uniforms->receiver_params[2] = cumulative_weight;
+    return count;
+}
+
+static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd) {
+    if (!r || !cmd) return false;
+
+    r->dynamic_receiver_ready = false;
+
+    if (!r->has_bake || !r->dynamic_lighting_count) return true;
+    if (!r->scene || !r->scene->lightmap || !r->dynamic_receiver_pipeline ||
+        !r->dynamic_receiver_sample_buffer || !r->dynamic_receiver_texture || !r->dynamic_receiver_scratch ||
+        !r->dynamic_static_node_buffer || !r->dynamic_static_triangle_buffer ||
+        !r->dynamic_object_node_buffer || !r->dynamic_object_triangle_buffer)
+        return false;
+
+    const LIGHTMAP *lightmap = r->scene->lightmap;
+    const uint64_t pixel_count64 = (uint64_t)lightmap->width * lightmap->height;
+
+    if (!lightmap->samples || !lightmap->sample_count || !lightmap->width || !lightmap->height || pixel_count64 > UINT32_MAX) return false;
+
+    const uint32_t pixel_count = (uint32_t)pixel_count64;
+    DYNAMIC_RECEIVER_UNIFORMS uniforms = {
+        .dispatch_data = {3u, pixel_count, lightmap->width, lightmap->height},
+        .receiver_params = {fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f), 0.0f, 0.0f, 32.0f},
+    };
+
+    (void)dynamic_receiver_instances(r, &uniforms);
+
+    if (!bind_dynamic_receiver_resources(r, cmd, r->default_white, r->dynamic_receiver_texture, &uniforms)) return false;
+    r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (pixel_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+
+    uniforms.dispatch_data[0] = 0u;
+    uniforms.dispatch_data[1] = lightmap->sample_count;
+
+    if (!bind_dynamic_receiver_resources(r, cmd, r->default_white, r->dynamic_receiver_texture, &uniforms)) return false;
+    r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (lightmap->sample_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+
+    uniforms.dispatch_data[0] = 1u;
+    uniforms.dispatch_data[1] = pixel_count;
+
+    if (!bind_dynamic_receiver_resources(r, cmd, r->dynamic_receiver_texture, r->dynamic_receiver_scratch, &uniforms)) return false;
+    r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (pixel_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+
+    NriTexture *source = r->dynamic_receiver_scratch;
+    NriTexture *destination = r->dynamic_receiver_texture;
+    uniforms.dispatch_data[0] = 2u;
+
+    for (uint32_t pass = 0u; pass < DYNAMIC_RECEIVER_DILATION_PASSES; ++pass) {
+        if (!bind_dynamic_receiver_resources(r, cmd, source, destination, &uniforms)) return false;
+        r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
+        r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (pixel_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+
+        NriTexture *swap = source;
+        source = destination;
+        destination = swap;
+    }
+
+    if (source != r->dynamic_receiver_texture) {
+        SDL_SetError("dynamic receiver dilation did not finish in primary atlas");
+        return false;
+    }
+
+    if (!gpu_transition_texture(r, cmd, r->dynamic_receiver_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
+                                NriStageBits_FRAGMENT_SHADER))
+        return false;
+
+    r->dynamic_receiver_ready = true;
+    return true;
+}
+
 static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame) {
     if (!r || !cmd || !frame) return false;
     if (!r->has_bake || !r->dynamic_lighting_count) return true;
