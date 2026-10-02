@@ -76,6 +76,12 @@ float random01(inout uint seed) {
     return (float)(seed & 0x00ffffffu) * (1.0f / 16777216.0f);
 }
 
+uint generation_age(float stored_alpha, uint current_generation) {
+    uint stored = (uint)max(stored_alpha + 0.5f, 0.0f);
+    if (stored == 0u || stored > 1024u || current_generation == 0u || current_generation > 1024u) return 0xffffffffu;
+    return current_generation >= stored ? current_generation - stored : current_generation + 1024u - stored;
+}
+
 bool triangle_is_transmissive(BvhTriangle tri) {
     return tri.normal.w >= 0.999f;
 }
@@ -345,9 +351,9 @@ float4 source_pixel(int2 p) {
 }
 
 float4 filtered_pixel(int2 p) {
-    const float generation = receiver_params.w;
+    const uint generation = (uint)receiver_params.w;
     float4 center = source_pixel(p);
-    if (abs(center.a - generation) > 0.25f) return 0.0f;
+    if (generation_age(center.a, generation) > 1u) return 0.0f;
 
     float3 sum = 0.0f;
     float alpha_sum = 0.0f;
@@ -357,7 +363,7 @@ float4 filtered_pixel(int2 p) {
         [unroll] for (int x = -1; x <= 1; ++x) {
             int2 q = clamp(p + int2(x, y), int2(0, 0), int2((int)dispatch_data.z - 1, (int)dispatch_data.w - 1));
             float4 c = source_pixel(q);
-            if (abs(c.a - generation) > 0.25f) continue;
+            if (generation_age(c.a, generation) > 2u) continue;
 
             float difference = length(c.rgb - center.rgb);
             float weight = 1.0f / (1.0f + difference * 4.0f);
@@ -398,9 +404,9 @@ void dynamic_receiver_cs(uint3 id : SV_DispatchThreadID) {
 
         float3 current = emissive_sum / (float)EMISSIVE_SAMPLES;
         float4 history = Source.Load(int3(uint2(pixel % dispatch_data.z, pixel / dispatch_data.z), 0));
-        uint previous_generation = generation > 1u ? generation - 1u : 1024u;
-        float history_valid = abs(history.a - (float)previous_generation) <= 0.25f ? 1.0f : 0.0f;
-        float history_weight = saturate(temporal_params.x) * history_valid;
+        uint history_age = generation_age(history.a, generation);
+        float age_weight = history_age <= 12u ? 1.0f - (float)history_age / 13.0f : 0.0f;
+        float history_weight = saturate(temporal_params.x) * age_weight;
         float3 accumulated = lerp(current, max(history.rgb, 0.0f), history_weight);
 
         Output[uint2(pixel % dispatch_data.z, pixel / dispatch_data.z)] =
