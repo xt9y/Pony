@@ -389,6 +389,7 @@ def main() -> None:
         "self_node_buffer",
         "self_triangle_buffer",
         "m4_inverse_transform(",
+        "gpu_clear_texture_zero(",
         "update_dynamic_surface_caches(",
         "pending_transform_revision",
         "pending_lighting_revision",
@@ -426,6 +427,9 @@ def main() -> None:
 
     for needle in (
         "reference_mode",
+        "dynamic_lightmap_sample(",
+        "Lightmap.Load(int3(pixel, 0))",
+        "sample.a < validity_floor",
         "baked_sample.a < visibility_floor * 0.5f",
         "reference_mode < 0.5f",
     ):
@@ -469,6 +473,15 @@ def main() -> None:
     ):
         if needle not in render:
             raise AssertionError(f"dynamic volumetric binding missing: {needle}")
+
+    gpu = text("gpu.c")
+    for needle in (
+        "bool gpu_clear_texture_zero(",
+        "memset(mapped, 0",
+        "CmdUploadBufferToTexture",
+    ):
+        if needle not in gpu:
+            raise AssertionError(f"dynamic atlas zero initialization missing: {needle}")
 
     cache = text("cache.c")
     for needle in ("DM_CACHE_VERSION 11u", "direct_pixels", "hash_bytes(hash, out->direct_pixels", "fwrite(data->direct_pixels"):
