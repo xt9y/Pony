@@ -2451,6 +2451,14 @@ bool renderer_rebake_current_scene(RENDERER *renderer, const MESH *mesh, const G
     BVH tree = {0};
 
     if (!bvh_build(&tree, mesh, visual)) {
+        SDL_SetError("could not build bake BVH");
+        cache_free(&previous);
+        return false;
+    }
+
+    if (!reuse_volume && !upload_bvh(renderer, &tree)) {
+        SDL_SetError("could not upload bake BVH for fallback volume probes");
+        bvh_free(&tree);
         cache_free(&previous);
         return false;
     }
@@ -2472,6 +2480,7 @@ bool renderer_rebake_current_scene(RENDERER *renderer, const MESH *mesh, const G
                           bake_probe_grid(renderer, &volume_candidate, renderer->volumetrics.probe_samples);
 
         if (!made) {
+            if (!*SDL_GetError()) SDL_SetError("fallback volume-probe bake failed");
             free_probe_grid(&volume_candidate);
             bvh_free(&tree);
             cache_free(&previous);
