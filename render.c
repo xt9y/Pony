@@ -3,6 +3,7 @@
 
 #include <SDL3_image/SDL_image.h>
 
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
