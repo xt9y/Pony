@@ -1322,9 +1322,6 @@ static bool submit_frame(RENDERER *r, FRAME_CONTEXT *frame, NriCommandBuffer *cm
         waits[wait_num++] = (NriFenceSubmitDesc){.fence = r->gpu->upload->fence, .value = r->gpu->upload->next_fence_value - 1u, .stages = NriStageBits_ALL};
     }
 
-    const NriFenceSubmitDesc wait = {.fence = r->gpu->swapchain_frames[r->gpu->frame_index % r->gpu->swapchain_texture_count].acquire,
-                                     .stages = NriStageBits_COLOR_ATTACHMENT};
-
     const NriFenceSubmitDesc signals[2] = {{.fence = r->gpu->swapchain_frames[index].release}, {.fence = r->gpu->frame_fence, .value = frame_value}};
 
     const NriQueueSubmitDesc submit = {.waitFences = waits,
