@@ -410,7 +410,9 @@ def main() -> None:
         "pending_transform_revision",
         "pending_lighting_revision",
         "allocation->sample_cursor = 0u",
-        "allocation->sample_cursor == total",
+        "cache_needs_clear",
+        "clear.trace_params[1] = 1.0f",
+        "gpu_texture_barrier(r, cmd, allocation->texture, storage, storage)",
         "allocation->transform_revision = object->transform_revision",
         "gpu_transition_texture(r, cmd, allocation->texture, NriAccessBits_SHADER_RESOURCE",
     ):
@@ -436,6 +438,8 @@ def main() -> None:
         "trace_static_indirect(",
         "beam_visibility(",
         "encoded_visibility",
+        "trace_params.y > 0.5f",
+        "Output[uint2(id.x % texture_width, id.x / texture_width)] = 0.0f",
         "Output[uint2(pixel % texture_width, pixel / texture_width)]",
     ):
         if needle not in dynamic_surface:
