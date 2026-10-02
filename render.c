@@ -298,6 +298,12 @@ typedef struct MATERIAL_UNIFORMS {
     float shadow_extent_bias[4];
     float shadow_texel_enabled[4];
     float dynamic_flags[4];
+
+    float probe_origin_spacing[4];
+    Uint32 probe_dims[4];
+    float beam_origin[4];
+    float beam_step[4];
+    Uint32 beam_dims[4];
 } MATERIAL_UNIFORMS;
 
 typedef struct DYNAMIC_SHADOW_UNIFORMS {
@@ -460,13 +466,13 @@ static bool create_surface_layout(RENDERER *r) {
     static const NriDescriptorType material[] = {
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
-        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER,
-        NriDescriptorType_SAMPLER};
+        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
 
     const NriDescriptorType *sets[4] = {NULL, camera, material, uniform};
-    const uint8_t counts[4] = {0, 1, 16, 1};
+    const uint8_t counts[4] = {0, 1, 18, 1};
 
     return gpu_create_pipeline_layout(r, &r->surface_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
@@ -615,12 +621,16 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
                             gpu_create_texture_view(r, scene_color, NriTextureView_TEXTURE),
                             gpu_create_texture_view(r, r->dynamic_shadow_ready && r->dynamic_shadow_texture ? r->dynamic_shadow_texture : r->default_white,
                                                     NriTextureView_TEXTURE),
+                            gpu_create_buffer_view(r, r->beam_buffer ? r->beam_buffer : r->surface_beam_fallback_buffer,
+                                                   NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
+                            gpu_create_buffer_view(r, r->volume_probe_buffer ? r->volume_probe_buffer : r->surface_probe_fallback_buffer,
+                                                   NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
                             material_sampler,
                             lightmap_sampler,
                             scene_sampler,
                             r->dynamic_shadow_sampler ? r->dynamic_shadow_sampler : material_sampler};
 
-    return gpu_bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 16) &&
+    return gpu_bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 18) &&
            gpu_bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
 }
 
@@ -1444,8 +1454,15 @@ bool renderer_gpu_resources_init(RENDERER *r) {
 
     r->dynamic_shadow_sampler = gpu_create_sampler(r, NriFilter_NEAREST, NriFilter_NEAREST, NriAddressMode_CLAMP_TO_EDGE);
 
-    if (!r->solid_pipeline || !r->transmission_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_shadow_sampler || !r->line_pipeline ||
-        !r->sky_pipeline || !fx_init(&r->fx, r)) {
+    const PROBE fallback_probe = {0};
+    const float fallback_beam = 1.0f;
+    r->surface_probe_fallback_buffer =
+        gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_probe, sizeof(fallback_probe), sizeof(fallback_probe));
+    r->surface_beam_fallback_buffer =
+        gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_beam, sizeof(fallback_beam), sizeof(fallback_beam));
+
+    if (!r->solid_pipeline || !r->transmission_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_shadow_sampler ||
+        !r->surface_probe_fallback_buffer || !r->surface_beam_fallback_buffer || !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
         renderer_gpu_resources_deinit(r);
         return false;
     }
@@ -1622,7 +1639,12 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
         .shadow_texel_enabled = {r->dynamic_shadow_size ? 1.0f / (float)r->dynamic_shadow_size : 1.0f,
                                  r->dynamic_shadow_size ? 1.0f / (float)r->dynamic_shadow_size : 1.0f,
                                  r->dynamic_shadow_ready ? 1.0f : 0.0f, 0.0f},
-        .dynamic_flags = {draw && draw->object_id ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f}};
+        .dynamic_flags = {draw && draw->object_id ? 1.0f : 0.0f, r->reference_lighting_enabled ? 1.0f : 0.0f, 0.0f, 0.0f},
+        .probe_origin_spacing = {r->volume_probes.origin.x, r->volume_probes.origin.y, r->volume_probes.origin.z, r->volume_probes.spacing},
+        .probe_dims = {r->volume_probes.count_x, r->volume_probes.count_y, r->volume_probes.count_z, r->volume_probe_buffer ? 1u : 0u},
+        .beam_origin = {r->beams.origin.x, r->beams.origin.y, r->beams.origin.z, 0.0f},
+        .beam_step = {r->beams.step.x, r->beams.step.y, r->beams.step.z, 0.0f},
+        .beam_dims = {r->beams.width, r->beams.height, r->beams.depth, r->beam_buffer ? 1u : 0u}};
 
     (void)dynamic_shadow_projection(r, frame, result.shadow_u_min, result.shadow_v_min, result.shadow_sun_max, result.shadow_extent_bias);
     return result;
@@ -1819,6 +1841,8 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         release_bake_resources(r);
         release_buffer(r, r->volume_probe_buffer);
         release_buffer(r, r->beam_buffer);
+        release_buffer(r, r->surface_probe_fallback_buffer);
+        release_buffer(r, r->surface_beam_fallback_buffer);
         release_texture(r, r->depth_texture);
         release_texture(r, r->dynamic_shadow_texture);
         release_texture(r, r->lightmap_texture);
