@@ -251,9 +251,7 @@ struct RENDERER {
 bool gpu_init(GPU *gpu, const char *title, int width, int height);
 void gpu_deinit(GPU *gpu);
 
-bool upload_scene(RENDERER *renderer, const GLTF_SCENE *visual);
 void release_texture(RENDERER *renderer, NriTexture *texture);
 void release_buffer(RENDERER *renderer, NriBuffer *buffer);
-bool draw_frame(RENDERER *renderer, const RENDER_FRAME *frame);
 
 #endif
