@@ -63,6 +63,11 @@ GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3) {
     float4 beam_origin;
     float4 beam_step;
     uint4 beam_dims;
+
+    uint4 dynamic_influence_meta;
+    float4 dynamic_influence_center_radius[8];
+    float4 dynamic_influence_diffuse[8];
+    float4 dynamic_influence_emissive[8];
 };
 
 struct SurfaceInput {
@@ -339,6 +344,58 @@ float static_beam_visibility(float3 position) {
     return total > 0.0f ? saturate(visibility / total) : 1.0f;
 }
 
+float3 signed_dynamic_near_field(float3 position, float3 normal) {
+    uint count = min(dynamic_influence_meta.x, 8u);
+    if (count == 0u || dynamic_flags.z > 0.5f) return 0.0f;
+
+    normal = normalize(normal);
+    float3 baseline = surface_probe_irradiance(position, normal) / PI;
+    float3 correction = 0.0f;
+    float3 sun = normalize(sun_direction.xyz);
+
+    [loop] for (uint i = 0u; i < count; ++i) {
+        float3 center = dynamic_influence_center_radius[i].xyz;
+        float radius = max(dynamic_influence_center_radius[i].w, 1.0e-3f);
+        float3 delta = center - position;
+        float distance2 = dot(delta, delta);
+
+        if (distance2 <= radius * radius * 1.0001f) continue;
+
+        float distance = sqrt(distance2);
+        float influence_distance = max(radius * 5.0f, 0.5f);
+        float surface_distance = max(distance - radius, 0.0f);
+        if (surface_distance >= influence_distance) continue;
+
+        float3 direction = delta / distance;
+        float receiver_cosine = saturate(dot(normal, direction));
+        if (receiver_cosine <= 0.0f) continue;
+
+        float projected = saturate((radius * radius) / max(distance2, 1.0e-6f));
+        float falloff = saturate(1.0f - surface_distance / influence_distance);
+        float weight = receiver_cosine * projected * falloff * falloff;
+        if (weight <= 1.0e-4f) continue;
+
+        float3 object_normal = -direction;
+        float3 object_indirect = surface_probe_irradiance(center, object_normal) / PI;
+        float object_sun_visibility = static_beam_visibility(center);
+        float object_n_dot_l = saturate(dot(object_normal, sun));
+        float3 object_direct =
+            sun_color.rgb * roughness_normal_ao_sun.w * object_n_dot_l * object_sun_visibility;
+        float3 outgoing =
+            dynamic_influence_diffuse[i].rgb * max(object_indirect + object_direct, 0.0f) +
+            max(dynamic_influence_emissive[i].rgb, 0.0f);
+
+        /*
+         * Signed local replacement: remove the baked environment assumed to
+         * occupy the proxy's solid angle, then add the current dynamic
+         * surface radiance occupying that same angle.
+         */
+        correction += (outgoing - baseline) * (weight * 0.5f);
+    }
+
+    return correction;
+}
+
 float3 environment_radiance(float3 direction, float roughness) {
     direction = normalize(direction);
 
@@ -472,6 +529,7 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     } else if (camera_position.w > 0.5f && is_dynamic < 0.5f) {
         float3 static_direct = sun_color.rgb * roughness_normal_ao_sun.w * geometric_n_dot_l;
         baked = max(baked + static_direct * (sun_visibility - cached_sun_visibility), 0.0f);
+        baked = max(baked + signed_dynamic_near_field(input.world_position, geometric_normal), 0.0f);
     }
 
     if (camera_position.w > 1.5f) {
