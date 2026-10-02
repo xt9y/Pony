@@ -18,6 +18,9 @@
 #define DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u
 #define DYNAMIC_SURFACE_CONVERGENCE_PASSES 4u
 #define DYNAMIC_RECEIVER_IRRADIANCE_FLOOR 0.00075f
+#define DYNAMIC_RECEIVER_GRID_MIN_CELL_SIZE 0.5f
+#define DYNAMIC_RECEIVER_GRID_TARGET_AXIS 48.0f
+#define DYNAMIC_RECEIVER_GRID_MAX_CELLS 262144u
 #define DYNAMIC_SHADOW_SIZE 2048u
 #define DYNAMIC_TIMESTAMP_BASE 4u
 #define DYNAMIC_TIMESTAMP_STRIDE 6u
@@ -1182,9 +1185,19 @@ static void release_dynamic_receiver_cache(RENDERER *r) {
     release_texture(r, r->dynamic_receiver_texture);
     release_texture(r, r->dynamic_receiver_scratch);
 
+    free(r->dynamic_receiver_grid_offsets);
+    free(r->dynamic_receiver_grid_marks);
+
     r->dynamic_receiver_sample_buffer = NULL;
     r->dynamic_receiver_texture = NULL;
     r->dynamic_receiver_scratch = NULL;
+    r->dynamic_receiver_grid_offsets = NULL;
+    r->dynamic_receiver_grid_marks = NULL;
+    memset(r->dynamic_receiver_grid_dims, 0, sizeof(r->dynamic_receiver_grid_dims));
+    memset(r->dynamic_receiver_grid_min, 0, sizeof(r->dynamic_receiver_grid_min));
+    r->dynamic_receiver_grid_cell_count = 0u;
+    r->dynamic_receiver_grid_mark = 0u;
+    r->dynamic_receiver_grid_cell_size = 0.0f;
     r->dynamic_receiver_ready = false;
 }
 
@@ -2955,6 +2968,23 @@ static bool renderer_build_dynamic_static_transport(RENDERER *renderer, const SC
     return good;
 }
 
+static uint32_t dynamic_receiver_grid_index(const RENDERER *renderer, const LMAP_SAMPLE *sample) {
+    if (!renderer || !sample || !renderer->dynamic_receiver_grid_cell_size) return 0u;
+
+    const float inverse_cell = 1.0f / renderer->dynamic_receiver_grid_cell_size;
+    uint32_t coord[3];
+
+    for (uint32_t axis = 0u; axis < 3u; ++axis) {
+        int value = (int)floorf((sample->position[axis] - renderer->dynamic_receiver_grid_min[axis]) * inverse_cell);
+        if (value < 0) value = 0;
+        if ((uint32_t)value >= renderer->dynamic_receiver_grid_dims[axis]) value = (int)renderer->dynamic_receiver_grid_dims[axis] - 1;
+        coord[axis] = (uint32_t)value;
+    }
+
+    return coord[0] + renderer->dynamic_receiver_grid_dims[0] *
+                          (coord[1] + renderer->dynamic_receiver_grid_dims[1] * coord[2]);
+}
+
 static bool renderer_build_dynamic_receiver_cache(RENDERER *renderer, const SCENE *scene) {
     if (!renderer || !scene || !scene->lightmap) return false;
 
@@ -2965,9 +2995,76 @@ static bool renderer_build_dynamic_receiver_cache(RENDERER *renderer, const SCEN
     const LIGHTMAP *lightmap = scene->lightmap;
     if (!lightmap->samples || !lightmap->sample_count || !lightmap->width || !lightmap->height) return false;
 
+    float minimum[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+    float maximum[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+
+    for (uint32_t i = 0u; i < lightmap->sample_count; ++i) {
+        const LMAP_SAMPLE *sample = &lightmap->samples[i];
+
+        for (uint32_t axis = 0u; axis < 3u; ++axis) {
+            minimum[axis] = fminf(minimum[axis], sample->position[axis]);
+            maximum[axis] = fmaxf(maximum[axis], sample->position[axis]);
+        }
+    }
+
+    const float maximum_extent =
+        fmaxf(maximum[0] - minimum[0], fmaxf(maximum[1] - minimum[1], maximum[2] - minimum[2]));
+    float cell_size = fmaxf(DYNAMIC_RECEIVER_GRID_MIN_CELL_SIZE, maximum_extent / DYNAMIC_RECEIVER_GRID_TARGET_AXIS);
+    uint32_t dims[3] = {1u, 1u, 1u};
+    uint64_t cell_count64 = 0u;
+
+    for (;;) {
+        cell_count64 = 1u;
+
+        for (uint32_t axis = 0u; axis < 3u; ++axis) {
+            dims[axis] = (uint32_t)floorf((maximum[axis] - minimum[axis]) / cell_size) + 1u;
+            if (!dims[axis]) dims[axis] = 1u;
+            cell_count64 *= dims[axis];
+        }
+
+        if (cell_count64 <= DYNAMIC_RECEIVER_GRID_MAX_CELLS) break;
+        cell_size *= 1.25f;
+    }
+
+    if (!cell_count64 || cell_count64 > UINT32_MAX) return false;
+
+    const uint32_t cell_count = (uint32_t)cell_count64;
+    uint32_t *counts = calloc(cell_count, sizeof(*counts));
+    uint32_t *offsets = calloc((size_t)cell_count + 1u, sizeof(*offsets));
+    uint32_t *cursor = calloc(cell_count, sizeof(*cursor));
+    uint32_t *marks = calloc(cell_count, sizeof(*marks));
+    LMAP_SAMPLE *sorted = malloc((size_t)lightmap->sample_count * sizeof(*sorted));
+
+    if (!counts || !offsets || !cursor || !marks || !sorted) {
+        free(counts);
+        free(offsets);
+        free(cursor);
+        free(marks);
+        free(sorted);
+        return false;
+    }
+
+    memcpy(renderer->dynamic_receiver_grid_min, minimum, sizeof(minimum));
+    memcpy(renderer->dynamic_receiver_grid_dims, dims, sizeof(dims));
+    renderer->dynamic_receiver_grid_cell_size = cell_size;
+    renderer->dynamic_receiver_grid_cell_count = cell_count;
+
+    for (uint32_t i = 0u; i < lightmap->sample_count; ++i)
+        counts[dynamic_receiver_grid_index(renderer, &lightmap->samples[i])]++;
+
+    for (uint32_t cell = 0u; cell < cell_count; ++cell) {
+        offsets[cell + 1u] = offsets[cell] + counts[cell];
+        cursor[cell] = offsets[cell];
+    }
+
+    for (uint32_t i = 0u; i < lightmap->sample_count; ++i) {
+        const uint32_t cell = dynamic_receiver_grid_index(renderer, &lightmap->samples[i]);
+        sorted[cursor[cell]++] = lightmap->samples[i];
+    }
+
     renderer->dynamic_receiver_sample_buffer =
-        gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, lightmap->samples,
-                          (size_t)lightmap->sample_count * sizeof(*lightmap->samples), sizeof(LMAP_SAMPLE));
+        gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, sorted,
+                          (size_t)lightmap->sample_count * sizeof(*sorted), sizeof(LMAP_SAMPLE));
 
     renderer->dynamic_receiver_texture =
         gpu_create_texture(renderer, NriFormat_RGBA16_SFLOAT,
@@ -2978,6 +3075,14 @@ static bool renderer_build_dynamic_receiver_cache(RENDERER *renderer, const SCEN
         gpu_create_texture(renderer, NriFormat_RGBA16_SFLOAT,
                            NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE,
                            lightmap->width, lightmap->height);
+
+    renderer->dynamic_receiver_grid_offsets = offsets;
+    renderer->dynamic_receiver_grid_marks = marks;
+    renderer->dynamic_receiver_grid_mark = 0u;
+
+    free(counts);
+    free(cursor);
+    free(sorted);
 
     bool good = renderer->dynamic_receiver_sample_buffer && renderer->dynamic_receiver_texture && renderer->dynamic_receiver_scratch;
 
@@ -2994,6 +3099,8 @@ static bool renderer_build_dynamic_receiver_cache(RENDERER *renderer, const SCEN
         return false;
     }
 
+    SDL_Log("dynamic receiver grid: %ux%ux%u cells | %.3f world units/cell | %u samples",
+            dims[0], dims[1], dims[2], cell_size, lightmap->sample_count);
     return true;
 }
 
