@@ -12,6 +12,7 @@ static const uint INVALID_NODE = 0xffffffffu;
 static const uint PHASE_DIRECT = 0u;
 static const uint PHASE_FILTER = 1u;
 static const uint PHASE_DILATE = 2u;
+static const uint PHASE_CLEAR = 3u;
 static const uint DYNAMIC_INSTANCE_LIMIT = 8u;
 static const uint EMISSIVE_SAMPLES = 32u;
 
@@ -379,6 +380,11 @@ void dynamic_receiver_cs(uint3 id : SV_DispatchThreadID) {
     const uint phase = dispatch_data.x;
     const uint item_count = dispatch_data.y;
     if (id.x >= item_count) return;
+
+    if (phase == PHASE_CLEAR) {
+        Output[uint2(id.x % dispatch_data.z, id.x / dispatch_data.z)] = 0.0f;
+        return;
+    }
 
     if (phase == PHASE_DIRECT) {
         SurfaceSample sample = Samples[id.x];
