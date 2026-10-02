@@ -234,6 +234,25 @@ float2 refracted_scene_uv(SurfaceInput input, float3 direction, float thickness)
     return saturate(uv + float2(x, -y) * scale);
 }
 
+float3 sample_transmitted_scene(float2 uv, float roughness) {
+    uint width, height;
+    SceneColor.GetDimensions(width, height);
+
+    float radius = roughness * roughness * 6.0f;
+    float3 center = SceneColor.SampleLevel(SceneSampler, uv, 0.0f).rgb;
+    if (radius < 0.25f) return center;
+
+    float2 texel = radius / max(float2(width, height), 1.0f.xx);
+    float3 result = center * 4.0f;
+    result += SceneColor.SampleLevel(SceneSampler, uv + float2(texel.x, 0.0f), 0.0f).rgb;
+    result += SceneColor.SampleLevel(SceneSampler, uv - float2(texel.x, 0.0f), 0.0f).rgb;
+    result += SceneColor.SampleLevel(SceneSampler, uv + float2(0.0f, texel.y), 0.0f).rgb;
+    result += SceneColor.SampleLevel(SceneSampler, uv - float2(0.0f, texel.y), 0.0f).rgb;
+
+    return result * 0.125f;
+}
+
+
 SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     SurfaceOutput output;
 
@@ -305,7 +324,8 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     float3 environment_specular = lerp(legacy_environment, physical_environment, advanced_weight);
 
     float transmission_weight = transmission * (1.0f - metallic);
-    float3 diffuse = base * baked * material_ao * (1.0f - metallic) * (1.0f - transmission_weight);
+    float iridescence_energy = lerp(1.0f, 1.0f - max(view_f.r, max(view_f.g, view_f.b)), iridescence);
+    float3 diffuse = base * baked * material_ao * (1.0f - metallic) * (1.0f - transmission_weight) * iridescence_energy;
     float3 transmitted = 0.0f.xxx;
 
     if (transmission_weight > 0.0f) {
@@ -316,7 +336,7 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
         float path_length = volume_thickness / max(abs(dot(n, refracted)), 0.1f);
         float3 attenuation = volume_attenuation(attenuation_iridescence.rgb, path_length, ior_transmission_volume.w);
         float2 scene_uv = refracted_scene_uv(input, refracted, volume_thickness);
-        float3 scene = max(SceneColor.SampleLevel(SceneSampler, scene_uv, 0.0f).rgb, 0.0f);
+        float3 scene = max(sample_transmitted_scene(scene_uv, roughness), 0.0f);
 
         transmitted = scene * attenuation * base * transmission_weight * (1.0f - view_f);
     }
