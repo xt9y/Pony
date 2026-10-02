@@ -1,6 +1,8 @@
 #ifndef RENDER_INTERNAL_H
 #define RENDER_INTERNAL_H
 
+#define GPU_FRAME_QUEUE_DEPTH 2u
+
 #include "game.h"
 
 #include <stddef.h>
