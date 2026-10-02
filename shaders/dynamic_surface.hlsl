@@ -306,7 +306,30 @@ float2 static_lightmap_uv(uint triangle_index, float3 barycentric, bool back_fac
 float3 static_outgoing(uint triangle_index, float3 barycentric, bool back_face) {
     BvhTriangle tri = Triangles[triangle_index];
     float2 uv = static_lightmap_uv(triangle_index, barycentric, back_face);
-    float3 lighting = max(StaticLightmap.SampleLevel(StaticLightmapSampler, uv, 0.0f).rgb, 0.0f);
+    float4 baked = StaticLightmap.SampleLevel(StaticLightmapSampler, uv, 0.0f);
+    float3 lighting = max(baked.rgb, 0.0f);
+
+    const float visibility_floor = 1.0f / 1024.0f;
+    float cached_sun_visibility = saturate((baked.a - visibility_floor) / (1.0f - visibility_floor));
+    float3 normal = normalize(tri.normal.xyz) * (back_face ? -1.0f : 1.0f);
+    float3 position = tri.a.xyz * barycentric.x + tri.b.xyz * barycentric.y + tri.c.xyz * barycentric.z;
+    float3 sun = normalize(sun_direction_intensity.xyz);
+    float n_dot_l = saturate(dot(normal, sun));
+
+    if (cached_sun_visibility > 0.0f && n_dot_l > 0.0f) {
+        float epsilon = max(trace_params.x, 1.0e-5f);
+        TraceRay shadow;
+        shadow.origin = position + normal * epsilon;
+        shadow.tmin = epsilon;
+        shadow.direction = sun;
+        shadow.tmax = 1.0e20f;
+
+        if (self_any(shadow)) {
+            float3 baked_sun = sun_color_visibility_floor.rgb * (sun_direction_intensity.w * n_dot_l * cached_sun_visibility);
+            lighting = max(lighting - baked_sun, 0.0f);
+        }
+    }
+
     float3 albedo = max(float3(tri.a.w, tri.b.w, tri.c.w), 0.0f);
     float3 emissive = max(tri.emissive.rgb, 0.0f);
     return albedo * lighting + emissive;
