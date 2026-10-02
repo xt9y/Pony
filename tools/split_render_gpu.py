@@ -130,7 +130,7 @@ for marker in (
     gpu, block = extract_braced(gpu, marker, True)
     moved.append(block)
 
-gpu = gpu.replace("static bool create_pipeline_layouts(RENDERER *r);\\n", "")
+gpu = gpu.replace("static bool create_pipeline_layouts(RENDERER *r);\n", "")
 
 # Keep moved renderer functions in their original conceptual order.
 functions = (
@@ -326,7 +326,7 @@ for forbidden in (
         gpu_header = gpu_header.replace(forbidden, "")
         Path("gpu.h").write_text(gpu_header, encoding="utf-8")
 
-gpu = gpu.replace("static bool create_pipeline_layouts(RENDERER *r);\\n", "")\n\n# Guard the final ownership.
+# Guard the final ownership.
 for name in (
     "create_surface_layout(",
     "bind_fx_resources(",
