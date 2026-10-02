@@ -875,8 +875,13 @@ float3 trace_path_core(float3 position, float3 normal, inout uint seed, bool inc
         position = ray.origin + ray.direction * hit.t;
         normal = hit.normal;
 #if (defined(BUILD_LIGHTMAP_CS) || defined(BUILD_LIGHTMAP_WAVE_CS))
-        // Only reuse probes at secondary hits; primary reuse leaks across walls.
-        {
+        /*
+         * Normal bakes may terminate secondary transport in the probe cache.
+         * The dynamic-lighting reference path sets probe_dims_mode.w so every
+         * bounce traces the current scene instead; this is deliberately slow
+         * and is the correctness oracle for runtime approximations.
+         */
+        if (probe_dims_mode.w == 0u) {
             float validity;
             float3 cached = bake_probe_irradiance(position, normal, validity);
             if (validity >= 0.25f) {
