@@ -68,12 +68,6 @@ static Uint8 *load_spirv(const char *define, size_t *size) {
     return spirv;
 }
 
-static void free_probe_grid(PROBE_GRID *grid) {
-    if (!grid) return;
-    free(grid->probes);
-    memset(grid, 0, sizeof(*grid));
-}
-
 static bool create_pipeline_cache(RENDERER *r) {
     if (!r || !r->gpu->device) return false;
 
