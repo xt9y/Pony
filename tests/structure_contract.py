@@ -86,6 +86,7 @@ def main() -> None:
         "typedef struct RENDER_VERTEX",
         "typedef struct DRAW_RANGE",
         "typedef struct RENDER_FRAME",
+        "GPU *gpu;",
         "struct RENDERER",
     )
     require(
@@ -102,7 +103,6 @@ def main() -> None:
         "typedef struct GPU",
         "bool gpu_init(GPU *gpu, const char *title, int width, int height);",
         "void gpu_deinit(GPU *gpu);",
-        "GPU *gpu;",
     )
     forbid(
         "gpu.h",
