@@ -121,6 +121,27 @@ static VEC3 m4_point(MAT4 matrix, VEC3 p) {
               matrix.m[2] * p.x + matrix.m[6] * p.y + matrix.m[10] * p.z + matrix.m[14]);
 }
 
+static MAT4 m4_inverse_transform(TRANSFORM transform) {
+    const MAT4 normal = m4_transform(transform, true);
+    MAT4 inverse = m4_identity();
+
+    inverse.m[0] = normal.m[0];
+    inverse.m[1] = normal.m[4];
+    inverse.m[2] = normal.m[8];
+    inverse.m[4] = normal.m[1];
+    inverse.m[5] = normal.m[5];
+    inverse.m[6] = normal.m[9];
+    inverse.m[8] = normal.m[2];
+    inverse.m[9] = normal.m[6];
+    inverse.m[10] = normal.m[10];
+
+    const VEC3 t = transform.position;
+    inverse.m[12] = -(inverse.m[0] * t.x + inverse.m[4] * t.y + inverse.m[8] * t.z);
+    inverse.m[13] = -(inverse.m[1] * t.x + inverse.m[5] * t.y + inverse.m[9] * t.z);
+    inverse.m[14] = -(inverse.m[2] * t.x + inverse.m[6] * t.y + inverse.m[10] * t.z);
+    return inverse;
+}
+
 static MAT4 m4_perspective(float fov_y, float aspect, float znear, float zfar) {
     const float f = 1.0f / tanf(fov_y * 0.5f);
     MAT4 result = {0};
@@ -323,6 +344,7 @@ typedef struct DYNAMIC_SHADOW_UNIFORMS {
 
 typedef struct DYNAMIC_SURFACE_UNIFORMS {
     float model[16];
+    float inverse_model[16];
     float normal_model[16];
 
     Uint32 sample_offset;
@@ -388,6 +410,8 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     NriTexture *texture;
     NriTexture *reference_texture;
     NriBuffer *sample_buffer;
+    NriBuffer *self_node_buffer;
+    NriBuffer *self_triangle_buffer;
     VEC3 local_center;
     float local_radius;
     VEC3 average_diffuse;
@@ -513,10 +537,11 @@ static bool create_dynamic_surface_layout(RENDERER *r) {
     static const NriDescriptorType sources[] = {
         NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
         NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
         NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER,
     };
 
-    return gpu_create_compute_layout(r, &r->dynamic_surface_layout, sources, 8, NriDescriptorType_STORAGE_TEXTURE, true);
+    return gpu_create_compute_layout(r, &r->dynamic_surface_layout, sources, 10, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_surface_layout(RENDERER *r) {
@@ -702,9 +727,9 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
 
 static bool bind_dynamic_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const DYNAMIC_LIGHTING_ALLOCATION *allocation,
                                            const DYNAMIC_SURFACE_UNIFORMS *uniforms) {
-    if (!r || !cmd || !allocation || !allocation->texture || !allocation->sample_buffer || !uniforms || !r->dynamic_static_node_buffer ||
-        !r->dynamic_static_triangle_buffer || !r->dynamic_static_surface_buffer || !r->dynamic_static_uv_buffer || !r->beam_buffer ||
-        !r->lightmap_texture || !r->lightmap_sampler)
+    if (!r || !cmd || !allocation || !allocation->texture || !allocation->sample_buffer || !allocation->self_node_buffer ||
+        !allocation->self_triangle_buffer || !uniforms || !r->dynamic_static_node_buffer || !r->dynamic_static_triangle_buffer ||
+        !r->dynamic_static_surface_buffer || !r->dynamic_static_uv_buffer || !r->beam_buffer || !r->lightmap_texture || !r->lightmap_sampler)
         return false;
 
     if (!gpu_transition_texture(r, cmd, r->lightmap_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
@@ -719,12 +744,14 @@ static bool bind_dynamic_surface_resources(RENDERER *r, NriCommandBuffer *cmd, c
         gpu_create_buffer_view(r, r->dynamic_static_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
         gpu_create_buffer_view(r, r->dynamic_static_surface_buffer, NriBufferView_STRUCTURED_BUFFER, 16u),
         gpu_create_buffer_view(r, r->dynamic_static_uv_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(LMAP_UV)),
+        gpu_create_buffer_view(r, allocation->self_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
+        gpu_create_buffer_view(r, allocation->self_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
         gpu_create_texture_view(r, r->lightmap_texture, NriTextureView_TEXTURE),
         r->lightmap_sampler,
     };
     NriDescriptor *dst = gpu_create_texture_view(r, allocation->texture, NriTextureView_STORAGE_TEXTURE);
 
-    return gpu_bind_descriptor_set(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 0, src, 8) &&
+    return gpu_bind_descriptor_set(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 0, src, 10) &&
            gpu_bind_descriptor_set(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
            gpu_bind_uniform_data(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
 }
@@ -1028,6 +1055,8 @@ static void release_dynamic_lighting(RENDERER *r) {
         release_texture(r, r->dynamic_lighting[i].texture);
         release_texture(r, r->dynamic_lighting[i].reference_texture);
         release_buffer(r, r->dynamic_lighting[i].sample_buffer);
+        release_buffer(r, r->dynamic_lighting[i].self_node_buffer);
+        release_buffer(r, r->dynamic_lighting[i].self_triangle_buffer);
     }
 
     free(r->dynamic_lighting);
@@ -1799,6 +1828,7 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
 
         if (count) {
             const MAT4 model = m4_transform(object->transform, false);
+            const MAT4 inverse_model = m4_inverse_transform(object->transform);
             const MAT4 normal_model = m4_transform(object->transform, true);
             DYNAMIC_SURFACE_UNIFORMS uniforms = {
                 .sample_offset = allocation->sample_cursor,
@@ -1816,6 +1846,7 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
             };
 
             memcpy(uniforms.model, model.m, sizeof(uniforms.model));
+            memcpy(uniforms.inverse_model, inverse_model.m, sizeof(uniforms.inverse_model));
             memcpy(uniforms.normal_model, normal_model.m, sizeof(uniforms.normal_model));
 
             if (!bind_dynamic_surface_resources(r, cmd, allocation, &uniforms)) return false;
@@ -2590,7 +2621,20 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
             gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, allocation->layout->samples,
                               (size_t)allocation->layout->sample_count * sizeof(*allocation->layout->samples), sizeof(LMAP_SAMPLE));
 
-        if (!allocation->texture || !allocation->sample_buffer) {
+        BVH self_tree = {0};
+
+        if (allocation->texture && allocation->sample_buffer && bvh_build(&self_tree, model->geometry, model->visual)) {
+            allocation->self_node_buffer =
+                gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, self_tree.nodes,
+                                  (size_t)self_tree.node_count * sizeof(*self_tree.nodes), sizeof(BVH_NODE));
+            allocation->self_triangle_buffer =
+                gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, self_tree.triangles,
+                                  (size_t)self_tree.triangle_count * sizeof(*self_tree.triangles), sizeof(BVH_TRIANGLE));
+        }
+
+        bvh_free(&self_tree);
+
+        if (!allocation->texture || !allocation->sample_buffer || !allocation->self_node_buffer || !allocation->self_triangle_buffer) {
             renderer->dynamic_lighting_count = out;
             release_dynamic_lighting(renderer);
             return false;
