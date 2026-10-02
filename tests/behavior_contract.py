@@ -99,6 +99,64 @@ def main() -> None:
             raise AssertionError(f"{path}: fallback define {fallback} missing from source/include graph")
 
     game = text("game.h")
+    gltf = text("gltf.c")
+    render = text("render.c")
+    fragment = text("shaders/fragment.hlsl")
+
+    advanced_material_fields = (
+        "ior",
+        "transmission_factor",
+        "thickness_factor",
+        "attenuation_color",
+        "attenuation_distance",
+        "iridescence_factor",
+        "iridescence_ior",
+        "iridescence_thickness_min",
+        "iridescence_thickness_max",
+        "transmission_texture",
+        "thickness_texture",
+        "iridescence_texture",
+        "iridescence_thickness_texture",
+    )
+    missing = [field for field in advanced_material_fields if field not in game]
+    if missing:
+        raise AssertionError(f"advanced glTF material state missing: {missing}")
+
+    for extension in (
+        "KHR_materials_ior",
+        "KHR_materials_transmission",
+        "KHR_materials_volume",
+        "KHR_materials_iridescence",
+    ):
+        if extension not in gltf:
+            raise AssertionError(f"glTF material extension parser missing: {extension}")
+
+    for needle in (
+        "transmission_pipeline",
+        "snapshot_scene_color",
+        "NriAccessBits_COPY_SOURCE",
+        "NriAccessBits_COPY_DESTINATION",
+        "material_transmissive",
+        "iridescence_thickness",
+    ):
+        if needle not in render:
+            raise AssertionError(f"advanced material renderer path missing: {needle}")
+
+    for needle in (
+        "Texture2D<float4> Transmission",
+        "Texture2D<float4> Thickness",
+        "Texture2D<float4> Iridescence",
+        "Texture2D<float4> IridescenceThickness",
+        "Texture2D<float4> SceneColor",
+        "thin_film_fresnel",
+        "volume_attenuation",
+        "refracted_scene_uv",
+        "environment_radiance",
+        "transmission_weight",
+    ):
+        if needle not in fragment:
+            raise AssertionError(f"advanced material shader path missing: {needle}")
+
     for field in ("layout_hash", "volume_hash", "beam_hash", "object_probes", "volume_probes", "beams"):
         if field not in game:
             raise AssertionError(f"cache ABI field missing: {field}")
