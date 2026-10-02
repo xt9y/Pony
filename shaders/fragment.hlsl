@@ -402,9 +402,10 @@ float3 dynamic_receiver_sample(float2 uv) {
         if (stored == 0u || stored > 1024u || generation == 0u || generation > 1024u) continue;
 
         uint age = generation >= stored ? generation - stored : generation + 1024u - stored;
-        if (age > 12u) continue;
+        if (age > 48u) continue;
 
-        float freshness = age <= 8u ? 1.0f : saturate(1.0f - (float)(age - 8u) / 5.0f);
+        float freshness = age <= 8u ? 1.0f : saturate(1.0f - (float)(age - 8u) / 40.0f);
+        freshness *= freshness * (3.0f - 2.0f * freshness);
         float fresh_weight = weight * freshness;
         sum += max(sample.rgb, 0.0f) * fresh_weight;
         weight_sum += fresh_weight;
