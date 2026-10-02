@@ -214,6 +214,15 @@ def main() -> None:
         if needle not in fragment:
             raise AssertionError(f"advanced material shader path missing: {needle}")
 
+    for needle in (
+        "float3 visible_emissive(float3 emissive)",
+        "const float knee = 4.0f;",
+        "const float white = 12.0f;",
+        "visible_emissive(emissive)",
+    ):
+        if needle not in fragment:
+            raise AssertionError(f"visible emissive compression missing: {needle}")
+
     for field in ("layout_hash", "volume_hash", "beam_hash", "object_probes", "volume_probes", "beams"):
         if field not in game:
             raise AssertionError(f"cache ABI field missing: {field}")
