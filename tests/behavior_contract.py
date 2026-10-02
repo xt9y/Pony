@@ -441,9 +441,17 @@ def main() -> None:
         if needle not in cache:
             raise AssertionError(f"versioned separated direct-light cache missing: {needle}")
 
-    for needle in ("baked_direct_texture", "upload_direct_lightmap"):
+    for needle in ("baked_direct_texture", "upload_direct_lightmap", "src, 19"):
         if needle not in game + render + text("bake.c"):
             raise AssertionError(f"persistent baked direct term missing: {needle}")
+
+    for needle in (
+        "Texture2D<float4> BakedDirect",
+        "exact_baked_direct",
+        "exact_baked_direct * (dynamic_visibility - 1.0f)",
+    ):
+        if needle not in fragment:
+            raise AssertionError(f"surface shader does not modulate exact baked direct term: {needle}")
 
     bake = text("bake.c")
     for needle in ("job->scene = &scene->static_geometry;", "job->visual = &scene->static_visual;", "job->layout = scene->lightmap;"):
