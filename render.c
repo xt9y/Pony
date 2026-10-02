@@ -459,6 +459,9 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     VEC3 local_center;
     VEC3 local_extents;
     float local_radius;
+    VEC3 local_emissive_center;
+    VEC3 local_emissive_extents;
+    float local_emissive_radius;
     VEC3 average_diffuse;
     VEC3 average_emissive;
     float emissive_weight;
@@ -1996,13 +1999,16 @@ static uint32_t dynamic_receiver_instances(RENDERER *r, DYNAMIC_RECEIVER_UNIFORM
         uniforms->dynamic_instance_emissive[count][2] = area_scale;
         uniforms->dynamic_instance_emissive[count][3] = world_weight > 0.0f ? 1.0f : 0.0f;
 
-        const VEC3 center = m4_point(model, allocation->local_center);
+        const VEC3 center = m4_point(model, allocation->local_emissive_center);
         const VEC3 axis_x =
-            v3(model.m[0] * allocation->local_extents.x, model.m[1] * allocation->local_extents.x, model.m[2] * allocation->local_extents.x);
+            v3(model.m[0] * allocation->local_emissive_extents.x, model.m[1] * allocation->local_emissive_extents.x,
+               model.m[2] * allocation->local_emissive_extents.x);
         const VEC3 axis_y =
-            v3(model.m[4] * allocation->local_extents.y, model.m[5] * allocation->local_extents.y, model.m[6] * allocation->local_extents.y);
+            v3(model.m[4] * allocation->local_emissive_extents.y, model.m[5] * allocation->local_emissive_extents.y,
+               model.m[6] * allocation->local_emissive_extents.y);
         const VEC3 axis_z =
-            v3(model.m[8] * allocation->local_extents.z, model.m[9] * allocation->local_extents.z, model.m[10] * allocation->local_extents.z);
+            v3(model.m[8] * allocation->local_emissive_extents.z, model.m[9] * allocation->local_emissive_extents.z,
+               model.m[10] * allocation->local_emissive_extents.z);
         const float radius = fmaxf(sqrtf(v3_len_sq(axis_x) + v3_len_sq(axis_y) + v3_len_sq(axis_z)), 1.0e-3f);
 
         uniforms->dynamic_instance_center_radius[count][0] = center.x;
@@ -3328,6 +3334,48 @@ static bool append_dynamic_bvh(BVH_NODE **nodes, uint32_t *node_count, BVH_TRIAN
     return true;
 }
 
+static bool dynamic_emissive_bounds(const BVH *tree, VEC3 *center, VEC3 *extents, float *radius) {
+    if (!tree || !center || !extents || !radius || !tree->triangles || !tree->triangle_count || tree->emissive_weight <= 1.0e-8f)
+        return false;
+
+    VEC3 minimum = v3(FLT_MAX, FLT_MAX, FLT_MAX);
+    VEC3 maximum = v3(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+    float previous_weight = 0.0f;
+    bool found = false;
+
+    for (uint32_t i = 0u; i < tree->triangle_count; ++i) {
+        const BVH_TRIANGLE *triangle = &tree->triangles[i];
+        const float weight = triangle->emissive[3] - previous_weight;
+        previous_weight = triangle->emissive[3];
+
+        if (weight <= 1.0e-10f) continue;
+
+        const VEC3 vertices[3] = {
+            v3(triangle->a[0], triangle->a[1], triangle->a[2]),
+            v3(triangle->b[0], triangle->b[1], triangle->b[2]),
+            v3(triangle->c[0], triangle->c[1], triangle->c[2]),
+        };
+
+        for (uint32_t vertex = 0u; vertex < 3u; ++vertex) {
+            minimum.x = fminf(minimum.x, vertices[vertex].x);
+            minimum.y = fminf(minimum.y, vertices[vertex].y);
+            minimum.z = fminf(minimum.z, vertices[vertex].z);
+            maximum.x = fmaxf(maximum.x, vertices[vertex].x);
+            maximum.y = fmaxf(maximum.y, vertices[vertex].y);
+            maximum.z = fmaxf(maximum.z, vertices[vertex].z);
+        }
+
+        found = true;
+    }
+
+    if (!found) return false;
+
+    *center = v3_scale(v3_add(minimum, maximum), 0.5f);
+    *extents = v3_scale(v3_sub(maximum, minimum), 0.5f);
+    *radius = sqrtf(v3_len_sq(*extents));
+    return *radius > 0.0f;
+}
+
 static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene) {
     uint32_t count = 0u;
 
@@ -3404,6 +3452,14 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
 
         if (good) {
             allocation->emissive_weight = tree.emissive_weight;
+
+            if (!dynamic_emissive_bounds(&tree, &allocation->local_emissive_center,
+                                         &allocation->local_emissive_extents, &allocation->local_emissive_radius)) {
+                allocation->local_emissive_center = allocation->local_center;
+                allocation->local_emissive_extents = allocation->local_extents;
+                allocation->local_emissive_radius = allocation->local_radius;
+            }
+
             good = append_dynamic_bvh(&packed_nodes, &packed_node_count, &packed_triangles, &packed_triangle_count, &tree, allocation);
         }
 
