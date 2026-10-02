@@ -2072,20 +2072,25 @@ static uint32_t dynamic_receiver_mark_active_cells(RENDERER *r, const DYNAMIC_RE
         const float radius = object_radius + influence;
         int minimum[3];
         int maximum[3];
+        bool outside_grid = false;
 
         for (uint32_t axis = 0u; axis < 3u; ++axis) {
-            minimum[axis] = (int)floorf((center[axis] - radius - r->dynamic_receiver_grid_min[axis]) / cell_size);
-            maximum[axis] = (int)floorf((center[axis] + radius - r->dynamic_receiver_grid_min[axis]) / cell_size);
+            int lo = (int)floorf((center[axis] - radius - r->dynamic_receiver_grid_min[axis]) / cell_size);
+            int hi = (int)floorf((center[axis] + radius - r->dynamic_receiver_grid_min[axis]) / cell_size);
+            const int dim = (int)r->dynamic_receiver_grid_dims[axis];
 
-            if (minimum[axis] < 0) minimum[axis] = 0;
-            if (maximum[axis] < 0) continue;
-            if ((uint32_t)minimum[axis] >= r->dynamic_receiver_grid_dims[axis]) minimum[axis] = (int)r->dynamic_receiver_grid_dims[axis] - 1;
-            if ((uint32_t)maximum[axis] >= r->dynamic_receiver_grid_dims[axis]) maximum[axis] = (int)r->dynamic_receiver_grid_dims[axis] - 1;
+            if (hi < 0 || lo >= dim) {
+                outside_grid = true;
+                break;
+            }
+
+            if (lo < 0) lo = 0;
+            if (hi >= dim) hi = dim - 1;
+            minimum[axis] = lo;
+            maximum[axis] = hi;
         }
 
-        if (maximum[0] < 0 || maximum[1] < 0 || maximum[2] < 0 ||
-            minimum[0] >= (int)dim_x || minimum[1] >= (int)dim_y || minimum[2] >= (int)dim_z)
-            continue;
+        if (outside_grid) continue;
 
         const float radius2 = radius * radius;
 
