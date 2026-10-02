@@ -2196,11 +2196,32 @@ static void bake_free_job(BAKE_JOB *job) {
     free(job);
 }
 
-bool bake_start(RENDERER *renderer, const MESH *scene, const GLTF_SCENE *visual, const LIGHTMAP *layout, const struct LIGHT *light, const SKY *sky,
-                const VOLUMETRICS_LIGHTING *volumetrics, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
+static const struct LIGHT *bake_scene_directional_light(const SCENE *scene) {
+    if (!scene) return NULL;
+
+    for (uint32_t i = 0; i < scene->object_count; ++i) {
+        const OBJECT *object = &scene->objects[i];
+
+        if (object->type != LIGHT || !object->data) continue;
+
+        const struct LIGHT *light = object->data;
+
+        if (light->type == LIGHT_DIRECTIONAL) return light;
+    }
+
+    return NULL;
+}
+
+bool bake_start(RENDERER *renderer, const SCENE *scene, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
                 uint64_t beam_hash) {
-    if (!renderer || !renderer->gpu->device || !scene || !visual || !layout || !light || light->type != LIGHT_DIRECTIONAL || !sky || !volumetrics || !path)
+    if (!renderer || !renderer->gpu->device || !scene || !scene->compiled || !scene->lightmap_valid || !scene->lightmap || !path) return false;
+
+    const struct LIGHT *light = bake_scene_directional_light(scene);
+
+    if (!light) {
+        SDL_SetError("scene has no directional light");
         return false;
+    }
 
     if (g_bake) {
         SDL_SetError("a bake is already in progress");
@@ -2212,12 +2233,12 @@ bool bake_start(RENDERER *renderer, const MESH *scene, const GLTF_SCENE *visual,
     if (!job) return false;
 
     job->renderer = renderer;
-    job->scene = scene;
-    job->visual = visual;
-    job->layout = layout;
+    job->scene = &scene->geometry;
+    job->visual = &scene->visual;
+    job->layout = scene->lightmap;
     job->light = light;
-    job->sky = *sky;
-    job->volumetrics = *volumetrics;
+    job->sky = scene->sky;
+    job->volumetrics = scene->volumetrics;
     job->scene_hash = scene_hash;
     job->layout_hash = layout_hash;
     job->volume_hash = volume_hash;
