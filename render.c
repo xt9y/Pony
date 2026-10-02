@@ -330,14 +330,15 @@ typedef struct DYNAMIC_SURFACE_UNIFORMS {
     Uint32 texture_width;
     Uint32 texture_height;
 
-    float probe_origin_spacing[4];
-    Uint32 probe_dims[4];
     float beam_origin[4];
     float beam_step[4];
     Uint32 beam_dims[4];
 
     float sun_direction_intensity[4];
     float sun_color_visibility_floor[4];
+    float sky_zenith[4];
+    float sky_horizon[4];
+    float trace_params[4];
 } DYNAMIC_SURFACE_UNIFORMS;
 
 typedef struct SSAO_UNIFORMS {
@@ -504,10 +505,13 @@ static bool create_dynamic_shadow_layout(RENDERER *r) {
 }
 
 static bool create_dynamic_surface_layout(RENDERER *r) {
-    static const NriDescriptorType sources[] = {NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
-                                                NriDescriptorType_STRUCTURED_BUFFER};
+    static const NriDescriptorType sources[] = {
+        NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER,
+    };
 
-    return gpu_create_compute_layout(r, &r->dynamic_surface_layout, sources, 3, NriDescriptorType_STORAGE_TEXTURE, true);
+    return gpu_create_compute_layout(r, &r->dynamic_surface_layout, sources, 8, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_surface_layout(RENDERER *r) {
@@ -693,24 +697,29 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
 
 static bool bind_dynamic_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const DYNAMIC_LIGHTING_ALLOCATION *allocation,
                                            const DYNAMIC_SURFACE_UNIFORMS *uniforms) {
-    if (!r || !cmd || !allocation || !allocation->texture || !allocation->sample_buffer || !uniforms) return false;
+    if (!r || !cmd || !allocation || !allocation->texture || !allocation->sample_buffer || !uniforms || !r->dynamic_static_node_buffer ||
+        !r->dynamic_static_triangle_buffer || !r->dynamic_static_surface_buffer || !r->dynamic_static_uv_buffer || !r->beam_buffer ||
+        !r->lightmap_texture || !r->lightmap_sampler)
+        return false;
 
-    NriBuffer *probes = r->volume_probe_buffer ? r->volume_probe_buffer : r->surface_probe_fallback_buffer;
-    NriBuffer *beams = r->beam_buffer ? r->beam_buffer : r->surface_beam_fallback_buffer;
-
-    if (!probes || !beams ||
+    if (!gpu_transition_texture(r, cmd, r->lightmap_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
         !gpu_transition_texture(r, cmd, allocation->texture, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE,
                                 NriStageBits_COMPUTE_SHADER))
         return false;
 
     NriDescriptor *src[] = {
         gpu_create_buffer_view(r, allocation->sample_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(LMAP_SAMPLE)),
-        gpu_create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
-        gpu_create_buffer_view(r, beams, NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
+        gpu_create_buffer_view(r, r->beam_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
+        gpu_create_buffer_view(r, r->dynamic_static_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
+        gpu_create_buffer_view(r, r->dynamic_static_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
+        gpu_create_buffer_view(r, r->dynamic_static_surface_buffer, NriBufferView_STRUCTURED_BUFFER, 16u),
+        gpu_create_buffer_view(r, r->dynamic_static_uv_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(LMAP_UV)),
+        gpu_create_texture_view(r, r->lightmap_texture, NriTextureView_TEXTURE),
+        r->lightmap_sampler,
     };
     NriDescriptor *dst = gpu_create_texture_view(r, allocation->texture, NriTextureView_STORAGE_TEXTURE);
 
-    return gpu_bind_descriptor_set(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 0, src, 3) &&
+    return gpu_bind_descriptor_set(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 0, src, 8) &&
            gpu_bind_descriptor_set(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
            gpu_bind_uniform_data(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
 }
@@ -1725,7 +1734,9 @@ static bool render_dynamic_shadow_map(RENDERER *r, NriCommandBuffer *cmd, const 
 static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame) {
     if (!r || !cmd || !frame) return false;
     if (r->reference_lighting_enabled || !r->has_bake || !r->dynamic_lighting_count) return true;
-    if (!r->dynamic_surface_pipeline || !r->volume_probe_buffer || !r->beam_buffer) return true;
+    if (!r->dynamic_surface_pipeline || !r->beam_buffer || !r->dynamic_static_node_buffer || !r->dynamic_static_triangle_buffer ||
+        !r->dynamic_static_surface_buffer || !r->dynamic_static_uv_buffer)
+        return true;
 
     uint32_t dirty_count = 0u;
 
@@ -1772,13 +1783,14 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
                 .sample_count = count,
                 .texture_width = allocation->layout->width,
                 .texture_height = allocation->layout->height,
-                .probe_origin_spacing = {r->volume_probes.origin.x, r->volume_probes.origin.y, r->volume_probes.origin.z, r->volume_probes.spacing},
-                .probe_dims = {r->volume_probes.count_x, r->volume_probes.count_y, r->volume_probes.count_z, 1u},
                 .beam_origin = {r->beams.origin.x, r->beams.origin.y, r->beams.origin.z, 0.0f},
                 .beam_step = {r->beams.step.x, r->beams.step.y, r->beams.step.z, 0.0f},
                 .beam_dims = {r->beams.width, r->beams.height, r->beams.depth, 1u},
                 .sun_direction_intensity = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, frame->sun.intensity},
                 .sun_color_visibility_floor = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, 1.0f / 1024.0f},
+                .sky_zenith = {frame->sky.zenith.x, frame->sky.zenith.y, frame->sky.zenith.z, frame->sky.intensity},
+                .sky_horizon = {frame->sky.horizon.x, frame->sky.horizon.y, frame->sky.horizon.z, 1.0f},
+                .trace_params = {fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f), 0.0f, 0.0f, 0.0f},
             };
 
             memcpy(uniforms.model, model.m, sizeof(uniforms.model));
