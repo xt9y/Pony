@@ -225,6 +225,16 @@ typedef struct MATERIAL_UNIFORMS {
     float sun_direction[4];
     float sun_color[4];
     float camera_position[4];
+
+    float ior_transmission_volume[4];
+    float attenuation_iridescence[4];
+    float iridescence_params[4];
+
+    float camera_right_tan[4];
+    float camera_up_tan[4];
+    float camera_forward[4];
+    float sky_zenith[4];
+    float sky_horizon[4];
 } MATERIAL_UNIFORMS;
 
 typedef struct SSAO_UNIFORMS {
@@ -269,10 +279,14 @@ struct RENDER_MATERIAL {
     NriTexture *normal;
     NriTexture *occlusion;
     NriTexture *emissive;
+    NriTexture *transmission;
+    NriTexture *thickness;
+    NriTexture *iridescence;
+    NriTexture *iridescence_thickness;
 };
 
-static NriPipeline *make_surface_pipeline(RENDERER *r, NriCoreInterface *core, NriPipelineLayout *layout, const NriShaderDesc *vs, const NriShaderDesc *ps) {
-
+static NriPipeline *make_surface_pipeline(RENDERER *r, NriCoreInterface *core, NriPipelineLayout *layout, const NriShaderDesc *vs, const NriShaderDesc *ps,
+                                          bool transmission) {
     const NriVertexStreamDesc vb = {.bindingSlot = 0, .stepRate = NriVertexStreamStepRate_PER_VERTEX, .stride = (uint16_t)sizeof(RENDER_VERTEX)};
 
     const NriVertexAttributeDesc attrs[4] = {{.d3d = {.semanticName = "TEXCOORD", .semanticIndex = 0},
@@ -299,39 +313,32 @@ static NriPipeline *make_surface_pipeline(RENDERER *r, NriCoreInterface *core, N
     const NriVertexInputDesc vertex_input = {.attributes = attrs, .attributeNum = 4, .streams = &vb, .streamNum = 1};
 
     const NriColorAttachmentDesc targets[2] = {{.format = NriFormat_RGBA16_SFLOAT, .colorWriteMask = NriColorWriteBits_RGBA},
-                                               {.format = NriFormat_RGBA16_SFLOAT, .colorWriteMask = NriColorWriteBits_RGBA}};
+                                               {.format = NriFormat_RGBA16_SFLOAT,
+                                                .colorWriteMask = transmission ? NriColorWriteBits_NONE : NriColorWriteBits_RGBA}};
 
     const NriMultisampleDesc multisample = {.sampleMask = NRI_ALL, .sampleNum = 1};
-
     const NriShaderDesc shaders[2] = {*vs, *ps};
 
     const NriGraphicsPipelineDesc desc = {
         .pipelineLayout = layout,
-
         .vertexInput = &vertex_input,
-
         .inputAssembly = {.topology = NriTopology_TRIANGLE_LIST},
-
-        .rasterization = {.fillMode = NriFillMode_SOLID, .cullMode = NriCullMode_NONE, .frontCounterClockwise = true, .depthClamp = false},
-
+        .rasterization = {.fillMode = NriFillMode_SOLID,
+                          .cullMode = transmission ? NriCullMode_BACK : NriCullMode_NONE,
+                          .frontCounterClockwise = true,
+                          .depthClamp = false},
         .multisample = &multisample,
-
         .outputMerger = {.colors = targets,
                          .colorNum = 2,
-
-                         .depth = {.compareOp = NriCompareOp_LESS, .write = true},
-
+                         .depth = {.compareOp = transmission ? NriCompareOp_LESS_EQUAL : NriCompareOp_LESS, .write = !transmission},
                          .depthStencilFormat = r->depth_format},
-
         .shaders = shaders,
         .shaderNum = 2,
         .cache = r->gpu->pipeline_cache};
 
     NriPipeline *pipeline = NULL;
 
-    if (core->CreateGraphicsPipeline(r->gpu->device, &desc, &pipeline) != NriResult_SUCCESS) {
-        return NULL;
-    }
+    if (core->CreateGraphicsPipeline(r->gpu->device, &desc, &pipeline) != NriResult_SUCCESS) return NULL;
 
     return pipeline;
 }
@@ -339,14 +346,15 @@ static NriPipeline *make_surface_pipeline(RENDERER *r, NriCoreInterface *core, N
 static bool create_surface_layout(RENDERER *r) {
     static const NriDescriptorType camera[] = {NriDescriptorType_CONSTANT_BUFFER};
 
-    static const NriDescriptorType material[] = {NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
-                                                 NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER,
-                                                 NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
+    static const NriDescriptorType material[] = {
+        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
+        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
+        NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
 
     const NriDescriptorType *sets[4] = {NULL, camera, material, uniform};
-    const uint8_t counts[4] = {0, 1, 12, 1};
+    const uint8_t counts[4] = {0, 1, 14, 1};
 
     return gpu_create_pipeline_layout(r, &r->surface_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
@@ -479,22 +487,25 @@ static bool bind_camera_resources(RENDERER *r, NriCommandBuffer *cmd, const void
     return gpu_bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 1, data, size);
 }
 
-static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const RENDER_MATERIAL *material, NriTexture *lightmap, NriDescriptor *material_sampler,
-                                   NriDescriptor *lightmap_sampler, const void *uniforms, size_t size) {
+static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const RENDER_MATERIAL *material, NriTexture *lightmap, NriTexture *scene_color,
+                                   NriDescriptor *material_sampler, NriDescriptor *lightmap_sampler, NriDescriptor *scene_sampler, const void *uniforms,
+                                   size_t size) {
     NriDescriptor *src[] = {gpu_create_texture_view(r, material->base_color, NriTextureView_TEXTURE),
                             gpu_create_texture_view(r, material->metallic_roughness, NriTextureView_TEXTURE),
                             gpu_create_texture_view(r, material->normal, NriTextureView_TEXTURE),
                             gpu_create_texture_view(r, material->occlusion, NriTextureView_TEXTURE),
                             gpu_create_texture_view(r, material->emissive, NriTextureView_TEXTURE),
                             gpu_create_texture_view(r, lightmap, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, material->transmission, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, material->thickness, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, material->iridescence, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, material->iridescence_thickness, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, scene_color, NriTextureView_TEXTURE),
                             material_sampler,
-                            material_sampler,
-                            material_sampler,
-                            material_sampler,
-                            material_sampler,
-                            lightmap_sampler};
+                            lightmap_sampler,
+                            scene_sampler};
 
-    return gpu_bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 12) &&
+    return gpu_bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 14) &&
            gpu_bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
 }
 
@@ -502,17 +513,15 @@ static bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *
     return gpu_bind_uniform_data(r, cmd, r->line_layout, NriBindPoint_GRAPHICS, 1, data, size);
 }
 
-static bool begin_scene_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTexture *hdr, NriTexture *normal, NriTexture *depth, uint32_t width, uint32_t height) {
+static bool begin_surface_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTexture *hdr, NriTexture *normal, NriTexture *depth, uint32_t width,
+                                    uint32_t height, bool load) {
     NriDescriptor *hdr_view = gpu_create_texture_view(r, hdr, NriTextureView_COLOR_ATTACHMENT);
-
     NriDescriptor *normal_view = gpu_create_texture_view(r, normal, NriTextureView_COLOR_ATTACHMENT);
-
     NriDescriptor *depth_view = gpu_create_texture_view(r, depth, NriTextureView_DEPTH_STENCIL_ATTACHMENT);
 
     if (!hdr_view || !normal_view || !depth_view) return false;
 
     const NriAccessLayoutStage color = {NriAccessBits_COLOR_ATTACHMENT, NriLayout_COLOR_ATTACHMENT, NriStageBits_COLOR_ATTACHMENT};
-
     const NriAccessLayoutStage depth_state = {NriAccessBits_DEPTH_STENCIL_ATTACHMENT, NriLayout_DEPTH_STENCIL_ATTACHMENT,
                                               NriStageBits_DEPTH_STENCIL_ATTACHMENT};
 
@@ -520,19 +529,32 @@ static bool begin_scene_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTexture
         !gpu_texture_barrier(r, cmd, depth, (NriAccessLayoutStage){0}, depth_state))
         return false;
 
-    const NriAttachmentDesc colors[2] = {{.descriptor = hdr_view, .loadOp = NriLoadOp_CLEAR, .storeOp = NriStoreOp_STORE},
-                                         {.descriptor = normal_view, .loadOp = NriLoadOp_CLEAR, .storeOp = NriStoreOp_STORE}};
+    const NriLoadOp load_op = load ? NriLoadOp_LOAD : NriLoadOp_CLEAR;
+    const NriAttachmentDesc colors[2] = {{.descriptor = hdr_view, .loadOp = load_op, .storeOp = NriStoreOp_STORE},
+                                         {.descriptor = normal_view, .loadOp = load_op, .storeOp = NriStoreOp_STORE}};
 
     const NriRenderingDesc desc = {
         .colors = colors,
         .colorNum = 2,
-        .depth = {.descriptor = depth_view, .loadOp = NriLoadOp_CLEAR, .storeOp = NriStoreOp_STORE, .clearValue = {.depthStencil = {.depth = 1.0f}}}};
+        .depth = {.descriptor = depth_view, .loadOp = load_op, .storeOp = NriStoreOp_STORE, .clearValue = {.depthStencil = {.depth = 1.0f}}}};
 
     r->gpu->core.CmdSetViewports(cmd, &(NriViewport){.width = (float)width, .height = (float)height, .depthMax = 1.0f}, 1);
     r->gpu->core.CmdSetScissors(cmd, &(NriRect){.width = (NriDim_t)width, .height = (NriDim_t)height}, 1);
     r->gpu->core.CmdBeginRendering(cmd, &desc);
 
     return true;
+}
+
+static bool snapshot_scene_color(RENDERER *r, NriCommandBuffer *cmd) {
+    if (!r || !cmd || !r->fx.hdr || !r->fx.scene_color) return false;
+
+    if (!gpu_transition_texture(r, cmd, r->fx.hdr, NriAccessBits_COPY_SOURCE, NriLayout_COPY_SOURCE, NriStageBits_COPY) ||
+        !gpu_transition_texture(r, cmd, r->fx.scene_color, NriAccessBits_COPY_DESTINATION, NriLayout_COPY_DESTINATION, NriStageBits_COPY))
+        return false;
+
+    r->gpu->core.CmdCopyTexture(cmd, r->fx.scene_color, NULL, r->fx.hdr, NULL);
+
+    return gpu_transition_texture(r, cmd, r->fx.scene_color, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_FRAGMENT_SHADER);
 }
 
 static bool begin_compose_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTexture *swap, NriTexture *hdr, NriTexture *ao, NriTexture *bloom, NriTexture *lut,
@@ -761,6 +783,7 @@ static void release_scene_resources(RENDERER *r) {
     free(r->materials);
     r->materials = NULL;
     r->material_count = 0;
+    r->has_transmission = false;
 
     release_texture(r, r->default_white);
     release_texture(r, r->default_normal);
@@ -803,6 +826,7 @@ static bool upload_scene(RENDERER *r, const GLTF_SCENE *visual) {
     if (!load_images(r, visual)) return false;
 
     r->material_count = visual->material_count;
+    r->has_transmission = false;
     r->materials = calloc(r->material_count, sizeof(*r->materials));
 
     if (!r->materials) return false;
@@ -815,6 +839,12 @@ static bool upload_scene(RENDERER *r, const GLTF_SCENE *visual) {
         m->normal = resolve_texture(r, visual, m->data.normal_texture, r->default_normal);
         m->occlusion = resolve_texture(r, visual, m->data.occlusion_texture, r->default_white);
         m->emissive = resolve_texture(r, visual, m->data.emissive_texture, r->default_white);
+        m->transmission = resolve_texture(r, visual, m->data.transmission_texture, r->default_white);
+        m->thickness = resolve_texture(r, visual, m->data.thickness_texture, r->default_white);
+        m->iridescence = resolve_texture(r, visual, m->data.iridescence_texture, r->default_white);
+        m->iridescence_thickness = resolve_texture(r, visual, m->data.iridescence_thickness_texture, r->default_white);
+
+        r->has_transmission |= m->data.transmission_factor > 0.0f;
     }
 
     r->lightmap_sampler = gpu_create_sampler(r, NriFilter_LINEAR, NriFilter_LINEAR, NriAddressMode_CLAMP_TO_EDGE);
@@ -843,6 +873,7 @@ static void release_frame_textures(FX_STATE *fx) {
     RENDERER *r = fx->owner;
 
     release_texture(r, fx->hdr);
+    release_texture(r, fx->scene_color);
     release_texture(r, fx->normal_depth);
     release_texture(r, fx->ao);
     release_texture(r, fx->bloom_a);
@@ -851,6 +882,7 @@ static void release_frame_textures(FX_STATE *fx) {
     release_texture(r, fx->lit);
 
     fx->hdr = NULL;
+    fx->scene_color = NULL;
     fx->normal_depth = NULL;
     fx->ao = NULL;
     fx->bloom_a = NULL;
@@ -988,6 +1020,7 @@ static bool fx_ensure(FX_STATE *fx, Uint32 width, Uint32 height) {
     const NriTextureUsageBits compute = NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE;
 
     fx->hdr = gpu_create_texture(r, NriFormat_RGBA16_SFLOAT, rt, width, height);
+    fx->scene_color = gpu_create_texture(r, NriFormat_RGBA16_SFLOAT, NriTextureUsageBits_SHADER_RESOURCE, width, height);
     fx->normal_depth = gpu_create_texture(r, NriFormat_RGBA16_SFLOAT, rt, width, height);
     fx->ao = gpu_create_texture(r, NriFormat_RGBA16_SFLOAT, compute, fx->ao_width, fx->ao_height);
     fx->bloom_a = gpu_create_texture(r, NriFormat_RGBA16_SFLOAT, compute, fx->ao_width, fx->ao_height);
@@ -995,7 +1028,7 @@ static bool fx_ensure(FX_STATE *fx, Uint32 width, Uint32 height) {
     fx->volume = gpu_create_texture(r, NriFormat_RGBA16_SFLOAT, compute, fx->ao_width, fx->ao_height);
     fx->lit = gpu_create_texture(r, NriFormat_RGBA16_SFLOAT, compute, width, height);
 
-    if (!fx->hdr || !fx->normal_depth || !fx->ao || !fx->bloom_a || !fx->bloom_b || !fx->volume || !fx->lit) {
+    if (!fx->hdr || !fx->scene_color || !fx->normal_depth || !fx->ao || !fx->bloom_a || !fx->bloom_b || !fx->volume || !fx->lit) {
         release_frame_textures(fx);
 
         return false;
@@ -1207,7 +1240,8 @@ bool renderer_gpu_resources_init(RENDERER *r) {
         return false;
     }
 
-    r->solid_pipeline = make_surface_pipeline(r, &r->gpu->core, r->surface_layout, &surface_vs, &surface_ps);
+    r->solid_pipeline = make_surface_pipeline(r, &r->gpu->core, r->surface_layout, &surface_vs, &surface_ps, false);
+    r->transmission_pipeline = make_surface_pipeline(r, &r->gpu->core, r->surface_layout, &surface_vs, &surface_ps, true);
     r->line_pipeline = make_line_pipeline(r, r->line_layout, &line_vs, &line_ps);
     r->sky_pipeline = make_sky_pipeline(r, r->sky_layout, &sky_vs, &sky_ps);
 
@@ -1218,7 +1252,7 @@ bool renderer_gpu_resources_init(RENDERER *r) {
     gpu_free_shader(&sky_vs);
     gpu_free_shader(&sky_ps);
 
-    if (!r->solid_pipeline || !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
+    if (!r->solid_pipeline || !r->transmission_pipeline || !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
         renderer_gpu_resources_deinit(r);
         return false;
     }
@@ -1227,6 +1261,42 @@ bool renderer_gpu_resources_init(RENDERER *r) {
     SDL_Log("depth format: %s", r->depth_format == NriFormat_D32_SFLOAT ? "D32_FLOAT" : r->depth_format == NriFormat_D24_UNORM_S8_UINT ? "D24S8" : "D16_UNORM");
     SDL_Log("SDL_image: %d", IMG_Version());
 
+    return true;
+}
+
+static bool material_transmissive(const RENDER_MATERIAL *material) {
+    return material && material->data.transmission_factor > 0.0f;
+}
+
+static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATERIAL *material, const RENDER_FRAME *frame) {
+    return (MATERIAL_UNIFORMS){
+        .base_color_factor = {material->data.base_color[0], material->data.base_color[1], material->data.base_color[2], material->data.base_color[3]},
+        .emissive_metallic = {material->data.emissive[0], material->data.emissive[1], material->data.emissive[2], material->data.metallic},
+        .roughness_normal_ao_sun = {material->data.roughness, material->data.normal_scale, material->data.occlusion_strength, frame->sun.intensity},
+        .sun_direction = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, frame->sun.intensity},
+        .sun_color = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, frame->sun.angular_radius},
+        .camera_position = {frame->eye.x, frame->eye.y, frame->eye.z, r->debug_view == 1u ? 2.0f : (r->has_bake ? 1.0f : 0.0f)},
+        .ior_transmission_volume = {material->data.ior, material->data.transmission_factor, material->data.thickness_factor, material->data.attenuation_distance},
+        .attenuation_iridescence = {material->data.attenuation_color[0], material->data.attenuation_color[1], material->data.attenuation_color[2],
+                                    material->data.iridescence_factor},
+        .iridescence_params = {material->data.iridescence_ior, material->data.iridescence_thickness_min, material->data.iridescence_thickness_max, 0.0f},
+        .camera_right_tan = {frame->right.x, frame->right.y, frame->right.z, frame->tan_half_fov * frame->aspect},
+        .camera_up_tan = {frame->up.x, frame->up.y, frame->up.z, frame->tan_half_fov},
+        .camera_forward = {frame->forward.x, frame->forward.y, frame->forward.z, 0.0f},
+        .sky_zenith = {frame->sky.zenith.x, frame->sky.zenith.y, frame->sky.zenith.z, frame->sky.intensity},
+        .sky_horizon = {frame->sky.horizon.x, frame->sky.horizon.y, frame->sky.horizon.z, 1.0f}};
+}
+
+static bool draw_surface_range(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame, const DRAW_RANGE *draw, NriTexture *scene_color,
+                               NriDescriptor *scene_sampler) {
+    const RENDER_MATERIAL *material = &r->materials[draw->material];
+    const MATERIAL_UNIFORMS uniforms = material_uniforms(r, material, frame);
+
+    if (!bind_surface_resources(r, cmd, material, r->lightmap_texture, scene_color, r->material_sampler, r->lightmap_sampler, scene_sampler, &uniforms,
+                                sizeof(uniforms)))
+        return false;
+
+    r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){.vertexNum = draw->count, .instanceNum = 1, .baseVertex = draw->first, .baseInstance = 0});
     return true;
 }
 
@@ -1266,15 +1336,13 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
                               .sun_direction_intensity = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, frame->sun.intensity},
                               .sun_color_radius = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, frame->sun.angular_radius}};
 
-    if (!begin_scene_rendering(r, cmd, r->fx.hdr, r->fx.normal_depth, r->depth_texture, width, height)) goto failed_frame;
+    if (!begin_surface_rendering(r, cmd, r->fx.hdr, r->fx.normal_depth, r->depth_texture, width, height, false)) goto failed_frame;
 
     if (!bind_sky_resources(r, cmd, &sky, sizeof(sky))) goto failed_frame;
     r->gpu->core.CmdSetPipeline(cmd, r->sky_pipeline);
-
     r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){.vertexNum = 3, .instanceNum = 1, .baseVertex = 0, .baseInstance = 0});
 
     const NriVertexBufferDesc vertex = {.buffer = r->vertex_buffer, .offset = 0, .stride = sizeof(RENDER_VERTEX)};
-
     r->gpu->core.CmdSetVertexBuffers(cmd, 0, &vertex, 1);
     r->gpu->core.CmdSetPipeline(cmd, r->solid_pipeline);
 
@@ -1282,19 +1350,9 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
 
     for (uint32_t i = 0; i < r->draw_count; ++i) {
         const DRAW_RANGE *draw = &r->draws[i];
-        const RENDER_MATERIAL *m = &r->materials[draw->material];
 
-        const MATERIAL_UNIFORMS material = {
-            .base_color_factor = {m->data.base_color[0], m->data.base_color[1], m->data.base_color[2], m->data.base_color[3]},
-            .emissive_metallic = {m->data.emissive[0], m->data.emissive[1], m->data.emissive[2], m->data.metallic},
-            .roughness_normal_ao_sun = {m->data.roughness, m->data.normal_scale, m->data.occlusion_strength, frame->sun.intensity},
-            .sun_direction = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, 0},
-            .sun_color = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, 1},
-            .camera_position = {frame->eye.x, frame->eye.y, frame->eye.z, r->debug_view == 1u ? 2.0f : (r->has_bake ? 1.0f : 0.0f)}};
-
-        if (!bind_surface_resources(r, cmd, m, r->lightmap_texture, r->material_sampler, r->lightmap_sampler, &material, sizeof(material))) goto failed_frame;
-
-        r->gpu->core.CmdDraw(cmd, &(NriDrawDesc){.vertexNum = draw->count, .instanceNum = 1, .baseVertex = draw->first, .baseInstance = 0});
+        if (material_transmissive(&r->materials[draw->material])) continue;
+        if (!draw_surface_range(r, cmd, frame, draw, r->default_white, r->material_sampler)) goto failed_frame;
     }
 
     if (r->show_debug && r->debug_vertex_count) {
@@ -1306,6 +1364,26 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     }
 
     r->gpu->core.CmdEndRendering(cmd);
+
+    if (r->has_transmission) {
+        if (!snapshot_scene_color(r, cmd) ||
+            !begin_surface_rendering(r, cmd, r->fx.hdr, r->fx.normal_depth, r->depth_texture, width, height, true))
+            goto failed_frame;
+
+        r->gpu->core.CmdSetVertexBuffers(cmd, 0, &vertex, 1);
+        r->gpu->core.CmdSetPipeline(cmd, r->transmission_pipeline);
+
+        if (!bind_camera_resources(r, cmd, &camera, sizeof(camera))) goto failed_frame;
+
+        for (uint32_t i = 0; i < r->draw_count; ++i) {
+            const DRAW_RANGE *draw = &r->draws[i];
+
+            if (!material_transmissive(&r->materials[draw->material])) continue;
+            if (!draw_surface_range(r, cmd, frame, draw, r->fx.scene_color, r->fx.sampler)) goto failed_frame;
+        }
+
+        r->gpu->core.CmdEndRendering(cmd);
+    }
 
     r->fx.volume_ready = false;
     r->fx.debug_view = r->debug_view;
@@ -1371,6 +1449,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         if (r->lightmap_sampler) gpu->core.DestroyDescriptor(r->lightmap_sampler);
         if (r->sky_pipeline) gpu->core.DestroyPipeline(r->sky_pipeline);
         if (r->solid_pipeline) gpu->core.DestroyPipeline(r->solid_pipeline);
+        if (r->transmission_pipeline) gpu->core.DestroyPipeline(r->transmission_pipeline);
         if (r->line_pipeline) gpu->core.DestroyPipeline(r->line_pipeline);
 
         destroy_pipeline_layouts(r);
