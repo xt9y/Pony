@@ -271,6 +271,7 @@ def main() -> None:
         "shaders/vertex.hlsl",
         "shaders/fragment.hlsl",
         "shaders/dynamic_surface.hlsl",
+        "shaders/dynamic_receiver.hlsl",
         "shaders/compute.hlsl",
         "shaders/compute_base.hlsl",
         "shaders/vision_compute.hlsl",
