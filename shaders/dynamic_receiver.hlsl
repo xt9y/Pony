@@ -405,7 +405,7 @@ void dynamic_receiver_cs(uint3 id : SV_DispatchThreadID) {
         float3 current = emissive_sum / (float)EMISSIVE_SAMPLES;
         float4 history = Source.Load(int3(uint2(pixel % dispatch_data.z, pixel / dispatch_data.z), 0));
         uint history_age = generation_age(history.a, generation);
-        float age_weight = history_age <= 12u ? 1.0f - (float)history_age / 13.0f : 0.0f;
+        float age_weight = history_age <= 32u ? 1.0f - (float)history_age / 33.0f : 0.0f;
         float history_weight = saturate(temporal_params.x) * age_weight;
         float3 accumulated = lerp(current, max(history.rgb, 0.0f), history_weight);
 
