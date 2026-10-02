@@ -376,6 +376,11 @@ def main() -> None:
         raise AssertionError("normal dynamic motion must not rebuild the full flattened CPU scene")
     if "if (!scene_compile(r->scene)) return false;" not in render:
         raise AssertionError("F2 reference mode must rebuild the full current scene before oracle baking")
+    if "if (r->reference_lighting_enabled || !r->has_bake" in render:
+        raise AssertionError("reference mode must not freeze runtime cache convergence")
+    for needle in ("acceptance_transform_revision", "acceptance_scene_lighting_revision"):
+        if needle not in render:
+            raise AssertionError(f"one-shot acceptance logging state missing: {needle}")
 
     for needle in (
         "GPU_FRAME_QUEUE_DEPTH",
@@ -571,8 +576,14 @@ def main() -> None:
 
     for needle in (
         "log_dynamic_matte_reference_error(",
-        "dynamic acceptance object %u: matte cache coverage",
+        "DYNAMIC_ACCEPTANCE_MIN_COVERAGE_PERCENT 99.0",
+        "DYNAMIC_ACCEPTANCE_MAX_RGB_MAE 0.03",
+        "DYNAMIC_ACCEPTANCE_MAX_NRMSE 0.10",
+        'accepted ? "PASS" : "FAIL"',
+        "dynamic acceptance object %u: %s | matte cache coverage",
         "allocation->transform_revision != object->transform_revision",
+        "allocation->scene_lighting_revision != r->scene->lighting_revision",
+        "allocation->sample_pass < DYNAMIC_SURFACE_CONVERGENCE_PASSES",
         "allocation->lighting_revision != object->lighting_revision",
         "r->dynamic_lighting_count == 1u",
         "bvh_build(&self_tree, model_data->geometry, model_data->visual)",
