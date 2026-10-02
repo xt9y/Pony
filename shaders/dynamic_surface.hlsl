@@ -312,6 +312,8 @@ float3 static_outgoing(uint triangle_index, float3 barycentric, bool back_face) 
     return albedo * lighting + emissive;
 }
 
+float beam_visibility(float3 position);
+
 float3 trace_static_indirect(float3 position, float3 normal, uint sample_id) {
     float3 sum = 0.0f;
     float epsilon = max(trace_params.x, 1.0e-5f);
