@@ -571,9 +571,9 @@ static BAKE_UNIFORMS bake_data(RENDERER *r, Uint32 phase, Uint32 iteration, Uint
         .sun_color_radius = {sun.color.x, sun.color.y, sun.color.z, sun.angular_radius},
         .sky_zenith = {sky.zenith.x, sky.zenith.y, sky.zenith.z, 1.0f},
         .sky_horizon = {sky.horizon.x, sky.horizon.y, sky.horizon.z, 1.0f},
-        .bake_params = {r->bake_epsilon, 0.72f, sky.intensity, (float)r->lightmap_min_samples},
+        .bake_params = {r->bake_epsilon, r->bake_full_transport ? -0.72f : 0.72f, sky.intensity, (float)r->lightmap_min_samples},
         .probe_origin_spacing = {r->lightmap_probe_origin.x, r->lightmap_probe_origin.y, r->lightmap_probe_origin.z, r->lightmap_probe_spacing},
-        .probe_dims_mode = {r->lightmap_probe_count_x, r->lightmap_probe_count_y, r->lightmap_probe_count_z, r->bake_full_transport ? 1u : 0u},
+        .probe_dims_mode = {r->lightmap_probe_count_x, r->lightmap_probe_count_y, r->lightmap_probe_count_z, 0u},
         .emissive_data = {r->bvh_emissive_weight, (float)r->bvh_triangle_count, r->volumetrics.emissive_probe_intensity,
                           (float)LIGHTMAP_EMISSIVE_MAX_SAMPLES}};
 }
