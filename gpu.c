@@ -3080,7 +3080,7 @@ static bool probe_wavefront_scratch_ensure(RENDERER *r, uint64_t node_bytes, uin
     return true;
 }
 
-static void probe_wavefront_scratch_destroy(RENDERER *r) {
+void probe_wavefront_scratch_destroy(RENDERER *r) {
     if (!r || !r->probe_scratch) return;
 
     PROBE_WAVEFRONT_SCRATCH *scratch = r->probe_scratch;
