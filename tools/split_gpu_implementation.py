@@ -45,12 +45,14 @@ for old, new in (
     ("create_texture_view", "gpu_create_texture_view"),
     ("sampler", "gpu_create_sampler"),
     ("clear_temporary", "gpu_clear_temporary"),
+    ("create_compute_layout", "gpu_create_compute_layout"),
 ):
     source = re.sub(rf"\b{old}\s*\(", f"{new}(", source)
 
 source = re.sub(r"(^|\n)static (?=[^\n]*\bgpu_create_texture_view\s*\()", r"\1", source)
 source = re.sub(r"(^|\n)static (?=[^\n]*\bgpu_create_sampler\s*\()", r"\1", source)
 source = re.sub(r"(^|\n)static (?=[^\n]*\bgpu_clear_temporary\s*\()", r"\1", source)
+source = re.sub(r"(^|\n)static (?=[^\n]*\bgpu_create_compute_layout\s*\()", r"\1", source)
 
 # Generic offscreen GPU infrastructure used by the bake worker.
 if "bool gpu_init_worker(GPU *gpu)" not in source:
