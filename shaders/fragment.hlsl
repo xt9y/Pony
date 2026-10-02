@@ -717,8 +717,34 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
             baked = max(baked + static_direct * cached_sun_visibility * (dynamic_visibility - 1.0f), 0.0f);
     }
 
-    if (reference_mode < 0.5f && camera_position.w > 0.5f)
-        baked = max(baked + signed_dynamic_near_field(input.world_position, geometric_normal), 0.0f);
+    float3 dynamic_correction = 0.0f;
+
+    if (reference_mode < 0.5f && camera_position.w > 0.5f) {
+        dynamic_correction = signed_dynamic_near_field(input.world_position, geometric_normal);
+        baked = max(baked + dynamic_correction, 0.0f);
+    }
+
+    if (dynamic_flags.w > 4.5f && dynamic_flags.w < 5.5f) {
+        float3 cache_debug = is_dynamic > 0.5f
+                                 ? (dynamic_cache_valid > 0.5f ? float3(0.05f, 1.0f, 0.05f) : float3(1.0f, 0.2f, 0.02f))
+                                 : float3(0.04f, 0.04f, 0.04f);
+
+        if (reference_mode > 0.5f) cache_debug = lerp(cache_debug, float3(0.05f, 0.25f, 1.0f), 0.55f);
+
+        output.hdr = float4(cache_debug, 1.0f);
+        output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f, max(input.view_depth, 0.0f));
+        return output;
+    }
+
+    if (dynamic_flags.w > 5.5f && dynamic_flags.w < 6.5f) {
+        float negative = length(max(-dynamic_correction, 0.0f));
+        float positive = length(max(dynamic_correction, 0.0f));
+        float3 correction_debug = saturate(float3(negative, positive, 0.0f) * 6.0f);
+
+        output.hdr = float4(correction_debug, 1.0f);
+        output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f, max(input.view_depth, 0.0f));
+        return output;
+    }
 
     if (camera_position.w > 1.5f) {
         output.hdr = float4(baked, 1.0f);
