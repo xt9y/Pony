@@ -214,6 +214,7 @@ def main() -> None:
         "bool renderer_gpu_resources_init(",
         "bool draw_frame(",
         "void renderer_gpu_resources_deinit(",
+        "static void free_probe_grid(",
     )
     require(
         "render.c",
