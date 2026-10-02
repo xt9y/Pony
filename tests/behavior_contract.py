@@ -271,7 +271,7 @@ def main() -> None:
         'strncmp(path, "static:", 7u) == 0',
         "DYNAMIC_Z_AMPLITUDE 1.0f",
         "DYNAMIC_Z_PERIOD_SECONDS 4.0f",
-        "animated_dynamic_base_z + sinf(phase) * DYNAMIC_Z_AMPLITUDE",
+        "const float z = sinf(phase) * DYNAMIC_Z_AMPLITUDE",
         "object_set_transform(animated, moved)",
         "scene_build_lightmap(&scene, LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE)",
         "scene_content_hash(&scene)",
@@ -621,6 +621,7 @@ def main() -> None:
 
     for needle in (
         "seed.direct_pixels = black_pixel",
+        "release_texture(r, r->baked_direct_texture)",
         "cache_write(job->worker_path",
     ):
         if needle not in bake:
