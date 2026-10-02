@@ -366,6 +366,8 @@ def main() -> None:
         "dynamic_lighting_find_const(",
         "allocation->transform_revision == object->transform_revision",
         "allocation->lighting_revision == object->lighting_revision",
+        "allocation->scene_lighting_revision == r->scene->lighting_revision",
+        "pending_scene_lighting_revision",
     ):
         if needle not in render:
             raise AssertionError(f"stale dynamic cache rejection missing: {needle}")
@@ -402,8 +404,10 @@ def main() -> None:
         "dynamic_static_node_buffer",
         "dynamic_static_surface_buffer",
         "dynamic_static_uv_buffer",
-        "self_node_buffer",
-        "self_triangle_buffer",
+        "dynamic_object_node_buffer",
+        "dynamic_object_triangle_buffer",
+        "dynamic_trace_instance_write(",
+        "dynamic_trace_instances(",
         "m4_inverse_transform(",
         "gpu_clear_texture_zero(",
         "update_dynamic_surface_caches(",
@@ -430,8 +434,14 @@ def main() -> None:
         "StructuredBuffer<float2> StaticUVs",
         "StructuredBuffer<BvhNode> SelfNodes",
         "StructuredBuffer<BvhTriangle> SelfTriangles",
+        "dynamic_instance_inverse",
+        "dynamic_instance_normal",
+        "dynamic_instance_meta",
         "Texture2D<float4> StaticLightmap",
         "static_closest(",
+        "instance_closest(",
+        "dynamic_closest(",
+        "dynamic_any(",
         "self_closest(",
         "self_any(",
         "static_lightmap_uv(",
@@ -471,6 +481,15 @@ def main() -> None:
     ):
         if needle not in render:
             raise AssertionError(f"dynamic near-field influence descriptor missing: {needle}")
+
+    for needle in (
+        "dynamic_proxy_reflection_hit(",
+        "dynamic_reflection_radiance(",
+        "dynamic_reflection_weight",
+        "reflected = lerp(reflected, dynamic_reflection, dynamic_reflection_weight)",
+    ):
+        if needle not in fragment:
+            raise AssertionError(f"bounded dynamic reflection integration missing: {needle}")
 
     for needle in (
         "signed_dynamic_near_field(",
@@ -526,7 +545,7 @@ def main() -> None:
 
     for needle in (
         "cached_sun_visibility",
-        "if (self_any(shadow))",
+        "if (dynamic_any(shadow))",
         "lighting = max(lighting - baked_sun, 0.0f)",
     ):
         if needle not in dynamic_surface:
