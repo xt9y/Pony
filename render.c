@@ -20,6 +20,9 @@
 #define DYNAMIC_TIMESTAMP_BASE 8u
 #define DYNAMIC_TIMESTAMP_STRIDE 4u
 #define DYNAMIC_TIMING_LOG_INTERVAL 120u
+#define DYNAMIC_ACCEPTANCE_MIN_COVERAGE_PERCENT 99.0
+#define DYNAMIC_ACCEPTANCE_MAX_RGB_MAE 0.03
+#define DYNAMIC_ACCEPTANCE_MAX_NRMSE 0.10
 
 typedef struct MAT4 {
     float m[16];
@@ -3103,8 +3106,12 @@ static void log_dynamic_matte_reference_error(RENDERER *r, const DYNAMIC_LIGHTIN
     const double nrmse = reference_rms > 1.0e-6 ? rmse / reference_rms : 0.0;
     const double coverage = total ? (double)compared * 100.0 / (double)total : 0.0;
 
-    SDL_Log("dynamic acceptance object %u: matte cache coverage %.1f%% | RGB MAE %.5f | RMSE %.5f | NRMSE %.2f%% | max %.5f",
-            allocation->object_id, coverage, mae, rmse, nrmse * 100.0, maximum);
+    const bool accepted = coverage >= DYNAMIC_ACCEPTANCE_MIN_COVERAGE_PERCENT &&
+                          mae <= DYNAMIC_ACCEPTANCE_MAX_RGB_MAE &&
+                          nrmse <= DYNAMIC_ACCEPTANCE_MAX_NRMSE;
+
+    SDL_Log("dynamic acceptance object %u: %s | matte cache coverage %.1f%% | RGB MAE %.5f | RMSE %.5f | NRMSE %.2f%% | max %.5f",
+            allocation->object_id, accepted ? "PASS" : "FAIL", coverage, mae, rmse, nrmse * 100.0, maximum);
 
     bvh_free(&self_tree);
     free(runtime);
