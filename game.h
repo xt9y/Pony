@@ -640,6 +640,9 @@ struct RENDERER {
     PROBE_GRID volume_probes;
     NriBuffer *volume_probe_buffer;
     NriBuffer *beam_buffer;
+    /* Always-bound dummy resources for surface lighting before a bake exists. */
+    NriBuffer *surface_probe_fallback_buffer;
+    NriBuffer *surface_beam_fallback_buffer;
     BEAM_GRID beams;
 
     FX_STATE fx;
