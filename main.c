@@ -49,19 +49,33 @@ static char *bake_cache_path(const char *model_path) {
     return path;
 }
 
+static void free_models(MODEL_ASSET *models, int count) {
+    if (!models) return;
+
+    for (int i = 0; i < count; ++i) model_free(&models[i]);
+
+    free(models);
+}
+
 int main(int argc, char **argv) {
-    const char *model_path = argc > 1 ? argv[1] : "concrete_temple.glb";
-    const char *filename = strrchr(model_path, '/');
-    const char *windows_filename = strrchr(model_path, '\\');
+    const int model_count = argc > 1 ? argc - 1 : 1;
+    const char *first_model_path = argc > 1 ? argv[1] : "concrete_temple.glb";
+    const char *filename = strrchr(first_model_path, '/');
+    const char *windows_filename = strrchr(first_model_path, '\\');
 
     if (windows_filename && (!filename || windows_filename > filename)) filename = windows_filename;
 
-    char *bake_path = bake_cache_path(model_path);
+    char *bake_path = bake_cache_path(first_model_path);
 
     if (!bake_path) return 1;
 
     char title[512];
-    snprintf(title, sizeof(title), "INIT | %s", filename ? filename + 1 : model_path);
+
+    if (model_count == 1) {
+        snprintf(title, sizeof(title), "INIT | %s", filename ? filename + 1 : first_model_path);
+    } else {
+        snprintf(title, sizeof(title), "INIT | %d models", model_count);
+    }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         fprintf(stderr, "Could not initialize SDL: %s\n", SDL_GetError());
@@ -69,13 +83,15 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    const Uint64 load_begin = SDL_GetPerformanceCounter();
-    GLB_DOC document = {0};
-    MESH geometry = {0};
-    GLTF_SCENE visual = {0};
-    LIGHTMAP lightmap = {0};
+    MODEL_ASSET *models = calloc((size_t)model_count, sizeof(*models));
 
-    struct MODEL model = {.geometry = &geometry, .visual = &visual};
+    if (!models) {
+        SDL_Quit();
+        free(bake_path);
+        return 1;
+    }
+
+    LIGHTMAP lightmap = {0};
 
     struct LIGHT sun = {.type = LIGHT_DIRECTIONAL,
                         .directional = {.direction = {0.38f, 0.30f, 0.32f}, .color = {1.00f, 0.94f, 0.84f}, .intensity = 1.0f, .angular_radius = 0.00465f}};
@@ -103,24 +119,36 @@ int main(int argc, char **argv) {
                               .peripheral_stride = 24u},
                    .lightmap = &lightmap};
 
+    const Uint64 load_begin = SDL_GetPerformanceCounter();
     const char *startup_stage = NULL;
     const char *startup_detail = NULL;
+    size_t total_bin_size = 0;
 
-    if (!glb_load(&document, model_path)) {
-        startup_stage = "GLB load";
-        startup_detail = glb_error(&document);
-    } else if (!glb_extract_mesh(&document, model.geometry)) {
-        startup_stage = "mesh extraction";
-    } else if (!gltf_extract(&document, model.visual)) {
-        startup_stage = "visual glTF extraction";
-    } else if (!scene_add_model(&scene, &model, STATIC, transform_identity()) || !scene_add_light(&scene, &sun, STATIC, transform_identity())) {
-        startup_stage = "scene composition";
+    for (int i = 0; i < model_count && !startup_stage; ++i) {
+        const char *path = argc > 1 ? argv[i + 1] : first_model_path;
+
+        if (!model_load(&models[i], path)) {
+            startup_stage = "model load";
+            startup_detail = SDL_GetError();
+            break;
+        }
+
+        total_bin_size += models[i].document.bin_size;
+
+        TRANSFORM transform = transform_identity();
+
+        if (!scene_add_model(&scene, &models[i].model, STATIC, transform)) {
+            startup_stage = "scene composition";
+            break;
+        }
     }
+
+    if (!startup_stage && !scene_add_light(&scene, &sun, STATIC, transform_identity())) startup_stage = "scene composition";
 
     const double load_ms = elapsed_ms(load_begin);
     const Uint64 atlas_begin = SDL_GetPerformanceCounter();
 
-    if (!startup_stage && !lmap_build(&lightmap, model.geometry, LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE)) startup_stage = "lightmap atlas generation";
+    if (!startup_stage && !scene_build_lightmap(&scene, LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE)) startup_stage = "lightmap atlas generation";
 
     const double atlas_ms = elapsed_ms(atlas_begin);
 
@@ -152,18 +180,16 @@ int main(int argc, char **argv) {
         gpu_deinit(&gpu);
         scene_free(&scene);
         lmap_free(&lightmap);
-        gltf_free(model.visual);
-        mesh_free(model.geometry);
-        glb_free(&document);
+        free_models(models, model_count);
         SDL_Quit();
         free(bake_path);
         return 1;
     }
 
-    const uint64_t scene_hash = hash_bytes(0, document.data, document.data_size);
+    const uint64_t scene_hash = scene_content_hash(&scene);
     uint64_t layout_hash = hash_bytes(0, &lightmap.width, sizeof(lightmap.width));
     layout_hash = hash_bytes(layout_hash, &lightmap.height, sizeof(lightmap.height));
-    layout_hash = hash_bytes(layout_hash, lightmap.uvs, geometry.faces.count * 6u * sizeof(*lightmap.uvs));
+    layout_hash = hash_bytes(layout_hash, lightmap.uvs, scene.geometry.faces.count * 6u * sizeof(*lightmap.uvs));
 
     const uint32_t bake_settings[] = {
         LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE, 128u, 3u, 4u, 32u, 2u, 32u, 8u, 50u, 75u, 1u, 4u, 16u, 2u, 1u, 1u, 4u, 995u, 25u, 60u, 100u};
@@ -191,10 +217,10 @@ int main(int argc, char **argv) {
 
     SDL_SetWindowTitle(gpu.window, cached ? "READY" : "UNBAKED");
 
-    printf("%s: %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n", model_path, load_ms, geometry.vertices.count, geometry.faces.count,
-           (double)document.bin_size / (1024.0 * 1024.0));
-    printf("Visual: %zu vertices | %u materials | %u textures | %u images\n", visual.vertex_count, visual.material_count, visual.texture_count,
-           visual.image_count);
+    printf("Scene: %d model%s | %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n", model_count, model_count == 1 ? "" : "s", load_ms,
+           scene.geometry.vertices.count, scene.geometry.faces.count, (double)total_bin_size / (1024.0 * 1024.0));
+    printf("Visual: %zu vertices | %u materials | %u textures | %u images\n", scene.visual.vertex_count, scene.visual.material_count,
+           scene.visual.texture_count, scene.visual.image_count);
     printf("Lightmap: %.2f ms atlas | %ux%u | %u charts | %.2f texels/unit | %u valid texels\n", atlas_ms, lightmap.width, lightmap.height,
            lightmap.chart_count, lightmap.texel_density, lightmap.sample_count);
     printf("Lighting: %s. Press B to rebake this scene in the renderer.\n", cached ? "loaded saved bake" : "unbaked fallback");
@@ -219,8 +245,7 @@ int main(int argc, char **argv) {
                 if (event.key.scancode == SDL_SCANCODE_B || event.key.key == SDLK_B) {
                     SDL_ClearError();
 
-                    if (!bake_start(&renderer, model.geometry, model.visual, &lightmap, &sun, &scene.sky, &scene.volumetrics, bake_path, scene_hash,
-                                    layout_hash, volume_hash, beam_hash)) {
+                    if (!bake_start(&renderer, &scene, bake_path, scene_hash, layout_hash, volume_hash, beam_hash)) {
                         SDL_Log("B: could not start rebake: %s", *SDL_GetError() ? SDL_GetError() : "unknown error");
                     }
                 }
@@ -265,10 +290,8 @@ int main(int argc, char **argv) {
     renderer_deinit(&renderer);
     gpu_deinit(&gpu);
     scene_free(&scene);
-    gltf_free(model.visual);
     lmap_free(&lightmap);
-    mesh_free(model.geometry);
-    glb_free(&document);
+    free_models(models, model_count);
     SDL_Quit();
     free(bake_path);
 
