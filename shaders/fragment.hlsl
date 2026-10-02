@@ -21,6 +21,12 @@ GPU_BIND_T(8, 2) Texture2D<float4> Iridescence : register(t8, space2);
 GPU_BIND_T(9, 2) Texture2D<float4> IridescenceThickness : register(t9, space2);
 GPU_BIND_T(10, 2) Texture2D<float4> SceneColor : register(t10, space2);
 GPU_BIND_T(11, 2) Texture2D<float> DynamicShadow : register(t11, space2);
+struct SurfaceProbe {
+    float4 position;
+    float4 coefficient[9];
+};
+GPU_BIND_T(12, 2) StructuredBuffer<float> SurfaceBeams : register(t12, space2);
+GPU_BIND_T(13, 2) StructuredBuffer<SurfaceProbe> SurfaceProbes : register(t13, space2);
 
 GPU_BIND_S(0, 2) SamplerState MaterialSampler : register(s0, space2);
 GPU_BIND_S(1, 2) SamplerState LightmapSampler : register(s1, space2);
@@ -51,6 +57,12 @@ GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3) {
     float4 shadow_extent_bias;
     float4 shadow_texel_enabled;
     float4 dynamic_flags;
+
+    float4 probe_origin_spacing;
+    uint4 probe_dims;
+    float4 beam_origin;
+    float4 beam_step;
+    uint4 beam_dims;
 };
 
 struct SurfaceInput {
@@ -222,6 +234,111 @@ float dynamic_shadow_visibility(float3 position) {
     return visibility / 9.0f;
 }
 
+float3 surface_probe_value(SurfaceProbe probe, float3 normal) {
+    const float nx = normal.x, ny = normal.y, nz = normal.z;
+    float3 irradiance = probe.coefficient[0].rgb * (0.2820947918f * PI);
+    irradiance += (probe.coefficient[1].rgb * (0.4886025119f * ny) +
+                   probe.coefficient[2].rgb * (0.4886025119f * nz) +
+                   probe.coefficient[3].rgb * (0.4886025119f * nx)) * (2.0f * PI / 3.0f);
+    irradiance += (probe.coefficient[4].rgb * (1.0925484306f * nx * ny) +
+                   probe.coefficient[5].rgb * (1.0925484306f * ny * nz) +
+                   probe.coefficient[6].rgb * (0.3153915653f * (3.0f * nz * nz - 1.0f)) +
+                   probe.coefficient[7].rgb * (1.0925484306f * nx * nz) +
+                   probe.coefficient[8].rgb * (0.5462742153f * (nx * nx - ny * ny))) * (PI * 0.25f);
+    return max(irradiance, 0.0f);
+}
+
+float3 surface_probe_irradiance(float3 position, float3 normal) {
+    if (probe_dims.w == 0u || probe_dims.x == 0u || probe_dims.y == 0u || probe_dims.z == 0u || probe_origin_spacing.w <= 0.0f)
+        return float3(0.12f, 0.12f, 0.12f) * PI;
+
+    normal = normalize(normal);
+    float3 coord = clamp((position - probe_origin_spacing.xyz) / probe_origin_spacing.w, 0.0f, float3(probe_dims.xyz) - 1.0f);
+    uint3 base = uint3(floor(coord));
+    float3 fraction = frac(coord);
+    float3 sum = 0.0f;
+    float weight_sum = 0.0f;
+
+    [unroll] for (uint z = 0u; z < 2u; ++z)
+    [unroll] for (uint y = 0u; y < 2u; ++y)
+    [unroll] for (uint x = 0u; x < 2u; ++x) {
+        uint3 cell = min(base + uint3(x, y, z), probe_dims.xyz - 1u);
+        float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
+        float weight = axis_weight.x * axis_weight.y * axis_weight.z;
+        SurfaceProbe probe = SurfaceProbes[cell.x + probe_dims.x * (cell.y + probe_dims.y * cell.z)];
+
+        weight *= saturate(probe.position.w);
+        if (weight <= 0.0f) continue;
+
+        sum += surface_probe_value(probe, normal) * weight;
+        weight_sum += weight;
+    }
+
+    if (weight_sum > 0.0f) return sum / weight_sum;
+
+    float best_distance2 = 1.0e30f;
+    uint best_index = 0u;
+    bool found = false;
+    int3 center = int3(floor(coord + 0.5f));
+
+    [unroll] for (int z = -1; z <= 1; ++z)
+    [unroll] for (int y = -1; y <= 1; ++y)
+    [unroll] for (int x = -1; x <= 1; ++x) {
+        int3 cell = center + int3(x, y, z);
+        if (any(cell < 0) || any(cell >= int3(probe_dims.xyz))) continue;
+
+        uint index = (uint)cell.x + probe_dims.x * ((uint)cell.y + probe_dims.y * (uint)cell.z);
+        SurfaceProbe probe = SurfaceProbes[index];
+        if (probe.position.w <= 0.0f) continue;
+
+        float3 delta = probe.position.xyz - position;
+        float distance2 = dot(delta, delta);
+        if (distance2 < best_distance2) {
+            best_distance2 = distance2;
+            best_index = index;
+            found = true;
+        }
+    }
+
+    return found ? surface_probe_value(SurfaceProbes[best_index], normal) : float3(0.12f, 0.12f, 0.12f) * PI;
+}
+
+float static_beam_visibility(float3 position) {
+    if (beam_dims.w == 0u || beam_dims.x == 0u || beam_dims.y == 0u || beam_dims.z == 0u ||
+        beam_step.x <= 0.0f || beam_step.y <= 0.0f || beam_step.z <= 0.0f)
+        return 1.0f;
+
+    float3 sun = normalize(sun_direction.xyz);
+    float3 helper = abs(sun.y) < 0.999f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+    float3 u = normalize(cross(helper, sun));
+    float3 v = cross(sun, u);
+    float3 q = float3(dot(position, u), dot(position, v), dot(position, sun));
+    float3 coord = (q - beam_origin.xyz) / beam_step.xyz - 0.5f;
+
+    if (any(coord < -0.5f) || any(coord > float3(beam_dims.xyz) - 0.5f)) return 1.0f;
+
+    int3 base = int3(floor(coord));
+    float3 fraction = frac(coord);
+    float visibility = 0.0f;
+    float total = 0.0f;
+
+    [unroll] for (uint z = 0u; z < 2u; ++z)
+    [unroll] for (uint y = 0u; y < 2u; ++y)
+    [unroll] for (uint x = 0u; x < 2u; ++x) {
+        int3 cell = base + int3(x, y, z);
+        if (any(cell < 0) || any(cell >= int3(beam_dims.xyz))) continue;
+
+        float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
+        float weight = axis_weight.x * axis_weight.y * axis_weight.z;
+        uint index = (uint)cell.x + beam_dims.x * ((uint)cell.y + beam_dims.y * (uint)cell.z);
+
+        visibility += SurfaceBeams[index] * weight;
+        total += weight;
+    }
+
+    return total > 0.0f ? saturate(visibility / total) : 1.0f;
+}
+
 float3 environment_radiance(float3 direction, float roughness) {
     direction = normalize(direction);
 
@@ -328,29 +445,39 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     float g = geometry_schlick(n_dot_v, roughness) * geometry_schlick(n_dot_l, roughness);
     float3 specular = d * g * f / max(4.0f * n_dot_v * max(n_dot_l, 0.001f), 1.0e-4f);
 
+    float is_dynamic = saturate(dynamic_flags.x);
+    float dynamic_cache_valid = saturate(dynamic_flags.y);
     float4 baked_sample = camera_position.w > 0.5f ? Lightmap.Sample(LightmapSampler, front_face ? input.lightmap_uv : input.back_lightmap_uv)
                                                     : float4(0.12f, 0.12f, 0.12f, 1.0f);
-    float3 baked = max(baked_sample.rgb, 0.0f);
-
-    if (camera_position.w > 1.5f) {
-        output.hdr = float4(baked, 1.0f);
-        output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f, max(input.view_depth, 0.0f));
-        return output;
-    }
 
     const float visibility_floor = 1.0f / 1024.0f;
     float cached_sun_visibility = camera_position.w > 0.5f
                                       ? saturate((baked_sample.a - visibility_floor) / (1.0f - visibility_floor))
                                       : 1.0f;
-    float dynamic_visibility = dynamic_shadow_visibility(input.world_position);
-    float is_dynamic = saturate(dynamic_flags.x);
-    float sun_visibility = lerp(cached_sun_visibility * dynamic_visibility, cached_sun_visibility, is_dynamic);
 
-    if (camera_position.w > 0.5f && is_dynamic < 0.5f) {
-        float3 geometric_normal = normalize(input.world_normal) * (front_face ? 1.0f : -1.0f);
-        float geometric_n_dot_l = max(dot(geometric_normal, l), 0.0f);
+    float3 geometric_normal = normalize(input.world_normal) * (front_face ? 1.0f : -1.0f);
+    float geometric_n_dot_l = max(dot(geometric_normal, l), 0.0f);
+
+    if (is_dynamic > 0.5f && dynamic_cache_valid < 0.5f) {
+        baked_sample.rgb = surface_probe_irradiance(input.world_position, geometric_normal) / PI;
+        cached_sun_visibility = static_beam_visibility(input.world_position);
+    }
+
+    float dynamic_visibility = dynamic_shadow_visibility(input.world_position);
+    float sun_visibility = cached_sun_visibility * dynamic_visibility;
+    float3 baked = max(baked_sample.rgb, 0.0f);
+
+    if (is_dynamic > 0.5f && dynamic_cache_valid < 0.5f) {
+        baked += sun_color.rgb * roughness_normal_ao_sun.w * geometric_n_dot_l * sun_visibility;
+    } else if (camera_position.w > 0.5f && is_dynamic < 0.5f) {
         float3 static_direct = sun_color.rgb * roughness_normal_ao_sun.w * geometric_n_dot_l;
         baked = max(baked + static_direct * (sun_visibility - cached_sun_visibility), 0.0f);
+    }
+
+    if (camera_position.w > 1.5f) {
+        output.hdr = float4(baked, 1.0f);
+        output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f, max(input.view_depth, 0.0f));
+        return output;
     }
 
     float baked_luma = dot(baked, float3(0.2126f, 0.7152f, 0.0722f));
