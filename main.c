@@ -81,20 +81,64 @@ static bool load_scene_model(SCENE *scene, MODEL_ASSET *asset, const char *path,
     return true;
 }
 
+static VEC3 base_floor_anchor(const MODEL_ASSET *base) {
+    if (!base || !base->geometry.vertices.count || !base->geometry.faces.count)
+        return base ? base->geometry.bounds.center : v3(0.0f, 0.0f, 0.0f);
+
+    const AABB *bounds = &base->geometry.bounds;
+    const POINT *points = base->geometry.vertices.buffer;
+    const MESH_FACE *faces = base->geometry.faces.buffer;
+
+    VEC3 best = {bounds->center.x, bounds->min.y, bounds->center.z};
+    float best_distance = INFINITY;
+    bool found = false;
+
+    for (size_t i = 0; i < base->geometry.faces.count; ++i) {
+        const MESH_FACE face = faces[i];
+
+        if (face.indices[0] >= base->geometry.vertices.count || face.indices[1] >= base->geometry.vertices.count ||
+            face.indices[2] >= base->geometry.vertices.count)
+            continue;
+
+        const VEC3 a = points[face.indices[0]].p;
+        const VEC3 b = points[face.indices[1]].p;
+        const VEC3 c = points[face.indices[2]].p;
+        const VEC3 normal = v3_normalize(v3_cross(v3_sub(b, a), v3_sub(c, a)));
+
+        if (fabsf(normal.y) < 0.75f) continue;
+
+        const VEC3 center = v3_scale(v3_add(v3_add(a, b), c), 1.0f / 3.0f);
+
+        if (center.y > bounds->center.y) continue;
+
+        const float dx = center.x - bounds->center.x;
+        const float dz = center.z - bounds->center.z;
+        const float distance = dx * dx + dz * dz;
+
+        if (!found || distance < best_distance || (fabsf(distance - best_distance) < 1.0e-5f && center.y > best.y)) {
+            best = center;
+            best_distance = distance;
+            found = true;
+        }
+    }
+
+    return best;
+}
+
 static TRANSFORM extra_model_transform(const MODEL_ASSET *base, const MODEL_ASSET *extra, int index) {
     TRANSFORM transform = transform_identity();
 
     if (!base || !extra) return transform;
 
-    const AABB *base_bounds = &base->geometry.bounds;
     const AABB *extra_bounds = &extra->geometry.bounds;
+    const VEC3 floor = base_floor_anchor(base);
     const float width = fmaxf(extra_bounds->extents.x * 2.0f, 0.5f);
     const float offset = (float)index * (width + 0.5f);
 
     transform.position = (VEC3){
-        base_bounds->center.x + offset - extra_bounds->center.x,
-        base_bounds->min.y - extra_bounds->min.y,
-        base_bounds->center.z - extra_bounds->center.z,
+        floor.x + offset - extra_bounds->center.x,
+        floor.y - extra_bounds->min.y,
+        floor.z - extra_bounds->center.z,
     };
 
     return transform;
@@ -230,6 +274,15 @@ int main(int argc, char **argv) {
     if (!startup_stage && !renderer_set_scene(&renderer, &scene)) {
         startup_stage = "GPU scene upload";
         startup_detail = SDL_GetError();
+    }
+
+    if (!startup_stage && extra_model_count > 0) {
+        const OBJECT *focus = scene.object_count > 1u ? &scene.objects[1] : NULL;
+
+        if (!renderer_focus_object(&renderer, focus)) {
+            startup_stage = "extra model camera focus";
+            startup_detail = SDL_GetError();
+        }
     }
 
     if (startup_stage) {
