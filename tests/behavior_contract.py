@@ -394,6 +394,7 @@ def main() -> None:
     dynamic_surface = text("shaders/dynamic_surface.hlsl")
     for needle in (
         "DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u",
+        "DYNAMIC_SURFACE_CONVERGENCE_PASSES 4u",
         "model_surface_layout(struct MODEL *model, uint32_t target_samples)",
         "lmap_build_density(",
         "DYNAMIC_LIGHTING_MIN_TEXELS_PER_UNIT",
@@ -413,12 +414,17 @@ def main() -> None:
         "update_dynamic_surface_caches(",
         "pending_transform_revision",
         "pending_lighting_revision",
+        "pending_scene_lighting_revision",
         "allocation->sample_cursor = 0u",
+        "allocation->sample_pass = 0u",
         "cache_needs_clear",
         "clear.sample_count = total",
         "clear.trace_params[1] = 1.0f",
         "gpu_texture_barrier(r, cmd, allocation->texture, storage, storage)",
         "allocation->transform_revision = object->transform_revision",
+        "allocation->scene_lighting_revision = r->scene->lighting_revision",
+        "allocation->sample_pass++",
+        "allocation->sample_pass < DYNAMIC_SURFACE_CONVERGENCE_PASSES",
         "gpu_transition_texture(r, cmd, allocation->texture, NriAccessBits_SHADER_RESOURCE",
     ):
         if needle not in render:
@@ -452,7 +458,9 @@ def main() -> None:
         "trace_params.y > 0.5f",
         "SurfaceSample clear_sample = Samples[sample_offset + id.x]",
         "Output[uint2(clear_pixel % texture_width, clear_pixel / texture_width)] = 0.0f",
-        "Output[uint2(pixel % texture_width, pixel / texture_width)]",
+        "pass_index = (uint)max(trace_params.w, 0.0f)",
+        "float blend = saturate(trace_params.z)",
+        "Output[output_pixel] = lerp(Output[output_pixel], current, blend)",
     ):
         if needle not in dynamic_surface:
             raise AssertionError(f"dynamic surface cache shader missing: {needle}")
