@@ -401,6 +401,11 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     uint32_t sample_cursor;
 };
 
+typedef struct DYNAMIC_STATIC_SURFACE_GPU {
+    Uint32 source_triangle;
+    Uint32 _pad[3];
+} DYNAMIC_STATIC_SURFACE_GPU;
+
 struct RENDER_MATERIAL {
     GLTF_MATERIAL data;
     NriTexture *base_color;
@@ -1030,6 +1035,22 @@ static void release_dynamic_lighting(RENDERER *r) {
     r->dynamic_lighting_count = 0u;
 }
 
+static void release_dynamic_static_transport(RENDERER *r) {
+    if (!r) return;
+
+    release_buffer(r, r->dynamic_static_node_buffer);
+    release_buffer(r, r->dynamic_static_triangle_buffer);
+    release_buffer(r, r->dynamic_static_surface_buffer);
+    release_buffer(r, r->dynamic_static_uv_buffer);
+
+    r->dynamic_static_node_buffer = NULL;
+    r->dynamic_static_triangle_buffer = NULL;
+    r->dynamic_static_surface_buffer = NULL;
+    r->dynamic_static_uv_buffer = NULL;
+    r->dynamic_static_node_count = 0u;
+    r->dynamic_static_triangle_count = 0u;
+}
+
 static void release_reference_lighting(RENDERER *r) {
     if (!r) return;
 
@@ -1061,6 +1082,7 @@ static void release_scene_resources(RENDERER *r) {
     if (!r || !r->gpu->device) return;
 
     release_dynamic_lighting(r);
+    release_dynamic_static_transport(r);
     release_reference_lighting(r);
 
     if (r->image_textures) {
@@ -2082,6 +2104,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
     free(r->draws);
     free(r->transmission_draws);
     release_dynamic_lighting(r);
+    release_dynamic_static_transport(r);
     release_reference_lighting(r);
     free_probe_grid(&r->volume_probes);
     beam_free(&r->beams);
@@ -2442,6 +2465,66 @@ static void model_lighting_summary(const struct MODEL *model, VEC3 *diffuse, VEC
 
     if (diffuse) *diffuse = v3_scale(diffuse_sum, 1.0f / (float)count);
     if (emissive) *emissive = v3_scale(emissive_sum, 1.0f / (float)count);
+}
+
+static bool renderer_build_dynamic_static_transport(RENDERER *renderer, const SCENE *scene) {
+    if (!renderer || !scene || !scene->lightmap || !scene->lightmap->uvs || !scene->static_geometry.faces.count ||
+        !scene->static_surface_refs || scene->static_surface_ref_count != scene->static_geometry.faces.count)
+        return false;
+
+    BVH tree = {0};
+    if (!bvh_build_with_surfaces(&tree, &scene->static_geometry, &scene->static_visual, scene->static_surface_refs,
+                                 scene->static_surface_ref_count))
+        return false;
+
+    DYNAMIC_STATIC_SURFACE_GPU *surface_refs = calloc(tree.triangle_count, sizeof(*surface_refs));
+    bool good = surface_refs != NULL;
+
+    if (good) {
+        for (uint32_t i = 0; i < tree.triangle_count; ++i)
+            surface_refs[i].source_triangle = tree.surfaces[i].source_triangle;
+    }
+
+    NriBuffer *nodes = NULL;
+    NriBuffer *triangles = NULL;
+    NriBuffer *surfaces = NULL;
+    NriBuffer *uvs = NULL;
+
+    if (good)
+        nodes = gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, tree.nodes,
+                                  (size_t)tree.node_count * sizeof(*tree.nodes), sizeof(BVH_NODE));
+    if (nodes)
+        triangles = gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, tree.triangles,
+                                      (size_t)tree.triangle_count * sizeof(*tree.triangles), sizeof(BVH_TRIANGLE));
+    if (triangles)
+        surfaces = gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, surface_refs,
+                                     (size_t)tree.triangle_count * sizeof(*surface_refs), sizeof(*surface_refs));
+
+    const size_t uv_count = scene->static_geometry.faces.count * 6u;
+    if (surfaces)
+        uvs = gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, scene->lightmap->uvs,
+                                uv_count * sizeof(*scene->lightmap->uvs), sizeof(LMAP_UV));
+
+    good = nodes && triangles && surfaces && uvs;
+
+    if (good) {
+        release_dynamic_static_transport(renderer);
+        renderer->dynamic_static_node_buffer = nodes;
+        renderer->dynamic_static_triangle_buffer = triangles;
+        renderer->dynamic_static_surface_buffer = surfaces;
+        renderer->dynamic_static_uv_buffer = uvs;
+        renderer->dynamic_static_node_count = tree.node_count;
+        renderer->dynamic_static_triangle_count = tree.triangle_count;
+    } else {
+        release_buffer(renderer, nodes);
+        release_buffer(renderer, triangles);
+        release_buffer(renderer, surfaces);
+        release_buffer(renderer, uvs);
+    }
+
+    free(surface_refs);
+    bvh_free(&tree);
+    return good;
 }
 
 static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene) {
@@ -2945,7 +3028,7 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
 
     renderer->scene = scene;
 
-    if (!renderer_build_scene(renderer, scene, scene->lightmap)) {
+    if (!renderer_build_scene(renderer, scene, scene->lightmap) || !renderer_build_dynamic_static_transport(renderer, scene)) {
         renderer->scene = NULL;
         return false;
     }
