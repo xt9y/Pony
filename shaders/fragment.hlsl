@@ -8,17 +8,20 @@
 
 #if defined(BUILD_SURFACE_FS)
 GPU_BIND_T(0, 2) Texture2D<float4> BaseColor : register(t0, space2);
-GPU_BIND_S(0, 2) SamplerState BaseColorSampler : register(s0, space2);
 GPU_BIND_T(1, 2) Texture2D<float4> MetallicRoughness : register(t1, space2);
-GPU_BIND_S(1, 2) SamplerState MetallicRoughnessSampler : register(s1, space2);
 GPU_BIND_T(2, 2) Texture2D<float4> NormalMap : register(t2, space2);
-GPU_BIND_S(2, 2) SamplerState NormalMapSampler : register(s2, space2);
 GPU_BIND_T(3, 2) Texture2D<float4> Occlusion : register(t3, space2);
-GPU_BIND_S(3, 2) SamplerState OcclusionSampler : register(s3, space2);
 GPU_BIND_T(4, 2) Texture2D<float4> Emissive : register(t4, space2);
-GPU_BIND_S(4, 2) SamplerState EmissiveSampler : register(s4, space2);
 GPU_BIND_T(5, 2) Texture2D<float4> Lightmap : register(t5, space2);
-GPU_BIND_S(5, 2) SamplerState LightmapSampler : register(s5, space2);
+GPU_BIND_T(6, 2) Texture2D<float4> Transmission : register(t6, space2);
+GPU_BIND_T(7, 2) Texture2D<float4> Thickness : register(t7, space2);
+GPU_BIND_T(8, 2) Texture2D<float4> Iridescence : register(t8, space2);
+GPU_BIND_T(9, 2) Texture2D<float4> IridescenceThickness : register(t9, space2);
+GPU_BIND_T(10, 2) Texture2D<float4> SceneColor : register(t10, space2);
+
+GPU_BIND_S(0, 2) SamplerState MaterialSampler : register(s0, space2);
+GPU_BIND_S(1, 2) SamplerState LightmapSampler : register(s1, space2);
+GPU_BIND_S(2, 2) SamplerState SceneSampler : register(s2, space2);
 
 GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3) {
     float4 base_color_factor;
@@ -27,7 +30,16 @@ GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3) {
     float4 sun_direction;
     float4 sun_color;
     float4 camera_position;
-    // float4 camera_forward; // Fragment depth diagnostic.
+
+    float4 ior_transmission_volume;
+    float4 attenuation_iridescence;
+    float4 iridescence_params;
+
+    float4 camera_right_tan;
+    float4 camera_up_tan;
+    float4 camera_forward;
+    float4 sky_zenith;
+    float4 sky_horizon;
 };
 
 struct SurfaceInput {
@@ -71,6 +83,37 @@ float3 fresnel_schlick(float cos_theta, float3 f0) {
     return f0 + (1.0f - f0) * pow(1.0f - saturate(cos_theta), 5.0f);
 }
 
+float dielectric_f0(float ior) {
+    float r = (ior - 1.0f) / max(ior + 1.0f, 1.0e-4f);
+    return r * r;
+}
+
+float3 thin_film_fresnel(float cos_theta, float3 substrate_f0, float film_ior, float thickness_nm) {
+    float n0 = 1.0f;
+    float n1 = max(film_ior, 1.001f);
+    float c0 = saturate(cos_theta);
+    float sin0_sq = max(1.0f - c0 * c0, 0.0f);
+    float sin1_sq = saturate((n0 * n0 / (n1 * n1)) * sin0_sq);
+    float c1 = sqrt(max(1.0f - sin1_sq, 0.0f));
+
+    float r01 = (n0 * c0 - n1 * c1) / max(n0 * c0 + n1 * c1, 1.0e-4f);
+
+    float3 root_f0 = sqrt(saturate(substrate_f0));
+    float3 n2 = (1.0f + root_f0) / max(1.0f - root_f0, 1.0e-3f);
+    float3 sin2_sq = saturate((n1 * n1 / max(n2 * n2, 1.0e-4f)) * sin1_sq);
+    float3 c2 = sqrt(max(1.0f - sin2_sq, 0.0f));
+    float3 r12 = (n1 * c1 - n2 * c2) / max(n1 * c1 + n2 * c2, 1.0e-4f);
+
+    float3 wavelengths_nm = float3(650.0f, 510.0f, 475.0f);
+    float3 phase = (4.0f * PI * n1 * max(thickness_nm, 0.0f) * c1) / wavelengths_nm;
+    float3 interference = cos(phase);
+    float3 product = r01 * r12;
+
+    float3 numerator = r01 * r01 + r12 * r12 + 2.0f * product * interference;
+    float3 denominator = 1.0f + product * product + 2.0f * product * interference;
+    return saturate(numerator / max(denominator, 1.0e-4f));
+}
+
 float3 mapped_normal(SurfaceInput input, float scale) {
     float3 n = normalize(input.world_normal);
     float3 dpdx = ddx(input.world_position);
@@ -78,6 +121,7 @@ float3 mapped_normal(SurfaceInput input, float scale) {
     float2 duvdx = ddx(input.uv);
     float2 duvdy = ddy(input.uv);
     float determinant = duvdx.x * duvdy.y - duvdx.y * duvdy.x;
+
     if (abs(determinant) < 1.0e-7f) return n;
 
     float inv = 1.0f / determinant;
@@ -85,87 +129,84 @@ float3 mapped_normal(SurfaceInput input, float scale) {
     t = normalize(t - n * dot(n, t));
     float3 b = normalize(cross(n, t) * (determinant < 0.0f ? -1.0f : 1.0f));
 
-    float3 sample_normal = NormalMap.Sample(NormalMapSampler, input.uv).xyz * 2.0f - 1.0f;
+    float3 sample_normal = NormalMap.Sample(MaterialSampler, input.uv).xyz * 2.0f - 1.0f;
     sample_normal.xy *= scale;
     return normalize(t * sample_normal.x + b * sample_normal.y + n * sample_normal.z);
+}
+
+float3 material_sky_radiance(float3 direction) {
+    direction = normalize(direction);
+
+    float t = saturate(direction.y * 0.5f + 0.5f);
+    t = pow(t, 0.35f);
+
+    float3 sky = lerp(sky_horizon.rgb, sky_zenith.rgb, t) * sky_zenith.w;
+    float3 sun_dir = normalize(sun_direction.xyz);
+    float radius = max(sun_color.w, 0.0001f);
+    float sun_cos = cos(radius);
+    float halo_cos = cos(radius * 8.0f);
+    float d = dot(direction, sun_dir);
+    float disc = smoothstep(sun_cos, 1.0f, d);
+    float halo = smoothstep(halo_cos, sun_cos, d) * 0.08f;
+
+    return sky + sun_color.rgb * sun_direction.w * (disc + halo);
+}
+
+float3 environment_radiance(float3 direction, float roughness) {
+    direction = normalize(direction);
+
+    float spread = roughness * roughness * 0.55f;
+    if (spread < 0.005f) return material_sky_radiance(direction);
+
+    float3 axis = abs(direction.y) < 0.99f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+    float3 tangent = normalize(cross(axis, direction));
+    float3 bitangent = normalize(cross(direction, tangent));
+
+    float3 result = material_sky_radiance(direction) * 4.0f;
+    result += material_sky_radiance(normalize(direction + tangent * spread));
+    result += material_sky_radiance(normalize(direction - tangent * spread));
+    result += material_sky_radiance(normalize(direction + bitangent * spread));
+    result += material_sky_radiance(normalize(direction - bitangent * spread));
+
+    return result * 0.125f;
+}
+
+float3 volume_attenuation(float3 color, float distance, float attenuation_distance) {
+    if (distance <= 0.0f || attenuation_distance <= 0.0f) return 1.0f.xxx;
+
+    float3 safe_color = max(color, 1.0e-4f);
+    return exp(log(safe_color) * (distance / attenuation_distance));
+}
+
+float2 refracted_scene_uv(SurfaceInput input, float3 direction, float thickness) {
+    uint width, height;
+    SceneColor.GetDimensions(width, height);
+
+    float2 uv = input.position.xy / max(float2(width, height), 1.0f.xx);
+    float forward = max(dot(direction, normalize(camera_forward.xyz)), 0.1f);
+    float x = dot(direction, normalize(camera_right_tan.xyz)) / max(camera_right_tan.w * forward, 1.0e-3f);
+    float y = dot(direction, normalize(camera_up_tan.xyz)) / max(camera_up_tan.w * forward, 1.0e-3f);
+    float scale = 0.5f * max(thickness, 0.0f) / max(input.view_depth, 0.1f);
+
+    return saturate(uv + float2(x, -y) * scale);
 }
 
 SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     SurfaceOutput output;
 
-    // float3 relative = input.world_position - camera_position.xyz;
-
-    // float error = abs(input.view_depth - dot(relative, camera_forward.xyz));
-    // float error = abs(input.view_depth - dot(input.world_position - camera_position.xyz, camera_forward.xyz));
-    // float error = abs(input.view_depth - dot(input.world_position - camera_position.xyz, camera_forward.xyz));
-    // output.hdr = float4(0, 0, 0, 1);
-    // output.normal_depth = float4(normalize(input.view_normal) * 0.5f + 0.5f, max(input.view_depth, 0.0f));
-    // output.normal_depth = float4(saturate(error * 2.0f), 0, 0, max(input.view_depth, 0.0f));
-    // return output;
-
-    // float error = abs(input.view_depth - input.world_position.z);
-    // output.normal_depth = float4(saturate(error * 2.0f), 0, 0, 1.0f);
-
-    // float raster_depth = 1.0f / max(input.position.w, 1.0e-6f);
-    // float error = abs(input.view_depth - raster_depth);
-
-    // output.hdr = float4(0, 0, 0, 1);
-    // output.normal_depth = float4(camera_forward.xyz, input.view_depth);
-    // output.normal_depth = float4(saturate(error * 2.0f), 0, 0, input.view_depth);
-    // output.normal_depth = float4(camera_position.xyz, input.view_depth);
-    // return output;
-
-    float4 base_sample = BaseColor.Sample(BaseColorSampler, input.uv);
+    float4 base_sample = BaseColor.Sample(MaterialSampler, input.uv);
     float3 base = srgb_to_linear(base_sample.rgb) * base_color_factor.rgb;
-    // output.hdr = float4(base, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f,
-    //      input.view_depth
-    // );
-    // return output;
 
-    float4 mr = MetallicRoughness.Sample(MetallicRoughnessSampler, input.uv);
+    float4 mr = MetallicRoughness.Sample(MaterialSampler, input.uv);
     float metallic = saturate(emissive_metallic.w * mr.b);
-    // output.hdr = float4(metallic.xxx, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f,
-    //      input.view_depth
-    // );
-    // return output;
-
     float roughness = clamp(roughness_normal_ao_sun.x * mr.g, 0.045f, 1.0f);
-    // output.hdr = float4(roughness.xxx, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f,
-    //      input.view_depth
-    // );
-    // return output;
 
-    float ao_sample = Occlusion.Sample(OcclusionSampler, input.uv).r;
+    float ao_sample = Occlusion.Sample(MaterialSampler, input.uv).r;
     float material_ao = lerp(1.0f, ao_sample, saturate(roughness_normal_ao_sun.z));
-    // output.hdr = float4(material_ao.xxx, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f,
-    //      input.view_depth
-    // );
-    // return output;
-
-    float3 emissive = srgb_to_linear(Emissive.Sample(EmissiveSampler, input.uv).rgb) * emissive_metallic.rgb;
-    // output.hdr = float4(emissive, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f,
-    //      input.view_depth
-    // );
-    // return output;
+    float3 emissive = srgb_to_linear(Emissive.Sample(MaterialSampler, input.uv).rgb) * emissive_metallic.rgb;
 
     float3 n = mapped_normal(input, roughness_normal_ao_sun.y);
     if (!front_face) n = -n;
-    // output.hdr = float4(n * 0.5f + 0.5f, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f,
-    //      input.view_depth
-    // );
-    // return output;
 
     float3 v = normalize(camera_position.xyz - input.world_position);
     float3 l = normalize(sun_direction.xyz);
@@ -175,45 +216,69 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     float n_dot_h = max(dot(n, h), 0.0f);
     float v_dot_h = max(dot(v, h), 0.0f);
 
-    float3 f0 = lerp(float3(0.04f, 0.04f, 0.04f), base, metallic);
+    float ior = max(ior_transmission_volume.x, 1.0f);
+    float transmission = saturate(ior_transmission_volume.y * Transmission.Sample(MaterialSampler, input.uv).r);
+    float volume_thickness = max(ior_transmission_volume.z, 0.0f) * Thickness.Sample(MaterialSampler, input.uv).g;
+    float iridescence = saturate(attenuation_iridescence.w * Iridescence.Sample(MaterialSampler, input.uv).r);
+    float iridescence_thickness =
+        lerp(iridescence_params.y, iridescence_params.z, IridescenceThickness.Sample(MaterialSampler, input.uv).g);
+
+    float dielectric = dielectric_f0(ior);
+    float3 f0 = lerp(dielectric.xxx, base, metallic);
+
     float3 f = fresnel_schlick(v_dot_h, f0);
+    float3 view_f = fresnel_schlick(n_dot_v, f0);
+
+    if (iridescence > 0.0f) {
+        float3 film_f = thin_film_fresnel(v_dot_h, f0, iridescence_params.x, iridescence_thickness);
+        float3 film_view_f = thin_film_fresnel(n_dot_v, f0, iridescence_params.x, iridescence_thickness);
+        f = lerp(f, film_f, iridescence);
+        view_f = lerp(view_f, film_view_f, iridescence);
+    }
+
     float d = distribution_ggx(n_dot_h, roughness);
     float g = geometry_schlick(n_dot_v, roughness) * geometry_schlick(n_dot_l, roughness);
     float3 specular = d * g * f / max(4.0f * n_dot_v * max(n_dot_l, 0.001f), 1.0e-4f);
 
     float3 baked = camera_position.w > 0.5f ? max(Lightmap.Sample(LightmapSampler, front_face ? input.lightmap_uv : input.back_lightmap_uv).rgb, 0.0f)
                                             : float3(0.12f, 0.12f, 0.12f);
+
     if (camera_position.w > 1.5f) {
         output.hdr = float4(baked, 1.0f);
         output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f, max(input.view_depth, 0.0f));
         return output;
     }
+
     float baked_luma = dot(baked, float3(0.2126f, 0.7152f, 0.0722f));
     float sun_visibility = camera_position.w > 0.5f ? saturate(baked_luma * 0.55f) : 1.0f;
     float3 direct_specular = specular * sun_color.rgb * roughness_normal_ao_sun.w * n_dot_l * sun_visibility;
-    // output.hdr = float4(direct_specular, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f,
-    //      input.view_depth
-    // );
-    // return output;
 
-    float3 environment_specular = f0 * (0.025f + 0.10f * (1.0f - roughness)) * material_ao * (camera_position.w > 0.5f ? saturate(baked_luma * 2.0f) : 1.0f);
-    // output.hdr = float4(environment_specular, 1.0f);
-    // output.normal_depth = float4(
-    //      normalize(input.view_normal) * 0.5f + 0.5f,
-    //      input.view_depth
-    // );
-    // return output;
+    float3 legacy_environment = f0 * (0.025f + 0.10f * (1.0f - roughness)) * material_ao *
+                                (camera_position.w > 0.5f ? saturate(baked_luma * 2.0f) : 1.0f);
 
-    float3 diffuse = base * baked * material_ao * (1.0f - metallic);
-    output.hdr = float4(max(diffuse + direct_specular + environment_specular + emissive, 0.0f), base_sample.a * base_color_factor.a);
+    float3 reflected = environment_radiance(reflect(-v, n), roughness);
+    float3 physical_environment = reflected * view_f * material_ao * (1.0f - 0.35f * roughness);
+    float advanced_weight = max(iridescence, transmission);
+    float3 environment_specular = lerp(legacy_environment, physical_environment, advanced_weight);
 
-    // output.normal_depth = float4(input.world_position, input.view_depth);
+    float transmission_weight = transmission * (1.0f - metallic);
+    float3 diffuse = base * baked * material_ao * (1.0f - metallic) * (1.0f - transmission_weight);
+    float3 transmitted = 0.0f.xxx;
 
-    // output.normal_depth = float4(input.world_position - camera_position.xyz,
-    //                              input.view_depth);
+    if (transmission_weight > 0.0f) {
+        float3 refracted = refract(-v, n, 1.0f / ior);
+        if (dot(refracted, refracted) < 1.0e-6f) refracted = reflect(-v, n);
+        refracted = normalize(refracted);
 
+        float path_length = volume_thickness / max(abs(dot(n, refracted)), 0.1f);
+        float3 attenuation = volume_attenuation(attenuation_iridescence.rgb, path_length, ior_transmission_volume.w);
+        float2 scene_uv = refracted_scene_uv(input, refracted, volume_thickness);
+        float3 scene = max(SceneColor.SampleLevel(SceneSampler, scene_uv, 0.0f).rgb, 0.0f);
+
+        transmitted = scene * attenuation * base * transmission_weight * (1.0f - view_f);
+    }
+
+    output.hdr = float4(max(diffuse + direct_specular + environment_specular + transmitted + emissive, 0.0f), base_sample.a * base_color_factor.a);
     output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f, max(input.view_depth, 0.0f));
 
     return output;
