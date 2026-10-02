@@ -4,6 +4,7 @@
 #include <SDL3_image/SDL_image.h>
 
 #include <float.h>
+#include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -3002,12 +3003,12 @@ static void log_dynamic_matte_reference_error(RENDERER *r, const DYNAMIC_LIGHTIN
     if (allocation->transform_revision != object->transform_revision || allocation->lighting_revision != object->lighting_revision ||
         allocation->scene_lighting_revision != r->scene->lighting_revision ||
         allocation->sample_pass < DYNAMIC_SURFACE_CONVERGENCE_PASSES) {
-        SDL_Log("dynamic acceptance object %u: runtime cache is not fully current/converged; comparison skipped", allocation->object_id);
+        SDL_Log("dynamic acceptance object %" PRIu64 ": runtime cache is not fully current/converged; comparison skipped", allocation->object_id);
         return;
     }
 
     if (r->gpu->graphics_queue && r->gpu->core.QueueWaitIdle(r->gpu->graphics_queue) != NriResult_SUCCESS) {
-        SDL_Log("dynamic acceptance object %u: could not synchronize runtime cache for comparison", allocation->object_id);
+        SDL_Log("dynamic acceptance object %" PRIu64 ": could not synchronize runtime cache for comparison", allocation->object_id);
         return;
     }
 
@@ -3020,7 +3021,7 @@ static void log_dynamic_matte_reference_error(RENDERER *r, const DYNAMIC_LIGHTIN
         !download_rgba16f_texture(r, reference_texture, width, height, &reference)) {
         free(runtime);
         free(reference);
-        SDL_Log("dynamic acceptance object %u: cache readback failed", allocation->object_id);
+        SDL_Log("dynamic acceptance object %" PRIu64 ": cache readback failed", allocation->object_id);
         return;
     }
 
@@ -3030,7 +3031,7 @@ static void log_dynamic_matte_reference_error(RENDERER *r, const DYNAMIC_LIGHTIN
     if (!model_data->geometry || !model_data->visual || !bvh_build(&self_tree, model_data->geometry, model_data->visual)) {
         free(runtime);
         free(reference);
-        SDL_Log("dynamic acceptance object %u: self BVH build failed", allocation->object_id);
+        SDL_Log("dynamic acceptance object %" PRIu64 ": self BVH build failed", allocation->object_id);
         return;
     }
 
@@ -3120,7 +3121,7 @@ static void log_dynamic_matte_reference_error(RENDERER *r, const DYNAMIC_LIGHTIN
                           mae <= DYNAMIC_ACCEPTANCE_MAX_RGB_MAE &&
                           nrmse <= DYNAMIC_ACCEPTANCE_MAX_NRMSE;
 
-    SDL_Log("dynamic acceptance object %u: %s | matte cache coverage %.1f%% | RGB MAE %.5f | RMSE %.5f | NRMSE %.2f%% | max %.5f",
+    SDL_Log("dynamic acceptance object %" PRIu64 ": %s | matte cache coverage %.1f%% | RGB MAE %.5f | RMSE %.5f | NRMSE %.2f%% | max %.5f",
             allocation->object_id, accepted ? "PASS" : "FAIL", coverage, mae, rmse, nrmse * 100.0, maximum);
 
     bvh_free(&self_tree);
