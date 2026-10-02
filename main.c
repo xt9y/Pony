@@ -1,5 +1,6 @@
 #include "game.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -76,6 +77,45 @@ static bool load_scene_model(SCENE *scene, MODEL_ASSET *asset, const char *path,
     }
 
     if (total_bin_size) *total_bin_size += asset->document.bin_size;
+
+    return true;
+}
+
+static TRANSFORM extra_model_transform(const MODEL_ASSET *base, const MODEL_ASSET *extra, int index) {
+    TRANSFORM transform = transform_identity();
+
+    if (!base || !extra) return transform;
+
+    const AABB *base_bounds = &base->geometry.bounds;
+    const AABB *extra_bounds = &extra->geometry.bounds;
+    const float width = fmaxf(extra_bounds->extents.x * 2.0f, 0.5f);
+    const float offset = (float)index * (width + 0.5f);
+
+    transform.position = (VEC3){
+        base_bounds->center.x + offset - extra_bounds->center.x,
+        base_bounds->min.y - extra_bounds->min.y,
+        base_bounds->center.z - extra_bounds->center.z,
+    };
+
+    return transform;
+}
+
+static bool load_extra_model(SCENE *scene, const MODEL_ASSET *base, MODEL_ASSET *asset, const char *path, int index, size_t *total_bin_size) {
+    if (!scene || !base || !asset || !path) return false;
+    if (!model_load(asset, path)) return false;
+
+    const TRANSFORM transform = extra_model_transform(base, asset, index);
+
+    if (!scene_add_model(scene, &asset->model, STATIC, transform)) {
+        SDL_SetError("could not add %s to scene", path);
+        return false;
+    }
+
+    if (total_bin_size) *total_bin_size += asset->document.bin_size;
+
+    SDL_Log("extra model: %s | position %.3f %.3f %.3f | bounds %.3f %.3f %.3f", path, transform.position.x, transform.position.y,
+            transform.position.z, asset->geometry.bounds.extents.x * 2.0f, asset->geometry.bounds.extents.y * 2.0f,
+            asset->geometry.bounds.extents.z * 2.0f);
 
     return true;
 }
@@ -157,7 +197,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < extra_model_count && !startup_stage; ++i) {
         const char *path = argv[extra_start + i];
 
-        if (!load_scene_model(&scene, &models[i + 1], path, transform_identity(), &total_bin_size)) {
+        if (!load_extra_model(&scene, &models[0], &models[i + 1], path, i, &total_bin_size)) {
             startup_stage = "extra model load";
             startup_detail = SDL_GetError();
         }
