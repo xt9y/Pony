@@ -785,6 +785,10 @@ static void release_scene_resources(RENDERER *r) {
     r->material_count = 0;
     r->has_transmission = false;
 
+    free(r->transmission_draws);
+    r->transmission_draws = NULL;
+    r->transmission_draw_count = 0;
+
     release_texture(r, r->default_white);
     release_texture(r, r->default_normal);
 
@@ -1268,6 +1272,46 @@ static bool material_transmissive(const RENDER_MATERIAL *material) {
     return material && material->data.transmission_factor > 0.0f;
 }
 
+static float draw_distance_sq(const DRAW_RANGE *draw, VEC3 eye) {
+    VEC3 delta = v3_sub(draw->center, eye);
+    return v3_len_sq(delta);
+}
+
+static void sort_transmission_draws(RENDERER *r, VEC3 eye) {
+    for (uint32_t i = 1; i < r->transmission_draw_count; ++i) {
+        DRAW_RANGE value = r->transmission_draws[i];
+        float distance = draw_distance_sq(&value, eye);
+        uint32_t j = i;
+
+        while (j > 0 && draw_distance_sq(&r->transmission_draws[j - 1u], eye) < distance) {
+            r->transmission_draws[j] = r->transmission_draws[j - 1u];
+            --j;
+        }
+
+        r->transmission_draws[j] = value;
+    }
+}
+
+static bool build_transmission_draws(RENDERER *r) {
+    free(r->transmission_draws);
+    r->transmission_draws = NULL;
+    r->transmission_draw_count = 0;
+
+    if (!r->has_transmission) return true;
+
+    r->transmission_draws = calloc(r->draw_count, sizeof(*r->transmission_draws));
+    if (!r->transmission_draws) return false;
+
+    for (uint32_t i = 0; i < r->draw_count; ++i) {
+        const DRAW_RANGE *draw = &r->draws[i];
+
+        if (material_transmissive(&r->materials[draw->material]))
+            r->transmission_draws[r->transmission_draw_count++] = *draw;
+    }
+
+    return true;
+}
+
 static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATERIAL *material, const RENDER_FRAME *frame) {
     return (MATERIAL_UNIFORMS){
         .base_color_factor = {material->data.base_color[0], material->data.base_color[1], material->data.base_color[2], material->data.base_color[3]},
@@ -1375,10 +1419,11 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
 
         if (!bind_camera_resources(r, cmd, &camera, sizeof(camera))) goto failed_frame;
 
-        for (uint32_t i = 0; i < r->draw_count; ++i) {
-            const DRAW_RANGE *draw = &r->draws[i];
+        sort_transmission_draws(r, frame->eye);
 
-            if (!material_transmissive(&r->materials[draw->material])) continue;
+        for (uint32_t i = 0; i < r->transmission_draw_count; ++i) {
+            const DRAW_RANGE *draw = &r->transmission_draws[i];
+
             if (!draw_surface_range(r, cmd, frame, draw, r->fx.scene_color, r->fx.sampler)) goto failed_frame;
         }
 
@@ -1418,6 +1463,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
     GPU *gpu = r->gpu;
     free(r->vertices);
     free(r->draws);
+    free(r->transmission_draws);
     free_probe_grid(&r->volume_probes);
     beam_free(&r->beams);
 
@@ -1731,6 +1777,8 @@ static bool renderer_build_scene(RENDERER *renderer, const MESH *mesh, const GLT
 
     for (uint32_t material = 0; material < visual->material_count; ++material) {
         const uint32_t first = renderer->vertex_count;
+        VEC3 center = v3(0.0f, 0.0f, 0.0f);
+        uint32_t center_count = 0;
 
         for (size_t triangle = 0; triangle < triangle_count; ++triangle) {
             const GLTF_VERTEX *vertices = &visual->vertices[triangle * 3u];
@@ -1741,11 +1789,17 @@ static bool renderer_build_scene(RENDERER *renderer, const MESH *mesh, const GLT
 
             if (!push_surface(renderer, &vertices[0], uv[0]) || !push_surface(renderer, &vertices[1], uv[1]) || !push_surface(renderer, &vertices[2], uv[2]))
                 return false;
+
+            center = v3_add(center, v3_add(v3_add(vertices[0].position, vertices[1].position), vertices[2].position));
+            center_count += 3u;
         }
 
         const uint32_t count = renderer->vertex_count - first;
 
-        if (count) renderer->draws[renderer->draw_count++] = (DRAW_RANGE){first, count, material};
+        if (count) {
+            renderer->draws[renderer->draw_count++] =
+                (DRAW_RANGE){.first = first, .count = count, .material = material, .center = v3_scale(center, 1.0f / (float)center_count)};
+        }
     }
 
     renderer->debug_vertex_start = renderer->vertex_count;
@@ -1760,7 +1814,7 @@ static bool renderer_build_scene(RENDERER *renderer, const MESH *mesh, const GLT
 
     renderer->debug_vertex_count = renderer->vertex_count - renderer->debug_vertex_start;
 
-    if (!upload_scene(renderer, visual)) return false;
+    if (!upload_scene(renderer, visual) || !build_transmission_draws(renderer)) return false;
 
     renderer->has_bake = false;
     SDL_Log("materials: %u | material draw ranges: %u | embedded images: %u", renderer->material_count, renderer->draw_count, renderer->image_texture_count);
