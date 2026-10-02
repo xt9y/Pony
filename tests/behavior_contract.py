@@ -126,7 +126,7 @@ def main() -> None:
         if needle not in compute_base:
             raise AssertionError(f"transmissive lightmap visibility missing: {needle}")
 
-    for needle in ("probe_triangle_transmissive", "triangle.normal.w >= 0.999f", "if (probe_triangle_transmissive(tri)) continue;"):
+    for needle in ("probe_triangle_transmissive", "tri.normal.w >= 0.999f", "if (probe_triangle_transmissive(tri)) continue;"):
         if needle not in probe_wavefront:
             raise AssertionError(f"transmissive probe visibility missing: {needle}")
 
