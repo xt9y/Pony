@@ -64,7 +64,7 @@ static int extra_model_start(int argc, char **argv) {
         if (strcmp(argv[i], "--") == 0) return i + 1;
     }
 
-    return argc;
+    return argc > 1 ? 1 : argc;
 }
 
 static bool load_scene_model(SCENE *scene, MODEL_ASSET *asset, const char *path, TRANSFORM transform, size_t *total_bin_size) {
@@ -197,6 +197,8 @@ int main(int argc, char **argv) {
     for (int i = 0; i < extra_model_count && !startup_stage; ++i) {
         const char *path = argv[extra_start + i];
 
+        SDL_Log("loading extra model %d/%d: %s", i + 1, extra_model_count, path);
+
         if (!load_extra_model(&scene, &models[0], &models[i + 1], path, i, &total_bin_size)) {
             startup_stage = "extra model load";
             startup_detail = SDL_GetError();
@@ -280,6 +282,8 @@ int main(int argc, char **argv) {
     printf("Scene: %s + %d extra model%s | %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n", BASE_MODEL_PATH, extra_model_count,
            extra_model_count == 1 ? "" : "s", load_ms, scene.geometry.vertices.count, scene.geometry.faces.count,
            (double)total_bin_size / (1024.0 * 1024.0));
+
+    for (int i = 0; i < extra_model_count; ++i) printf("Extra model %d: %s\n", i + 1, argv[extra_start + i]);
     printf("Visual: %zu vertices | %u materials | %u textures | %u images\n", scene.visual.vertex_count, scene.visual.material_count,
            scene.visual.texture_count, scene.visual.image_count);
     printf("Lightmap: %.2f ms atlas | %ux%u | %u charts | %.2f texels/unit | %u valid texels\n", atlas_ms, lightmap.width, lightmap.height,
