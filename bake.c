@@ -315,9 +315,13 @@ bool download_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width, Ui
         if (good) {
             r->gpu->core.CmdReadbackTextureToBuffer(cmd, readback, &layout, texture, &region);
 
-            good = gpu_submit_commands(r, allocator, cmd);
-            allocator = NULL;
-            cmd = NULL;
+            good = gpu_transition_texture(r, cmd, texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_ALL);
+
+            if (good) {
+                good = gpu_submit_commands(r, allocator, cmd);
+                allocator = NULL;
+                cmd = NULL;
+            }
         }
     }
 
