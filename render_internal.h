@@ -45,6 +45,8 @@ bool gpu_bind_uniform_data(RENDERER *renderer, NriCommandBuffer *command_buffer,
                            const void *data, size_t size);
 bool gpu_create_pipeline_layout(RENDERER *renderer, NriPipelineLayout **out, const NriDescriptorType *types[4], const uint8_t counts[4],
                                 NriStageBits stages);
+bool gpu_create_compute_layout(RENDERER *renderer, NriPipelineLayout **out, const NriDescriptorType *sources, uint8_t source_num,
+                               NriDescriptorType output_type, bool has_uniform);
 bool gpu_timestamp_begin(RENDERER *renderer, NriCommandBuffer *command_buffer, uint32_t slot);
 bool gpu_timestamp_end(RENDERER *renderer, NriCommandBuffer *command_buffer, uint32_t slot);
 void gpu_timestamp_log(RENDERER *renderer, uint32_t slot, const char *label);
