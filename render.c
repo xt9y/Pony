@@ -1867,12 +1867,8 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
 
         if (allocation->cache_needs_clear) {
             DYNAMIC_SURFACE_UNIFORMS clear = uniforms;
-            const uint64_t pixel_count = (uint64_t)allocation->layout->width * allocation->layout->height;
-
-            if (!pixel_count || pixel_count > UINT32_MAX) return false;
-
             clear.sample_offset = 0u;
-            clear.sample_count = (uint32_t)pixel_count;
+            clear.sample_count = total;
             clear.trace_params[1] = 1.0f;
 
             if (!bind_dynamic_surface_resources(r, cmd, allocation, &clear)) return false;
