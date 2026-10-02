@@ -88,30 +88,73 @@ float dielectric_f0(float ior) {
     return r * r;
 }
 
-float3 thin_film_fresnel(float cos_theta, float3 substrate_f0, float film_ior, float thickness_nm) {
-    float n0 = 1.0f;
-    float n1 = max(film_ior, 1.001f);
-    float c0 = saturate(cos_theta);
-    float sin0_sq = max(1.0f - c0 * c0, 0.0f);
-    float sin1_sq = saturate((n0 * n0 / (n1 * n1)) * sin0_sq);
-    float c1 = sqrt(max(1.0f - sin1_sq, 0.0f));
+float fresnel_schlick_scalar(float f0, float cos_theta) {
+    return f0 + (1.0f - f0) * pow(1.0f - saturate(cos_theta), 5.0f);
+}
 
-    float r01 = (n0 * c0 - n1 * c1) / max(n0 * c0 + n1 * c1, 1.0e-4f);
+float3 fresnel0_to_ior(float3 f0) {
+    float3 root = sqrt(saturate(f0));
+    return (1.0f + root) / max(1.0f - root, 1.0e-4f);
+}
 
-    float3 root_f0 = sqrt(saturate(substrate_f0));
-    float3 n2 = (1.0f + root_f0) / max(1.0f - root_f0, 1.0e-3f);
-    float3 sin2_sq = saturate((n1 * n1 / max(n2 * n2, 1.0e-4f)) * sin1_sq);
-    float3 c2 = sqrt(max(1.0f - sin2_sq, 0.0f));
-    float3 r12 = (n1 * c1 - n2 * c2) / max(n1 * c1 + n2 * c2, 1.0e-4f);
+float3 iridescence_sensitivity(float opd, float3 shift) {
+    float phase = 2.0f * PI * opd * 1.0e-9f;
+    float phase_sq = phase * phase;
 
-    float3 wavelengths_nm = float3(650.0f, 510.0f, 475.0f);
-    float3 phase = (4.0f * PI * n1 * max(thickness_nm, 0.0f) * c1) / wavelengths_nm;
-    float3 interference = cos(phase);
-    float3 product = r01 * r12;
+    float3 val = float3(5.4856e-13f, 4.4201e-13f, 5.2481e-13f);
+    float3 pos = float3(1.6810e+06f, 1.7953e+06f, 2.2084e+06f);
+    float3 var = float3(4.3278e+09f, 9.3046e+09f, 6.6121e+09f);
 
-    float3 numerator = r01 * r01 + r12 * r12 + 2.0f * product * interference;
-    float3 denominator = 1.0f + product * product + 2.0f * product * interference;
-    return saturate(numerator / max(denominator, 1.0e-4f));
+    float3 xyz = val * sqrt(2.0f * PI * var) * cos(pos * phase + shift) * exp(-phase_sq * var);
+    xyz.x += 9.7470e-14f * sqrt(2.0f * PI * 4.5282e+09f) * cos(2.2399e+06f * phase + shift.x) * exp(-4.5282e+09f * phase_sq);
+    xyz /= 1.0685e-7f;
+
+    return float3(3.2404542f * xyz.x - 1.5371385f * xyz.y - 0.4985314f * xyz.z,
+                  -0.9692660f * xyz.x + 1.8760108f * xyz.y + 0.0415560f * xyz.z,
+                  0.0556434f * xyz.x - 0.2040259f * xyz.y + 1.0572252f * xyz.z);
+}
+
+float3 thin_film_fresnel(float cos_theta, float3 base_f0, float film_ior, float thickness_nm) {
+    const float outside_ior = 1.0f;
+
+    film_ior = max(film_ior, 1.001f);
+    cos_theta = saturate(cos_theta);
+
+    float interface_f0 = dielectric_f0(film_ior / outside_ior);
+    float r12 = fresnel_schlick_scalar(interface_f0, cos_theta);
+    float t121 = 1.0f - r12;
+
+    float sin_theta2_sq = (outside_ior * outside_ior / (film_ior * film_ior)) * (1.0f - cos_theta * cos_theta);
+    float cos_theta2_sq = 1.0f - sin_theta2_sq;
+    if (cos_theta2_sq < 0.0f) return 1.0f.xxx;
+
+    float cos_theta2 = sqrt(cos_theta2_sq);
+    float3 base_ior = fresnel0_to_ior(min(base_f0 + 0.0001f, 0.9999f));
+
+    float3 interface = (base_ior - film_ior) / max(base_ior + film_ior, 1.0e-4f);
+    float3 r1 = interface * interface;
+    float3 r23 = r1 + (1.0f - r1) * pow(1.0f - cos_theta2, 5.0f);
+
+    float opd = 2.0f * film_ior * max(thickness_nm, 0.0f) * cos_theta2;
+    float phi12 = film_ior < outside_ior ? PI : 0.0f;
+    float phi21 = PI - phi12;
+    float3 phi23 = PI * (1.0f - step(film_ior.xxx, base_ior));
+    float3 phi = phi21.xxx + phi23;
+
+    float3 r123 = clamp(r12 * r23, 1.0e-5f, 0.9999f);
+    float3 root_r123 = sqrt(r123);
+    float3 rs = (t121 * t121) * r23 / max(1.0f - r123, 1.0e-4f);
+
+    float3 result = r12 + rs;
+    float3 cm = rs - t121;
+
+    [unroll]
+    for (int order = 1; order <= 2; ++order) {
+        cm *= root_r123;
+        result += cm * (2.0f * iridescence_sensitivity((float)order * opd, (float)order * phi));
+    }
+
+    return max(result, 0.0f);
 }
 
 float3 mapped_normal(SurfaceInput input, float scale) {
