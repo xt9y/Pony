@@ -371,7 +371,7 @@ int main(int argc, char **argv) {
 
                 if (animated && animated->state == DYNAMIC && animated->type == MODEL) {
                     const float seconds = (float)(now - dynamic_animation_start) * 0.001f;
-                    const float phase = seconds * (2.0f * (float)M_PI / DYNAMIC_Z_PERIOD_SECONDS);
+                    const float phase = seconds * (6.28318530717958647692f / DYNAMIC_Z_PERIOD_SECONDS);
                     const float z = animated_dynamic_base_z + sinf(phase) * DYNAMIC_Z_AMPLITUDE;
 
                     if (fabsf(animated->transform.position.z - z) > 1.0e-5f) {
