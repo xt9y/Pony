@@ -453,11 +453,24 @@ static void material_defaults(GLTF_MATERIAL *m) {
     m->roughness = 1.0f;
     m->normal_scale = 1.0f;
     m->occlusion_strength = 1.0f;
+
+    m->ior = 1.5f;
+    m->attenuation_color[0] = 1.0f;
+    m->attenuation_color[1] = 1.0f;
+    m->attenuation_color[2] = 1.0f;
+    m->iridescence_ior = 1.3f;
+    m->iridescence_thickness_min = 100.0f;
+    m->iridescence_thickness_max = 400.0f;
+
     m->base_color_texture = -1;
     m->metallic_roughness_texture = -1;
     m->normal_texture = -1;
     m->occlusion_texture = -1;
     m->emissive_texture = -1;
+    m->transmission_texture = -1;
+    m->thickness_texture = -1;
+    m->iridescence_texture = -1;
+    m->iridescence_thickness_texture = -1;
 }
 
 static bool extract_materials(const GLB_DOC *d, GLTF_SCENE *s) {
@@ -510,14 +523,45 @@ static bool extract_materials(const GLB_DOC *d, GLTF_SCENE *s) {
         if (occlusion >= 0) (void)token_number(d, glb_get(d, occlusion, "strength"), &m->occlusion_strength);
 
         const int extensions = glb_get(d, material, "extensions");
-        const int strength = glb_get(d, extensions, "KHR_materials_emissive_strength");
 
+        const int strength = glb_get(d, extensions, "KHR_materials_emissive_strength");
         float emissive_strength = 1.0f;
 
         if (strength >= 0 && token_number(d, glb_get(d, strength, "emissiveStrength"), &emissive_strength)) {
             m->emissive[0] *= emissive_strength;
             m->emissive[1] *= emissive_strength;
             m->emissive[2] *= emissive_strength;
+        }
+
+        const int ior = glb_get(d, extensions, "KHR_materials_ior");
+        if (ior >= 0) (void)token_number(d, glb_get(d, ior, "ior"), &m->ior);
+
+        const int transmission = glb_get(d, extensions, "KHR_materials_transmission");
+        if (transmission >= 0) {
+            (void)token_number(d, glb_get(d, transmission, "transmissionFactor"), &m->transmission_factor);
+            m->transmission_texture = texture_index(d, transmission, "transmissionTexture");
+        }
+
+        const int volume = glb_get(d, extensions, "KHR_materials_volume");
+        if (volume >= 0) {
+            (void)token_number(d, glb_get(d, volume, "thicknessFactor"), &m->thickness_factor);
+            (void)token_number(d, glb_get(d, volume, "attenuationDistance"), &m->attenuation_distance);
+
+            const int attenuation = glb_get(d, volume, "attenuationColor");
+            if (attenuation >= 0) (void)token_vec(d, attenuation, m->attenuation_color, 3u);
+
+            m->thickness_texture = texture_index(d, volume, "thicknessTexture");
+        }
+
+        const int iridescence = glb_get(d, extensions, "KHR_materials_iridescence");
+        if (iridescence >= 0) {
+            (void)token_number(d, glb_get(d, iridescence, "iridescenceFactor"), &m->iridescence_factor);
+            (void)token_number(d, glb_get(d, iridescence, "iridescenceIor"), &m->iridescence_ior);
+            (void)token_number(d, glb_get(d, iridescence, "iridescenceThicknessMinimum"), &m->iridescence_thickness_min);
+            (void)token_number(d, glb_get(d, iridescence, "iridescenceThicknessMaximum"), &m->iridescence_thickness_max);
+
+            m->iridescence_texture = texture_index(d, iridescence, "iridescenceTexture");
+            m->iridescence_thickness_texture = texture_index(d, iridescence, "iridescenceThicknessTexture");
         }
     }
 
