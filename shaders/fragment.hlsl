@@ -378,6 +378,34 @@ float4 dynamic_lightmap_sample(float2 uv) {
     return weight_sum > 1.0e-6f ? sum / weight_sum : 0.0f;
 }
 
+float3 dynamic_receiver_sample(float2 uv) {
+    uint width, height;
+    DynamicReceiver.GetDimensions(width, height);
+
+    if (width == 0u || height == 0u) return 0.0f;
+
+    float2 texel_position = uv * float2(width, height) - 0.5f;
+    int2 base = int2(floor(texel_position));
+    float2 fraction = frac(texel_position);
+    float3 sum = 0.0f;
+    float weight_sum = 0.0f;
+
+    [unroll] for (uint y = 0u; y < 2u; ++y)
+    [unroll] for (uint x = 0u; x < 2u; ++x) {
+        int2 pixel = clamp(base + int2(x, y), int2(0, 0), int2((int)width - 1, (int)height - 1));
+        float2 axis_weight = lerp(1.0f - fraction, fraction, float2(x, y));
+        float weight = axis_weight.x * axis_weight.y;
+        float4 sample = DynamicReceiver.Load(int3(pixel, 0));
+
+        if (sample.a < 0.5f) continue;
+
+        sum += max(sample.rgb, 0.0f) * weight;
+        weight_sum += weight;
+    }
+
+    return weight_sum > 1.0e-6f ? sum / weight_sum : 0.0f;
+}
+
 bool dynamic_proxy_reflection_hit(float3 origin, float3 direction, uint index, out float hit_t, out float3 hit_normal) {
     float3 center = dynamic_influence_center_radius[index].xyz;
     float3 axis_x = dynamic_influence_axis_x[index].xyz;
@@ -645,7 +673,7 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     float3 dynamic_correction = 0.0f;
 
     if (reference_mode < 0.5f && camera_position.w > 0.5f && is_dynamic < 0.5f && dynamic_influence_meta.z != 0u) {
-        dynamic_correction = max(DynamicReceiver.Sample(LightmapSampler, lighting_uv).rgb, 0.0f);
+        dynamic_correction = dynamic_receiver_sample(lighting_uv);
         baked = max(baked + dynamic_correction, 0.0f);
     }
 
