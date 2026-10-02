@@ -396,8 +396,9 @@ float3 dynamic_receiver_sample(float2 uv) {
         float2 axis_weight = lerp(1.0f - fraction, fraction, float2(x, y));
         float weight = axis_weight.x * axis_weight.y;
         float4 sample = DynamicReceiver.Load(int3(pixel, 0));
+        float generation = (float)dynamic_influence_meta.w;
 
-        if (sample.a < 0.5f) continue;
+        if (abs(sample.a - generation) > 0.25f) continue;
 
         sum += max(sample.rgb, 0.0f) * weight;
         weight_sum += weight;
