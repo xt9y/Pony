@@ -1763,8 +1763,7 @@ static bool renderer_build_scene(RENDERER *renderer, const MESH *mesh, const GLT
 
     if (renderer->scene_radius < 1.0f) renderer->scene_radius = 1.0f;
 
-    renderer->camera_radius = renderer->scene_radius;
-    renderer->distance = renderer->camera_radius * 2.15f;
+    renderer->distance = renderer->scene_radius * 2.15f;
 
     free(renderer->draws);
     renderer->draws = calloc(visual->material_count, sizeof(*renderer->draws));
@@ -1848,8 +1847,8 @@ static void renderer_handle_event(RENDERER *renderer, const SDL_Event *event) {
     case SDL_EVENT_MOUSE_WHEEL:
         renderer->distance -= event->wheel.y * (renderer->distance * 0.08f);
 
-        if (renderer->distance < renderer->camera_radius * 0.05f) renderer->distance = renderer->camera_radius * 0.05f;
-        if (renderer->distance > renderer->camera_radius * 20.0f) renderer->distance = renderer->camera_radius * 20.0f;
+        if (renderer->distance < renderer->scene_radius * 0.05f) renderer->distance = renderer->scene_radius * 0.05f;
+        if (renderer->distance > renderer->scene_radius * 20.0f) renderer->distance = renderer->scene_radius * 20.0f;
         break;
 
     case SDL_EVENT_KEY_DOWN:
@@ -1963,54 +1962,6 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
 
     return true;
 }
-
-static VEC3 renderer_rotate_quaternion(const float rotation[4], VEC3 value) {
-    const VEC3 q = v3(rotation[0], rotation[1], rotation[2]);
-    const float length_sq = v3_len_sq(q) + rotation[3] * rotation[3];
-
-    if (length_sq <= 1.0e-8f) return value;
-
-    const float inv_length = 1.0f / sqrtf(length_sq);
-    const VEC3 axis = v3_scale(q, inv_length);
-    const float w = rotation[3] * inv_length;
-    const VEC3 t = v3_scale(v3_cross(axis, value), 2.0f);
-
-    return v3_add(value, v3_add(v3_scale(t, w), v3_cross(axis, t)));
-}
-
-bool renderer_focus_object(RENDERER *renderer, const OBJECT *object) {
-    if (!renderer || !object || object->type != MODEL || !object->data) return false;
-
-    const struct MODEL *model = object->data;
-
-    if (!model->geometry || !model->geometry->vertices.count) return false;
-
-    const AABB *bounds = &model->geometry->bounds;
-    const TRANSFORM transform = object->transform;
-    const VEC3 scaled_center = {
-        bounds->center.x * transform.scale.x,
-        bounds->center.y * transform.scale.y,
-        bounds->center.z * transform.scale.z,
-    };
-    const VEC3 scaled_extents = {
-        fabsf(bounds->extents.x * transform.scale.x),
-        fabsf(bounds->extents.y * transform.scale.y),
-        fabsf(bounds->extents.z * transform.scale.z),
-    };
-
-    renderer->target = v3_add(renderer_rotate_quaternion(transform.rotation, scaled_center), transform.position);
-    renderer->camera_radius = sqrtf(v3_len_sq(scaled_extents));
-
-    if (renderer->camera_radius < 0.25f) renderer->camera_radius = 0.25f;
-
-    renderer->distance = renderer->camera_radius * 2.15f;
-
-    SDL_Log("camera focus: %.3f %.3f %.3f | radius %.3f | distance %.3f", renderer->target.x, renderer->target.y, renderer->target.z,
-            renderer->camera_radius, renderer->distance);
-
-    return true;
-}
-
 
 void renderer_event(RENDERER *renderer, const SDL_Event *event) {
     renderer_handle_event(renderer, event);

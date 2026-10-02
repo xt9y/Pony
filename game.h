@@ -565,7 +565,6 @@ struct RENDERER {
     float pitch;
     float distance;
     float scene_radius;
-    float camera_radius;
     double frame_time_ms;
     VEC3 target;
     DIRECTIONAL_LIGHT sun;
@@ -580,7 +579,6 @@ struct RENDERER {
 
 bool renderer_init(RENDERER *renderer, GPU *gpu);
 bool renderer_set_scene(RENDERER *renderer, SCENE *scene);
-bool renderer_focus_object(RENDERER *renderer, const OBJECT *object);
 void renderer_event(RENDERER *renderer, const SDL_Event *event);
 bool renderer_frame(RENDERER *renderer);
 void renderer_deinit(RENDERER *renderer);

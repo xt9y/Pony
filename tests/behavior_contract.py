@@ -100,6 +100,10 @@ def main() -> None:
 
     game = text("game.h")
     gltf = text("gltf.c")
+    for needle in ("base_floor_anchor(", "extra_model_transform(", "load_extra_model(", "renderer_focus_object(", "camera_radius"):
+        if needle in main + render + game:
+            raise AssertionError(f"extra-model camera/placement convenience leaked: {needle}")
+
     render = text("render.c")
     fragment = text("shaders/fragment.hlsl")
 
@@ -183,12 +187,7 @@ def main() -> None:
         "return argc > 1 ? 1 : argc;",
         "load_scene_model(&scene, &models[0], BASE_MODEL_PATH",
         "const char *path = argv[extra_start + i];",
-        "load_extra_model(&scene, &models[0], &models[i + 1], path, i",
-        "base_floor_anchor(base)",
-        "floor.y - extra_bounds->min.y",
-        "floor.x + offset - extra_bounds->center.x",
-        "floor.z - extra_bounds->center.z",
-        "renderer_focus_object(&renderer, focus)",
+        "load_scene_model(&scene, &models[i + 1], path, transform_identity()",
         "scene_build_lightmap(&scene, LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE)",
         "scene_content_hash(&scene)",
         "bake_start(&renderer, &scene",
