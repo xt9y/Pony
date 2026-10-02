@@ -345,6 +345,12 @@ typedef struct VOLUME_UNIFORMS {
     float beam_origin[4], beam_step[4];
     float volume_params[4], volume_radii[4], volume_filter[4];
     Uint32 volume_quality[4], volume_strides[4];
+
+    float shadow_u_min[4];
+    float shadow_v_min[4];
+    float shadow_sun_max[4];
+    float shadow_extent_bias[4];
+    float shadow_texel_enabled[4];
 } VOLUME_UNIFORMS;
 
 typedef struct VOLUME_COMPOSE_UNIFORMS {
@@ -522,9 +528,9 @@ static bool create_grade_layout(RENDERER *r) {
 
 static bool create_volume_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_STRUCTURED_BUFFER,
-                                            NriDescriptorType_STRUCTURED_BUFFER};
+                                            NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER};
 
-    return gpu_create_compute_layout(r, &r->volume_layout, src, 4, NriDescriptorType_STORAGE_TEXTURE, true);
+    return gpu_create_compute_layout(r, &r->volume_layout, src, 6, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_volume_compose_layout(RENDERER *r) {
@@ -568,17 +574,22 @@ static bool bind_fx_resources(RENDERER *r, NriCommandBuffer *cmd, NriPipeline *p
 
 static bool bind_volume_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *normal, NriDescriptor *sampler_desc, NriBuffer *probes, NriBuffer *beams,
                                   NriTexture *output, const void *uniforms, uint32_t size) {
+    NriTexture *shadow = r->dynamic_shadow_ready && r->dynamic_shadow_texture ? r->dynamic_shadow_texture : r->default_white;
+
     if (!gpu_transition_texture(r, cmd, normal, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
+        !gpu_transition_texture(r, cmd, shadow, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
         !gpu_transition_texture(r, cmd, output, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER))
         return false;
 
     NriDescriptor *src[] = {gpu_create_texture_view(r, normal, NriTextureView_TEXTURE), sampler_desc,
                             gpu_create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
-                            gpu_create_buffer_view(r, beams, NriBufferView_STRUCTURED_BUFFER, sizeof(float))};
+                            gpu_create_buffer_view(r, beams, NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
+                            gpu_create_texture_view(r, shadow, NriTextureView_TEXTURE),
+                            r->dynamic_shadow_sampler ? r->dynamic_shadow_sampler : sampler_desc};
 
     NriDescriptor *dst = gpu_create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
 
-    return gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 0, src, 4) &&
+    return gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 0, src, 6) &&
            gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
            gpu_bind_uniform_data(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
 }
@@ -1249,13 +1260,16 @@ static bool fx_ensure(FX_STATE *fx, Uint32 width, Uint32 height) {
     return true;
 }
 
+static bool dynamic_shadow_projection(const RENDERER *r, const RENDER_FRAME *frame, float shadow_u_min[4], float shadow_v_min[4],
+                                      float shadow_sun_max[4], float shadow_extent_bias[4]);
+
 static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, NriBuffer *beams, const PROBE_GRID *grid, const BEAM_GRID *beam_grid,
                       const RENDER_FRAME *frame) {
     if (!fx || !fx->owner || !cmd || !probes || !beams || !grid || !beam_grid || !grid->probes || !fx->volume) return false;
 
     RENDERER *r = fx->owner;
 
-    const VOLUME_UNIFORMS u = {
+    VOLUME_UNIFORMS u = {
         .eye_density = {frame->eye.x, frame->eye.y, frame->eye.z, 0.0f},
         .right_tan = {frame->right.x * frame->tan_half_fov * frame->aspect, frame->right.y * frame->tan_half_fov * frame->aspect,
                       frame->right.z * frame->tan_half_fov * frame->aspect, 0},
@@ -1273,7 +1287,12 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
                          frame->vision.middle_transition_width},
         .volume_filter = {frame->vision.jitter_strength, frame->vision.volume_blur_strength, 0.0f, 0.0f},
         .volume_quality = {frame->vision.center_steps, frame->vision.middle_steps, frame->vision.peripheral_steps, 0u},
-        .volume_strides = {frame->vision.center_stride, frame->vision.middle_stride, frame->vision.peripheral_stride, 0u}};
+        .volume_strides = {frame->vision.center_stride, frame->vision.middle_stride, frame->vision.peripheral_stride, 0u},
+        .shadow_texel_enabled = {r->dynamic_shadow_size ? 1.0f / (float)r->dynamic_shadow_size : 1.0f,
+                                 r->dynamic_shadow_size ? 1.0f / (float)r->dynamic_shadow_size : 1.0f,
+                                 r->dynamic_shadow_ready ? 1.0f : 0.0f, 0.0f}};
+
+    (void)dynamic_shadow_projection(r, frame, u.shadow_u_min, u.shadow_v_min, u.shadow_sun_max, u.shadow_extent_bias);
 
     if (!bind_volume_resources(r, cmd, fx->normal_depth, fx->depth_sampler, probes, beams, fx->volume, &u, sizeof(u))) return false;
 
