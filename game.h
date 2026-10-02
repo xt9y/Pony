@@ -332,6 +332,11 @@ typedef struct BVH_TRIANGLE {
     float emissive[4];
 } BVH_TRIANGLE;
 
+typedef struct BVH_SURFACE_REF {
+    uint32_t source_triangle;
+    uint32_t material;
+} BVH_SURFACE_REF;
+
 typedef struct BVH_NODE {
     float min[4];
     float max[4];
@@ -343,6 +348,7 @@ typedef struct BVH {
     uint32_t node_count;
     uint32_t node_capacity;
     BVH_TRIANGLE *triangles;
+    BVH_SURFACE_REF *surfaces;
     uint32_t triangle_count;
     float emissive_weight;
 } BVH;
@@ -358,11 +364,16 @@ typedef struct TRACE_HIT {
     float t;
     VEC3 normal;
     VEC3 albedo;
+    VEC3 emissive;
+    float barycentric[3];
     uint32_t triangle;
+    uint32_t source_triangle;
+    uint32_t material;
 } TRACE_HIT;
 
 bool trace_any(const BVH *tree, TRACE_RAY ray);
 bool trace_closest(const BVH *tree, TRACE_RAY ray, TRACE_HIT *hit);
+bool bvh_hit_surface_uv(const BVH *tree, const GLTF_SCENE *visual, const TRACE_HIT *hit, float *u, float *v);
 bool bvh_build(BVH *tree, const MESH *mesh, const GLTF_SCENE *visual);
 void bvh_free(BVH *tree);
 
