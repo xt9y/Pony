@@ -799,7 +799,7 @@ float3 direct_emissive(float3 position, float3 normal, inout uint seed) {
     const float distance = sqrt(distance2);
     const float3 direction = delta / distance;
     const float receiver_cosine = saturate(dot(normal, direction));
-    const float emitter_cosine = saturate(dot(normalize(tri.normal.xyz), -direction));
+    const float emitter_cosine = abs(dot(normalize(tri.normal.xyz), -direction));
     if (receiver_cosine <= 0.0f || emitter_cosine <= 0.0f) return 0.0f;
 
     TraceRay shadow = make_trace_ray(position + normal * bake_params.x, direction, bake_params.x, max(bake_params.x, distance - 2.0f * bake_params.x));

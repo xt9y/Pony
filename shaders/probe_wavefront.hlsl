@@ -560,7 +560,7 @@ bool probe_trace_closest(ProbeTraceRay ray, out ProbeTraceHit hit) {
         if (distance2 <= bake_params.x * bake_params.x) continue;
         float distance = sqrt(distance2);
         float3 direction = delta / distance;
-        float emitter_cosine = saturate(dot(normalize(tri.normal.xyz), -direction));
+        float emitter_cosine = abs(dot(normalize(tri.normal.xyz), -direction));
         if (emitter_cosine <= 0.0f) continue;
 
         ProbeTraceRay shadow =
@@ -763,7 +763,7 @@ float3 probe_direct_emissive(float3 position, float3 normal, inout uint seed) {
     const float distance = sqrt(distance2);
     const float3 direction = delta / distance;
     const float receiver_cosine = saturate(dot(normal, direction));
-    const float emitter_cosine = saturate(dot(normalize(tri.normal.xyz), -direction));
+    const float emitter_cosine = abs(dot(normalize(tri.normal.xyz), -direction));
     if (receiver_cosine <= 0.0f || emitter_cosine <= 0.0f) return 0.0f;
 
     ProbeTraceRay shadow = probe_make_ray(position + normal * bake_params.x, direction, bake_params.x, max(bake_params.x, distance - 2.0f * bake_params.x));

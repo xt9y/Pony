@@ -130,6 +130,12 @@ def main() -> None:
         if needle not in probe_wavefront:
             raise AssertionError(f"transmissive probe visibility missing: {needle}")
 
+    if "abs(dot(normalize(tri.normal.xyz), -direction))" not in compute_base:
+        raise AssertionError("direct emissive sampling must emit from both triangle sides")
+
+    if probe_wavefront.count("abs(dot(normalize(tri.normal.xyz), -direction))") < 2:
+        raise AssertionError("probe emissive sampling must emit from both triangle sides")
+
 
     advanced_material_fields = (
         "ior",
