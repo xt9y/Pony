@@ -26,31 +26,9 @@ struct SurfaceProbe {
     float4 coefficient[9];
 };
 
-struct BvhNode {
-    float4 bmin;
-    float4 bmax;
-    uint4 meta;
-};
-
-struct BvhTriangle {
-    float4 a;
-    float4 b;
-    float4 c;
-    float4 normal;
-    float4 emissive;
-};
-
-struct TraceRay {
-    float3 origin;
-    float tmin;
-    float3 direction;
-    float tmax;
-};
-
 GPU_BIND_T(12, 2) StructuredBuffer<float> SurfaceBeams : register(t12, space2);
 GPU_BIND_T(13, 2) StructuredBuffer<SurfaceProbe> SurfaceProbes : register(t13, space2);
-GPU_BIND_T(14, 2) StructuredBuffer<BvhNode> DynamicNodes : register(t14, space2);
-GPU_BIND_T(15, 2) StructuredBuffer<BvhTriangle> DynamicTriangles : register(t15, space2);
+GPU_BIND_T(14, 2) Texture2D<float4> DynamicReceiver : register(t14, space2);
 
 GPU_BIND_S(0, 2) SamplerState MaterialSampler : register(s0, space2);
 GPU_BIND_S(1, 2) SamplerState LightmapSampler : register(s1, space2);
@@ -95,11 +73,6 @@ GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3) {
     float4 dynamic_influence_axis_z[8];
     float4 dynamic_influence_diffuse[8];
     float4 dynamic_influence_emissive[8];
-
-    float4x4 dynamic_instance_inverse[8];
-    uint4 dynamic_instance_meta[8];
-    float4 dynamic_emissive_sample_position[32];
-    float4 dynamic_emissive_sample_power[32];
 };
 
 struct SurfaceInput {
@@ -405,154 +378,6 @@ float4 dynamic_lightmap_sample(float2 uv) {
     return weight_sum > 1.0e-6f ? sum / weight_sum : 0.0f;
 }
 
-bool dynamic_trace_box(TraceRay ray, BvhNode node) {
-    float lo = ray.tmin;
-    float hi = ray.tmax;
-
-    [unroll] for (uint axis = 0u; axis < 3u; ++axis) {
-        float direction = ray.direction[axis];
-
-        if (abs(direction) < 1.0e-7f) {
-            if (ray.origin[axis] < node.bmin[axis] || ray.origin[axis] > node.bmax[axis]) return false;
-        } else {
-            float a = (node.bmin[axis] - ray.origin[axis]) / direction;
-            float b = (node.bmax[axis] - ray.origin[axis]) / direction;
-
-            if (a > b) {
-                float tmp = a;
-                a = b;
-                b = tmp;
-            }
-
-            lo = max(lo, a);
-            hi = min(hi, b);
-            if (lo > hi) return false;
-        }
-    }
-
-    return hi >= ray.tmin;
-}
-
-bool dynamic_trace_triangle(TraceRay ray, BvhTriangle tri) {
-    float3 edge1 = tri.b.xyz - tri.a.xyz;
-    float3 edge2 = tri.c.xyz - tri.a.xyz;
-    float3 p = cross(ray.direction, edge2);
-    float determinant = dot(edge1, p);
-    if (abs(determinant) < 1.0e-7f) return false;
-
-    float inverse = 1.0f / determinant;
-    float3 s = ray.origin - tri.a.xyz;
-    float u = dot(s, p) * inverse;
-    if (u < 0.0f || u > 1.0f) return false;
-
-    float3 q = cross(s, edge1);
-    float v = dot(ray.direction, q) * inverse;
-    if (v < 0.0f || u + v > 1.0f) return false;
-
-    float t = dot(edge2, q) * inverse;
-    return t > ray.tmin && t < ray.tmax;
-}
-
-bool dynamic_instance_occluded(float3 world_origin, float3 world_direction, float world_tmax, uint instance_index) {
-    uint count = min(dynamic_influence_meta.x, 8u);
-    if (instance_index >= count || world_tmax <= 1.0e-4f) return false;
-
-    uint4 meta = dynamic_instance_meta[instance_index];
-    if (meta.y == 0u || meta.w == 0u) return false;
-
-    TraceRay ray;
-    ray.origin = mul(dynamic_instance_inverse[instance_index], float4(world_origin, 1.0f)).xyz;
-    ray.tmin = 1.0e-4f;
-    ray.direction = mul((float3x3)dynamic_instance_inverse[instance_index], world_direction);
-    ray.tmax = world_tmax;
-
-    uint node_index = meta.x;
-    uint node_end = meta.x + meta.y;
-    uint triangle_begin = meta.z;
-    uint triangle_end = meta.z + meta.w;
-
-    while (node_index != 0xffffffffu && node_index >= meta.x && node_index < node_end) {
-        BvhNode node = DynamicNodes[node_index];
-
-        if (!dynamic_trace_box(ray, node)) {
-            node_index = node.meta.y;
-            continue;
-        }
-
-        if (node.meta.w != 0u) {
-            for (uint i = 0u; i < node.meta.w; ++i) {
-                uint candidate = node.meta.z + i;
-                if (candidate < triangle_begin || candidate >= triangle_end) continue;
-
-                BvhTriangle tri = DynamicTriangles[candidate];
-                if (tri.normal.w >= 0.999f) continue;
-
-                float emissive_luma = dot(max(tri.emissive.rgb, 0.0f), float3(0.2126f, 0.7152f, 0.0722f));
-                if (emissive_luma > 1.0e-6f) continue;
-
-                if (dynamic_trace_triangle(ray, tri)) return true;
-            }
-
-            node_index = node.meta.y;
-        } else {
-            node_index = node.meta.x;
-        }
-    }
-
-    return false;
-}
-
-bool dynamic_geometry_occluded(float3 origin, float3 direction, float distance) {
-    uint count = min(dynamic_influence_meta.x, 8u);
-
-    [loop] for (uint i = 0u; i < count; ++i)
-        if (dynamic_instance_occluded(origin, direction, distance, i)) return true;
-
-    return false;
-}
-
-float3 dynamic_emissive_direct(float3 position, float3 normal) {
-    uint count = min(dynamic_influence_meta.x, 8u);
-    if (count == 0u || dynamic_flags.z > 0.5f) return 0.0f;
-
-    normal = normalize(normal);
-    float3 lighting = 0.0f;
-    const float epsilon = 1.0e-3f;
-
-    [loop] for (uint i = 0u; i < count; ++i) {
-        if (i == dynamic_influence_meta.y) continue;
-
-        float3 center = dynamic_influence_center_radius[i].xyz;
-        float radius = max(dynamic_influence_center_radius[i].w, 1.0e-3f);
-        float center_distance = length(center - position);
-        if (center_distance > max(radius * 12.0f, 4.0f)) continue;
-
-        [unroll] for (uint sample = 0u; sample < 4u; ++sample) {
-            uint sample_index = i * 4u + sample;
-            float4 source = dynamic_emissive_sample_position[sample_index];
-            if (source.w < 0.5f) continue;
-
-            float3 delta = source.xyz - position;
-            float distance2 = dot(delta, delta);
-            if (distance2 <= 1.0e-6f) continue;
-
-            float distance = sqrt(distance2);
-            float3 direction = delta / distance;
-            float receiver_cosine = saturate(dot(normal, direction));
-            if (receiver_cosine <= 1.0e-5f) continue;
-
-            float3 origin = position + normal * epsilon;
-            float tmax = max(distance - epsilon * 4.0f, epsilon);
-            if (dynamic_geometry_occluded(origin, direction, tmax)) continue;
-
-            float3 power = max(dynamic_emissive_sample_power[sample_index].rgb, 0.0f);
-            lighting += power * (receiver_cosine / max(PI * distance2, 1.0e-5f));
-        }
-    }
-
-    return lighting;
-}
-
 bool dynamic_proxy_reflection_hit(float3 origin, float3 direction, uint index, out float hit_t, out float3 hit_normal) {
     float3 center = dynamic_influence_center_radius[index].xyz;
     float3 axis_x = dynamic_influence_axis_x[index].xyz;
@@ -819,8 +644,8 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
 
     float3 dynamic_correction = 0.0f;
 
-    if (reference_mode < 0.5f && camera_position.w > 0.5f) {
-        dynamic_correction = dynamic_emissive_direct(input.world_position, geometric_normal);
+    if (reference_mode < 0.5f && camera_position.w > 0.5f && is_dynamic < 0.5f && dynamic_influence_meta.z != 0u) {
+        dynamic_correction = max(DynamicReceiver.Sample(LightmapSampler, lighting_uv).rgb, 0.0f);
         baked = max(baked + dynamic_correction, 0.0f);
     }
 
