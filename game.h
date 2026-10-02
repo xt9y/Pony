@@ -591,6 +591,8 @@ struct RENDERER {
     uint32_t dynamic_receiver_grid_dims[3];
     uint32_t dynamic_receiver_grid_cell_count;
     uint32_t dynamic_receiver_grid_mark;
+    uint32_t dynamic_receiver_cursor_cell;
+    uint32_t dynamic_receiver_cursor_offset;
     float dynamic_receiver_grid_min[3];
     float dynamic_receiver_grid_cell_size;
     bool dynamic_receiver_ready;
