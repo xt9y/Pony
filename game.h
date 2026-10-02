@@ -187,6 +187,16 @@ struct MODEL {
     GLTF_SCENE *visual;
 };
 
+typedef struct MODEL_ASSET {
+    GLB_DOC document;
+    MESH geometry;
+    GLTF_SCENE visual;
+    struct MODEL model;
+} MODEL_ASSET;
+
+bool model_load(MODEL_ASSET *asset, const char *path);
+void model_free(MODEL_ASSET *asset);
+
 typedef enum LIGHT_TYPE { LIGHT_DIRECTIONAL, LIGHT_POINT, LIGHT_SPOT } LIGHT_TYPE;
 
 typedef struct DIRECTIONAL_LIGHT {
@@ -248,6 +258,7 @@ typedef struct PERIPHERAL_VISION {
 } PERIPHERAL_VISION;
 
 typedef struct OBJECT {
+    struct SCENE *owner;
     OBJECT_STATE state;
     OBJECT_TYPE type;
     TRANSFORM transform;
@@ -261,9 +272,15 @@ typedef struct SCENE {
     VOLUMETRICS_LIGHTING volumetrics;
     PERIPHERAL_VISION vision;
     LIGHTMAP *lightmap;
+
+    MESH geometry;
+    GLTF_SCENE visual;
+
     float radius;
     uint32_t object_count;
     uint32_t object_capacity;
+    bool compiled;
+    bool lightmap_valid;
 } SCENE;
 
 TRANSFORM transform_identity(void);
@@ -271,6 +288,9 @@ OBJECT *scene_add_model(SCENE *scene, struct MODEL *model, OBJECT_STATE state, T
 OBJECT *scene_add_light(SCENE *scene, struct LIGHT *light, OBJECT_STATE state, TRANSFORM transform);
 void object_set_transform(OBJECT *object, TRANSFORM transform);
 void object_mark_dirty(OBJECT *object);
+bool scene_compile(SCENE *scene);
+bool scene_build_lightmap(SCENE *scene, uint32_t preferred_texels_per_unit, uint32_t max_size);
+uint64_t scene_content_hash(const SCENE *scene);
 void scene_free(SCENE *scene);
 
 typedef struct BVH_TRIANGLE {
@@ -570,8 +590,7 @@ bool renderer_rebake_current_scene(RENDERER *renderer, const MESH *mesh, const G
                                    uint64_t volume_hash, uint64_t beam_hash);
 
 void bake_progress(RENDERER *renderer, const char *stage, Uint32 done, Uint32 total);
-bool bake_start(RENDERER *renderer, const MESH *scene, const GLTF_SCENE *visual, const LIGHTMAP *layout, const struct LIGHT *light, const SKY *sky,
-                const VOLUMETRICS_LIGHTING *volumetrics, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash);
+bool bake_start(RENDERER *renderer, const SCENE *scene, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash, uint64_t beam_hash);
 void bake_update(RENDERER *renderer);
 void bake_cancel(RENDERER *renderer);
 bool bake_active(RENDERER *renderer);
