@@ -393,6 +393,7 @@ typedef struct DYNAMIC_RECEIVER_UNIFORMS {
     Uint32 dynamic_instance_data[4];
     float receiver_params[4];
     float temporal_params[4];
+    float view_projection[16];
 
     float dynamic_instance_model[DYNAMIC_TRACE_INSTANCE_LIMIT][16];
     float dynamic_instance_inverse[DYNAMIC_TRACE_INSTANCE_LIMIT][16];
@@ -2016,8 +2017,8 @@ static uint32_t dynamic_receiver_instances(RENDERER *r, DYNAMIC_RECEIVER_UNIFORM
     return count;
 }
 
-static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd) {
-    if (!r || !cmd) return false;
+static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame) {
+    if (!r || !cmd || !frame) return false;
 
     r->dynamic_receiver_ready = false;
 
@@ -2038,6 +2039,7 @@ static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd) {
         .receiver_params = {fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f), DYNAMIC_RECEIVER_IRRADIANCE_FLOOR, 0.0f, (float)generation},
     };
 
+    memcpy(uniforms.view_projection, frame->mvp, sizeof(uniforms.view_projection));
     (void)dynamic_receiver_instances(r, &uniforms);
 
     if (uniforms.receiver_params[2] <= 0.0f) return true;
@@ -2392,7 +2394,7 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     }
 
     if (!gpu_timestamp_begin(r, cmd, timing_base)) goto failed_frame;
-    if (!update_dynamic_surface_caches(r, cmd, frame) || !update_dynamic_receiver_cache(r, cmd)) goto failed_frame;
+    if (!update_dynamic_surface_caches(r, cmd, frame) || !update_dynamic_receiver_cache(r, cmd, frame)) goto failed_frame;
     if (!gpu_timestamp_end(r, cmd, timing_base)) goto failed_frame;
 
     if (!gpu_timestamp_begin(r, cmd, timing_base + 2u)) goto failed_frame;
