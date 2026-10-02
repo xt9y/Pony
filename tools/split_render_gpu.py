@@ -134,7 +134,6 @@ gpu = gpu.replace("static bool create_pipeline_layouts(RENDERER *r);\\n\\n", "")
 
 # Keep moved renderer functions in their original conceptual order.
 functions = (
-    "static void free_probe_grid(",
     "static NriPipeline *make_surface_pipeline(",
     "static bool create_surface_layout(",
     "static bool create_line_layout(",
@@ -307,13 +306,13 @@ NriDescriptor *gpu_swapchain_color_attachment(RENDERER *r, uint32_t swapchain_in
 """
 gpu = gpu[:insert] + wrappers + gpu[insert:]
 
-# Move renderer code before existing renderer orchestration.
-render_insert = render.find("void bake_progress(")
-if render_insert < 0:
-    raise SystemExit("render insertion point missing")
-
+# Move renderer implementation after the existing math/mesh helpers.
 if "#include <SDL3_image/SDL_image.h>" not in render:
     render = render.replace('#include "render_internal.h"\n\n', '#include "render_internal.h"\n\n#include <SDL3_image/SDL_image.h>\n\n')
+
+render_insert = render.find("bool renderer_load_cached_lightmap(")
+if render_insert < 0:
+    raise SystemExit("render insertion point missing")
 
 render = render[:render_insert] + renderer_code + render[render_insert:]
 
@@ -327,7 +326,7 @@ for forbidden in (
         gpu_header = gpu_header.replace(forbidden, "")
         Path("gpu.h").write_text(gpu_header, encoding="utf-8")
 
-# Guard the final ownership.
+gpu = gpu.replace("static bool create_pipeline_layouts(RENDERER *r);\\n", "")\n\n# Guard the final ownership.
 for name in (
     "create_surface_layout(",
     "bind_fx_resources(",
