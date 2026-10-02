@@ -100,11 +100,13 @@ def main() -> None:
 
     game = text("game.h")
     gltf = text("gltf.c")
+    main = text("main.c")
+    render = text("render.c")
+
     for needle in ("base_floor_anchor(", "extra_model_transform(", "load_extra_model(", "renderer_focus_object(", "camera_radius"):
         if needle in main + render + game:
             raise AssertionError(f"extra-model camera/placement convenience leaked: {needle}")
 
-    render = text("render.c")
     fragment = text("shaders/fragment.hlsl")
 
     advanced_material_fields = (
