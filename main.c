@@ -130,9 +130,9 @@ int main(int argc, char **argv) {
     LIGHTMAP lightmap = {0};
 
     struct LIGHT sun = {.type = LIGHT_DIRECTIONAL,
-                        .directional = {.direction = {0.38f, 0.30f, 0.32f}, .color = {1.00f, 0.94f, 0.84f}, .intensity = 1.0f, .angular_radius = 0.00465f}};
+                        .directional = {.direction = {0.38f, 0.30f, 0.32f}, .color = {1.00f, 0.94f, 0.84f}, .intensity = 0.0f, .angular_radius = 0.00465f}};
 
-    SCENE scene = {.sky = {.zenith = {0.22f, 0.42f, 0.78f}, .horizon = {0.68f, 0.76f, 0.88f}, .intensity = 1.0f},
+    SCENE scene = {.sky = {.zenith = {0.22f, 0.42f, 0.78f}, .horizon = {0.68f, 0.76f, 0.88f}, .intensity = 0.0f},
                    .volumetrics = {.density = 0.045f,
                                    .anisotropy = 0.55f,
                                    .probe_intensity = 0.15f,
@@ -160,14 +160,25 @@ int main(int argc, char **argv) {
     const char *startup_detail = NULL;
     size_t total_bin_size = 0;
 
-    TRANSFORM t = {
+    TRANSFORM barn_lamp = {
         .position = {-4.0f, 5.0f, -2.0f},
         .scale = {13.0f, 13.0f, 13.0f},
         .rotation = {0.0f, 0.0f, 0.0f}
     };
     
-    transform_rotate_y(&t, 90.0f);
+    transform_rotate_y(&barn_lamp, 90.0f);
+
+    TRANSFORM cornell = {
+        .position = {0.0f, 0.0f, 0.0f},
+        .scale = {1.0f, 1.0f, 1.0f},
+        .rotation = {0.0f, 0.0f, 0.0f}
+    };
     
+    transform_rotate_y(&cornell, -90.0f);
+    
+    TRANSFORM transform = barn_lamp;
+    // TRANSFORM transform = cornell;
+
     if (!load_scene_model(&scene, &models[0], BASE_MODEL_PATH, transform_identity(), &total_bin_size)) {
         startup_stage = "base model load";
         startup_detail = SDL_GetError();
@@ -178,7 +189,7 @@ int main(int argc, char **argv) {
 
         SDL_Log("loading extra model %d/%d: %s", i + 1, extra_model_count, path);
 
-        if (!load_scene_model(&scene, &models[i + 1], path, t/* transform_identity() */, &total_bin_size)) {
+        if (!load_scene_model(&scene, &models[i + 1], path, transform, &total_bin_size)) {
             startup_stage = "extra model load";
             startup_detail = SDL_GetError();
         }
