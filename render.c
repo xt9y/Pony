@@ -1624,6 +1624,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         release_buffer(r, r->beam_buffer);
         release_texture(r, r->depth_texture);
         release_texture(r, r->lightmap_texture);
+        release_texture(r, r->baked_direct_texture);
 
         if (r->lightmap_sampler) gpu->core.DestroyDescriptor(r->lightmap_sampler);
         if (r->sky_pipeline) gpu->core.DestroyPipeline(r->sky_pipeline);
@@ -1646,6 +1647,7 @@ bool renderer_load_cached_lightmap(RENDERER *renderer, const char *path, uint64_
     if (!cache_read(path, scene_hash, layout_hash, volume_hash, beam_hash, &cached)) return false;
 
     NriTexture *replacement = NULL;
+    NriTexture *direct_replacement = NULL;
     NriBuffer *volume_buffer = NULL;
     NriBuffer *beam_buffer = NULL;
     bool good = cached.width == lightmap->width && cached.height == lightmap->height;
@@ -1653,6 +1655,11 @@ bool renderer_load_cached_lightmap(RENDERER *renderer, const char *path, uint64_
     if (good) {
         replacement = upload_lightmap(renderer, &cached);
         good = replacement != NULL;
+    }
+
+    if (good) {
+        direct_replacement = upload_direct_lightmap(renderer, &cached);
+        good = direct_replacement != NULL;
     }
 
     if (good) {
@@ -1667,10 +1674,12 @@ bool renderer_load_cached_lightmap(RENDERER *renderer, const char *path, uint64_
 
     if (good) {
         NriTexture *old = renderer->lightmap_texture;
+        NriTexture *old_direct = renderer->baked_direct_texture;
         NriBuffer *old_volume = renderer->volume_probe_buffer;
         NriBuffer *old_beam = renderer->beam_buffer;
 
         renderer->lightmap_texture = replacement;
+        renderer->baked_direct_texture = direct_replacement;
         renderer->volume_probe_buffer = volume_buffer;
         renderer->beam_buffer = beam_buffer;
         renderer->lightmap_width = cached.width;
@@ -1687,10 +1696,12 @@ bool renderer_load_cached_lightmap(RENDERER *renderer, const char *path, uint64_
 
         renderer->has_bake = true;
         release_texture(renderer, old);
+        release_texture(renderer, old_direct);
         release_buffer(renderer, old_volume);
         release_buffer(renderer, old_beam);
     } else {
         release_texture(renderer, replacement);
+        release_texture(renderer, direct_replacement);
         release_buffer(renderer, volume_buffer);
         release_buffer(renderer, beam_buffer);
     }
@@ -1826,9 +1837,11 @@ bool renderer_rebake_current_scene(RENDERER *renderer, const MESH *mesh, const G
 
         if (reuse_lightmap) {
             candidate.pixels = previous.pixels;
+            candidate.direct_pixels = previous.direct_pixels;
             candidate.width = previous.width;
             candidate.height = previous.height;
             previous.pixels = NULL;
+            previous.direct_pixels = NULL;
         } else {
             good = download_lightmap(renderer, &candidate);
         }
@@ -1847,6 +1860,9 @@ bool renderer_rebake_current_scene(RENDERER *renderer, const MESH *mesh, const G
         if (good) bake_timing("readback and cache write", started);
     }
 
+    NriTexture *direct_candidate = good ? upload_direct_lightmap(renderer, &candidate) : NULL;
+    if (good && !direct_candidate) good = false;
+
     cache_free(&candidate);
     cache_free(&previous);
     release_bake_resources(renderer);
@@ -1855,7 +1871,9 @@ bool renderer_rebake_current_scene(RENDERER *renderer, const MESH *mesh, const G
     if (good) {
         NriBuffer *old_volume = renderer->volume_probe_buffer;
         NriBuffer *old_beam = renderer->beam_buffer;
+        NriTexture *old_direct = renderer->baked_direct_texture;
 
+        renderer->baked_direct_texture = direct_candidate;
         renderer->volume_probe_buffer = volume_buffer;
         renderer->beam_buffer = beam_buffer;
 
@@ -1867,9 +1885,11 @@ bool renderer_rebake_current_scene(RENDERER *renderer, const MESH *mesh, const G
 
         renderer->has_bake = true;
         release_texture(renderer, old);
+        release_texture(renderer, old_direct);
         release_buffer(renderer, old_volume);
         release_buffer(renderer, old_beam);
     } else {
+        release_texture(renderer, direct_candidate);
         release_buffer(renderer, volume_buffer);
         release_buffer(renderer, beam_buffer);
         beam_free(&beam_candidate);

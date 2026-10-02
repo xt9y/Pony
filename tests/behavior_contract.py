@@ -313,11 +313,11 @@ def main() -> None:
 
     for needle in (
         "scene->surface_refs",
+        "bvh_build_with_surfaces(&tree, &scene->geometry, &scene->visual",
         "reference_world_layout(",
         "reference_bake_surface(",
         "renderer_update_reference_lighting(",
         "renderer->reference_lighting_enabled = !renderer->reference_lighting_enabled",
-        "bvh_build(&tree, &scene->geometry, &scene->visual)",
     ):
         if needle not in render:
             raise AssertionError(f"dynamic reference path missing: {needle}")
@@ -337,6 +337,15 @@ def main() -> None:
         raise AssertionError("brightness-derived sun visibility heuristic must not return")
     if "baked_sample.a - visibility_floor" not in fragment:
         raise AssertionError("surface shader does not consume explicit sun visibility")
+
+    cache = text("cache.c")
+    for needle in ("DM_CACHE_VERSION 11u", "direct_pixels", "hash_bytes(hash, out->direct_pixels", "fwrite(data->direct_pixels"):
+        if needle not in cache:
+            raise AssertionError(f"versioned separated direct-light cache missing: {needle}")
+
+    for needle in ("baked_direct_texture", "upload_direct_lightmap"):
+        if needle not in game + render + text("bake.c"):
+            raise AssertionError(f"persistent baked direct term missing: {needle}")
 
     bake = text("bake.c")
     for needle in ("job->scene = &scene->static_geometry;", "job->visual = &scene->static_visual;", "job->layout = scene->lightmap;"):

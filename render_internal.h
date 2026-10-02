@@ -76,6 +76,7 @@ void release_bake_resources(RENDERER *renderer);
 bool bake_probe_grid_fast(RENDERER *renderer, PROBE_GRID *grid, const BVH *tree, const BEAM_GRID *beams, PROBE_BAKE_PROGRESS_FN progress);
 bool bake_probe_grid(RENDERER *renderer, PROBE_GRID *grid, Uint32 samples);
 NriTexture *upload_lightmap(RENDERER *renderer, const CACHED_LIGHTMAP *cached);
+NriTexture *upload_direct_lightmap(RENDERER *renderer, const CACHED_LIGHTMAP *cached);
 NriBuffer *upload_probes(RENDERER *renderer, const PROBE_GRID *grid);
 NriBuffer *upload_beams(RENDERER *renderer, const BEAM_GRID *grid);
 bool download_lightmap(RENDERER *renderer, CACHED_LIGHTMAP *out);

@@ -249,25 +249,29 @@ static bool transfer_size(uint32_t width, uint32_t height, Uint32 *out) {
     return true;
 }
 
-NriTexture *upload_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached) {
-    if (!r || !r->gpu->device || !cached || !cached->pixels) return NULL;
+static NriTexture *upload_lightmap_pixels(RENDERER *r, uint32_t width, uint32_t height, const unsigned char *pixels) {
+    if (!r || !r->gpu->device || !pixels) return NULL;
 
     Uint32 bytes = 0;
+    if (!transfer_size(width, height, &bytes)) return NULL;
 
-    if (!transfer_size(cached->width, cached->height, &bytes)) return NULL;
-
-    NriTexture *result = create_lightmap_texture(r, cached->width, cached->height);
-
+    NriTexture *result = create_lightmap_texture(r, width, height);
     if (!result) return NULL;
 
-    if (!gpu_upload_texture_data(r, result, cached->pixels, cached->width * 8u, bytes, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
-                                 NriStageBits_ALL)) {
+    if (!gpu_upload_texture_data(r, result, pixels, width * 8u, bytes, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_ALL)) {
         release_texture(r, result);
-
         return NULL;
     }
 
     return result;
+}
+
+NriTexture *upload_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached) {
+    return cached ? upload_lightmap_pixels(r, cached->width, cached->height, cached->pixels) : NULL;
+}
+
+NriTexture *upload_direct_lightmap(RENDERER *r, const CACHED_LIGHTMAP *cached) {
+    return cached ? upload_lightmap_pixels(r, cached->width, cached->height, cached->direct_pixels) : NULL;
 }
 
 static bool read_rgba16f_texture(RENDERER *r, NriTexture *texture, Uint32 width, Uint32 height, Uint8 **pixels) {
@@ -348,9 +352,17 @@ bool download_lightmap(RENDERER *r, CACHED_LIGHTMAP *out) {
     if (!r || !out) return false;
 
     Uint8 *pixels = NULL;
+    Uint8 *direct_pixels = NULL;
 
     if (!read_rgba16f_texture(r, r->lightmap_texture, r->lightmap_width, r->lightmap_height, &pixels)) return false;
+
+    if (!read_rgba16f_texture(r, r->lightmap_direct, r->lightmap_width, r->lightmap_height, &direct_pixels)) {
+        free(pixels);
+        return false;
+    }
+
     out->pixels = pixels;
+    out->direct_pixels = direct_pixels;
     out->width = r->lightmap_width;
     out->height = r->lightmap_height;
 

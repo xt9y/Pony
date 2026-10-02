@@ -453,6 +453,7 @@ typedef struct CACHED_LIGHTMAP {
     uint64_t volume_hash;
     uint64_t beam_hash;
     unsigned char *pixels;
+    unsigned char *direct_pixels;
     PROBE_GRID object_probes;
     PROBE_GRID volume_probes;
     BEAM_GRID beams;
@@ -580,6 +581,8 @@ struct RENDERER {
     NriTexture *lightmap_texture;
     NriTexture *lightmap_scratch;
     NriTexture *lightmap_direct;
+    /* Persisted static direct term used by signed runtime corrections. */
+    NriTexture *baked_direct_texture;
     NriDescriptor *lightmap_sampler;
     NriDescriptor *material_sampler;
     NriFormat depth_format;
