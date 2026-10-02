@@ -27,7 +27,6 @@ struct SurfaceProbe {
 };
 GPU_BIND_T(12, 2) StructuredBuffer<float> SurfaceBeams : register(t12, space2);
 GPU_BIND_T(13, 2) StructuredBuffer<SurfaceProbe> SurfaceProbes : register(t13, space2);
-GPU_BIND_T(14, 2) Texture2D<float4> BakedDirect : register(t14, space2);
 
 GPU_BIND_S(0, 2) SamplerState MaterialSampler : register(s0, space2);
 GPU_BIND_S(1, 2) SamplerState LightmapSampler : register(s1, space2);
@@ -509,7 +508,6 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     float2 lighting_uv = front_face ? input.lightmap_uv : input.back_lightmap_uv;
     float4 baked_sample = camera_position.w > 0.5f ? Lightmap.Sample(LightmapSampler, lighting_uv)
                                                     : float4(0.12f, 0.12f, 0.12f, 1.0f);
-    float3 exact_baked_direct = camera_position.w > 0.5f ? max(BakedDirect.Sample(LightmapSampler, lighting_uv).rgb, 0.0f) : 0.0f;
 
     const float visibility_floor = 1.0f / 1024.0f;
     if (is_dynamic > 0.5f && baked_sample.a < visibility_floor * 0.5f) dynamic_cache_valid = 0.0f;
@@ -537,7 +535,7 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
         if (is_dynamic > 0.5f)
             baked = max(baked + static_direct * (sun_visibility - cached_sun_visibility), 0.0f);
         else
-            baked = max(baked + exact_baked_direct * (dynamic_visibility - 1.0f), 0.0f);
+            baked = max(baked + static_direct * cached_sun_visibility * (dynamic_visibility - 1.0f), 0.0f);
     }
 
     if (reference_mode < 0.5f && camera_position.w > 0.5f)
