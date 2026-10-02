@@ -270,6 +270,7 @@ def main() -> None:
     for path in (
         "shaders/vertex.hlsl",
         "shaders/fragment.hlsl",
+        "shaders/dynamic_surface.hlsl",
         "shaders/compute.hlsl",
         "shaders/compute_base.hlsl",
         "shaders/vision_compute.hlsl",
