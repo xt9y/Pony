@@ -20,10 +20,12 @@ GPU_BIND_T(7, 2) Texture2D<float4> Thickness : register(t7, space2);
 GPU_BIND_T(8, 2) Texture2D<float4> Iridescence : register(t8, space2);
 GPU_BIND_T(9, 2) Texture2D<float4> IridescenceThickness : register(t9, space2);
 GPU_BIND_T(10, 2) Texture2D<float4> SceneColor : register(t10, space2);
+GPU_BIND_T(11, 2) Texture2D<float> DynamicShadow : register(t11, space2);
 
 GPU_BIND_S(0, 2) SamplerState MaterialSampler : register(s0, space2);
 GPU_BIND_S(1, 2) SamplerState LightmapSampler : register(s1, space2);
 GPU_BIND_S(2, 2) SamplerState SceneSampler : register(s2, space2);
+GPU_BIND_S(3, 2) SamplerState DynamicShadowSampler : register(s3, space2);
 
 GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3) {
     float4 base_color_factor;
@@ -42,6 +44,13 @@ GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3) {
     float4 camera_forward;
     float4 sky_zenith;
     float4 sky_horizon;
+
+    float4 shadow_u_min;
+    float4 shadow_v_min;
+    float4 shadow_sun_max;
+    float4 shadow_extent_bias;
+    float4 shadow_texel_enabled;
+    float4 dynamic_flags;
 };
 
 struct SurfaceInput {
@@ -191,6 +200,28 @@ float3 material_sky_radiance(float3 direction) {
     return sky + sun_color.rgb * sun_direction.w * (disc + halo);
 }
 
+float dynamic_shadow_visibility(float3 position) {
+    if (shadow_texel_enabled.z < 0.5f || any(shadow_extent_bias.xyz <= 0.0f)) return 1.0f;
+
+    float sx = dot(position, shadow_u_min.xyz);
+    float sy = dot(position, shadow_v_min.xyz);
+    float sz = dot(position, shadow_sun_max.xyz);
+    float2 uv = (float2(sx, sy) - float2(shadow_u_min.w, shadow_v_min.w)) / shadow_extent_bias.xy;
+    float depth = (shadow_sun_max.w - sz) / shadow_extent_bias.z;
+
+    if (any(uv < 0.0f) || any(uv > 1.0f) || depth < 0.0f || depth > 1.0f) return 1.0f;
+
+    float visibility = 0.0f;
+    [unroll] for (int y = -1; y <= 1; ++y) {
+        [unroll] for (int x = -1; x <= 1; ++x) {
+            float2 sample_uv = saturate(uv + float2((float)x, (float)y) * shadow_texel_enabled.xy);
+            float blocker = DynamicShadow.SampleLevel(DynamicShadowSampler, sample_uv, 0.0f);
+            visibility += depth <= blocker + shadow_extent_bias.w ? 1.0f : 0.0f;
+        }
+    }
+    return visibility / 9.0f;
+}
+
 float3 environment_radiance(float3 direction, float roughness) {
     direction = normalize(direction);
 
@@ -307,11 +338,22 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
         return output;
     }
 
-    float baked_luma = dot(baked, float3(0.2126f, 0.7152f, 0.0722f));
     const float visibility_floor = 1.0f / 1024.0f;
-    float sun_visibility = camera_position.w > 0.5f
-                               ? saturate((baked_sample.a - visibility_floor) / (1.0f - visibility_floor))
-                               : 1.0f;
+    float cached_sun_visibility = camera_position.w > 0.5f
+                                      ? saturate((baked_sample.a - visibility_floor) / (1.0f - visibility_floor))
+                                      : 1.0f;
+    float dynamic_visibility = dynamic_shadow_visibility(input.world_position);
+    float is_dynamic = saturate(dynamic_flags.x);
+    float sun_visibility = lerp(cached_sun_visibility * dynamic_visibility, cached_sun_visibility, is_dynamic);
+
+    if (camera_position.w > 0.5f && is_dynamic < 0.5f) {
+        float3 geometric_normal = normalize(input.world_normal) * (front_face ? 1.0f : -1.0f);
+        float geometric_n_dot_l = max(dot(geometric_normal, l), 0.0f);
+        float3 static_direct = sun_color.rgb * roughness_normal_ao_sun.w * geometric_n_dot_l;
+        baked = max(baked + static_direct * (sun_visibility - cached_sun_visibility), 0.0f);
+    }
+
+    float baked_luma = dot(baked, float3(0.2126f, 0.7152f, 0.0722f));
     float3 direct_specular = specular * sun_color.rgb * roughness_normal_ao_sun.w * n_dot_l * sun_visibility;
 
     float3 legacy_environment = f0 * (0.025f + 0.10f * (1.0f - roughness)) * material_ao *
