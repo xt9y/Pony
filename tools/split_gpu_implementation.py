@@ -20,11 +20,9 @@ if start < 0 or end < 0 or end <= start:
 block = source[start:end].rstrip() + "\n\n"
 source = source[:start] + source[end:]
 
-old = "static void probe_wavefront_scratch_destroy(RENDERER *r)"
-new = "void probe_wavefront_scratch_destroy(RENDERER *r)"
-if old not in block:
+required = "void probe_wavefront_scratch_destroy(RENDERER *r)"
+if required not in block:
     raise SystemExit("probe scratch cleanup was not inside bake region")
-block = block.replace(old, new, 1)
 
 
 insert_marker = "typedef enum BAKE_PHASE"
