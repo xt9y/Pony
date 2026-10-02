@@ -686,6 +686,30 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
            gpu_bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
 }
 
+static bool bind_dynamic_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const DYNAMIC_LIGHTING_ALLOCATION *allocation,
+                                           const DYNAMIC_SURFACE_UNIFORMS *uniforms) {
+    if (!r || !cmd || !allocation || !allocation->texture || !allocation->sample_buffer || !uniforms) return false;
+
+    NriBuffer *probes = r->volume_probe_buffer ? r->volume_probe_buffer : r->surface_probe_fallback_buffer;
+    NriBuffer *beams = r->beam_buffer ? r->beam_buffer : r->surface_beam_fallback_buffer;
+
+    if (!probes || !beams ||
+        !gpu_transition_texture(r, cmd, allocation->texture, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE,
+                                NriStageBits_COMPUTE_SHADER))
+        return false;
+
+    NriDescriptor *src[] = {
+        gpu_create_buffer_view(r, allocation->sample_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(LMAP_SAMPLE)),
+        gpu_create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
+        gpu_create_buffer_view(r, beams, NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
+    };
+    NriDescriptor *dst = gpu_create_texture_view(r, allocation->texture, NriTextureView_STORAGE_TEXTURE);
+
+    return gpu_bind_descriptor_set(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 0, src, 3) &&
+           gpu_bind_descriptor_set(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
+           gpu_bind_uniform_data(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
+}
+
 static bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
     return gpu_bind_uniform_data(r, cmd, r->line_layout, NriBindPoint_GRAPHICS, 1, data, size);
 }
@@ -1692,6 +1716,94 @@ static bool render_dynamic_shadow_map(RENDERER *r, NriCommandBuffer *cmd, const 
     return true;
 }
 
+static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame) {
+    if (!r || !cmd || !frame) return false;
+    if (r->reference_lighting_enabled || !r->has_bake || !r->dynamic_lighting_count) return true;
+    if (!r->dynamic_surface_pipeline || !r->volume_probe_buffer || !r->beam_buffer) return true;
+
+    uint32_t dirty_count = 0u;
+
+    for (uint32_t i = 0; i < r->dynamic_lighting_count; ++i) {
+        DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        const OBJECT *object = scene_object_by_id_const(r->scene, allocation->object_id);
+
+        if (!object || object->state != DYNAMIC || object->type != MODEL || !allocation->layout || !allocation->layout->sample_count)
+            return false;
+
+        if (allocation->pending_transform_revision != object->transform_revision ||
+            allocation->pending_lighting_revision != object->lighting_revision) {
+            allocation->pending_transform_revision = object->transform_revision;
+            allocation->pending_lighting_revision = object->lighting_revision;
+            allocation->sample_cursor = 0u;
+        }
+
+        if (allocation->transform_revision != object->transform_revision || allocation->lighting_revision != object->lighting_revision)
+            ++dirty_count;
+    }
+
+    uint32_t budget = DYNAMIC_SURFACE_SAMPLES_PER_FRAME;
+    uint32_t dirty_left = dirty_count;
+
+    for (uint32_t i = 0; i < r->dynamic_lighting_count && budget && dirty_left; ++i) {
+        DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        const OBJECT *object = scene_object_by_id_const(r->scene, allocation->object_id);
+
+        if (!object) return false;
+        if (allocation->transform_revision == object->transform_revision && allocation->lighting_revision == object->lighting_revision) continue;
+
+        const uint32_t total = allocation->layout->sample_count;
+        if (allocation->sample_cursor > total) allocation->sample_cursor = 0u;
+
+        uint32_t quota = (budget + dirty_left - 1u) / dirty_left;
+        uint32_t remaining = total - allocation->sample_cursor;
+        uint32_t count = remaining < quota ? remaining : quota;
+
+        if (count) {
+            const MAT4 model = m4_transform(object->transform, false);
+            const MAT4 normal_model = m4_transform(object->transform, true);
+            DYNAMIC_SURFACE_UNIFORMS uniforms = {
+                .sample_offset = allocation->sample_cursor,
+                .sample_count = count,
+                .texture_width = allocation->layout->width,
+                .texture_height = allocation->layout->height,
+                .probe_origin_spacing = {r->volume_probes.origin.x, r->volume_probes.origin.y, r->volume_probes.origin.z, r->volume_probes.spacing},
+                .probe_dims = {r->volume_probes.count_x, r->volume_probes.count_y, r->volume_probes.count_z, 1u},
+                .beam_origin = {r->beams.origin.x, r->beams.origin.y, r->beams.origin.z, 0.0f},
+                .beam_step = {r->beams.step.x, r->beams.step.y, r->beams.step.z, 0.0f},
+                .beam_dims = {r->beams.width, r->beams.height, r->beams.depth, 1u},
+                .sun_direction_intensity = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, frame->sun.intensity},
+                .sun_color_visibility_floor = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, 1.0f / 1024.0f},
+            };
+
+            memcpy(uniforms.model, model.m, sizeof(uniforms.model));
+            memcpy(uniforms.normal_model, normal_model.m, sizeof(uniforms.normal_model));
+
+            if (!bind_dynamic_surface_resources(r, cmd, allocation, &uniforms)) return false;
+
+            r->gpu->core.CmdSetPipeline(cmd, r->dynamic_surface_pipeline);
+            r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+
+            if (!gpu_transition_texture(r, cmd, allocation->texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
+                                        NriStageBits_FRAGMENT_SHADER))
+                return false;
+
+            allocation->sample_cursor += count;
+            budget -= count;
+        }
+
+        if (allocation->sample_cursor == total &&
+            allocation->pending_transform_revision == object->transform_revision &&
+            allocation->pending_lighting_revision == object->lighting_revision) {
+            allocation->transform_revision = object->transform_revision;
+            allocation->lighting_revision = object->lighting_revision;
+        }
+
+        --dirty_left;
+    }
+
+    return true;
+}
+
 static uint32_t dynamic_influences(const RENDERER *r, MATERIAL_UNIFORMS *uniforms) {
     if (!r || !r->scene || !uniforms) return 0u;
 
@@ -1732,7 +1844,7 @@ static uint32_t dynamic_influences(const RENDERER *r, MATERIAL_UNIFORMS *uniform
 static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATERIAL *material, const RENDER_FRAME *frame, const DRAW_RANGE *draw) {
     float dynamic_cache_valid = 0.0f;
 
-    if (r && r->scene && draw && draw->object_id && r->reference_lighting_enabled) {
+    if (r && r->scene && draw && draw->object_id) {
         const DYNAMIC_LIGHTING_ALLOCATION *allocation = dynamic_lighting_find_const(r, draw->object_id);
         const OBJECT *object = scene_object_by_id_const(r->scene, draw->object_id);
 
@@ -1836,6 +1948,7 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     NriCommandBuffer *cmd = NULL;
 
     if (!gpu_begin_render_frame(r, &queued_frame, &cmd, &swap, &swap_index)) goto failed_frame;
+    if (!update_dynamic_surface_caches(r, cmd, frame)) goto failed_frame;
     if (!render_dynamic_shadow_map(r, cmd, frame)) goto failed_frame;
 
     CAMERA_UNIFORMS camera = {0};
@@ -2509,6 +2622,9 @@ static bool renderer_update_reference_lighting(RENDERER *r, const struct LIGHT *
         allocation->texture = dynamic_candidates[i];
         allocation->transform_revision = object->transform_revision;
         allocation->lighting_revision = object->lighting_revision;
+        allocation->pending_transform_revision = object->transform_revision;
+        allocation->pending_lighting_revision = object->lighting_revision;
+        allocation->sample_cursor = allocation->layout ? allocation->layout->sample_count : 0u;
     }
 
     free(dynamic_candidates);
@@ -2689,6 +2805,17 @@ static void renderer_handle_event(RENDERER *renderer, const SDL_Event *event) {
         if (!event->key.repeat && event->key.key == SDLK_TAB) renderer->show_debug = !renderer->show_debug;
         if (!event->key.repeat && event->key.key == SDLK_F2) {
             renderer->reference_lighting_enabled = !renderer->reference_lighting_enabled;
+
+            if (!renderer->reference_lighting_enabled) {
+                for (uint32_t i = 0; i < renderer->dynamic_lighting_count; ++i) {
+                    renderer->dynamic_lighting[i].transform_revision = 0u;
+                    renderer->dynamic_lighting[i].lighting_revision = 0u;
+                    renderer->dynamic_lighting[i].pending_transform_revision = 0u;
+                    renderer->dynamic_lighting[i].pending_lighting_revision = 0u;
+                    renderer->dynamic_lighting[i].sample_cursor = 0u;
+                }
+            }
+
             SDL_Log("dynamic reference lighting: %s", renderer->reference_lighting_enabled ? "enabled" : "disabled");
         }
         if (!event->key.repeat && event->key.key == SDLK_F5) renderer->show_volume = !renderer->show_volume;
