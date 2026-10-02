@@ -388,10 +388,11 @@ def main() -> None:
     for needle in (
         "GPU_FRAME_QUEUE_DEPTH",
         "DYNAMIC_TIMESTAMP_BASE",
-        'gpu_timestamp_log(r, timing_base, "dynamic lighting caches")',
-        'gpu_timestamp_log(r, timing_base + 2u, "dynamic shadow map")',
+        'gpu_timestamp_log(r, timing_base, "dynamic object cache")',
+        'gpu_timestamp_log(r, timing_base + 2u, "dynamic receiver cache")',
+        'gpu_timestamp_log(r, timing_base + 4u, "dynamic shadow map")',
         "gpu_timestamp_begin(r, cmd, timing_base)",
-        "gpu_timestamp_end(r, cmd, timing_base + 2u)",
+        "gpu_timestamp_end(r, cmd, timing_base + 4u)",
     ):
         if needle not in render + text("render_internal.h"):
             raise AssertionError(f"dynamic GPU cost instrumentation missing: {needle}")
@@ -530,34 +531,39 @@ def main() -> None:
             raise AssertionError(f"dynamic lighting debug visualization missing: {needle}")
 
     for needle in (
-        "DYNAMIC_RECEIVER_DILATION_PASSES 3u",
+        "DYNAMIC_RECEIVER_IRRADIANCE_FLOOR 0.00075f",
         "renderer_build_dynamic_receiver_cache(",
         "dynamic_receiver_sample_buffer",
         "dynamic_receiver_texture",
         "dynamic_receiver_scratch",
         "dynamic_receiver_instances(",
+        "receiver_previous_center_valid",
+        "history_weight",
         "allocation->emissive_weight = tree.emissive_weight",
         "update_dynamic_receiver_cache(",
         "src, 19",
         "result.dynamic_influence_meta[2] = r->dynamic_receiver_ready ? 1u : 0u",
+        "result.dynamic_influence_meta[3] = (uint32_t)(r->gpu->frame_index % 1024u) + 1u",
     ):
         if needle not in render:
             raise AssertionError(f"bake-equivalent dynamic receiver cache missing: {needle}")
 
     for needle in (
-        "EMISSIVE_SAMPLES = 32u",
+        "EMISSIVE_SAMPLES = 8u",
         "direct_emissive_target(",
         "direct_emissive_stratified(",
         "receiver_cosine",
         "emitter_cosine",
         "triangle_probability",
         "pdf_area",
-        "static_any(shadow) || dynamic_any(shadow)",
+        "dynamic_any(shadow) || static_any(shadow)",
         "filtered_pixel(",
-        "dilated_pixel(",
         "PHASE_FILTER",
-        "PHASE_DILATE",
-        "PHASE_CLEAR",
+        "irradiance_floor",
+        "screen_margin = 1.25f",
+        "hash_u32(generation * 0x68bc21ebu)",
+        "previous_generation",
+        "history_weight",
     ):
         if needle not in dynamic_receiver:
             raise AssertionError(f"bake-equivalent dynamic receiver shader missing: {needle}")
@@ -565,7 +571,8 @@ def main() -> None:
     for needle in (
         "Texture2D<float4> DynamicReceiver",
         "dynamic_influence_meta.z != 0u",
-        "DynamicReceiver.Sample(LightmapSampler, lighting_uv)",
+        "dynamic_receiver_sample(",
+        "abs(sample.a - generation) > 0.25f",
         "baked + dynamic_correction",
     ):
         if needle not in fragment:
