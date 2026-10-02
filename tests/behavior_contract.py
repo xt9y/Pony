@@ -102,6 +102,11 @@ def main() -> None:
     gltf = text("gltf.c")
     main = text("main.c")
     render = text("render.c")
+    gpu = text("gpu.c")
+
+    for needle in ("MAX_LAYOUT_RANGES = 32", "counts[set] > MAX_LAYOUT_RANGES"):
+        if needle not in gpu:
+            raise AssertionError(f"descriptor layout range capacity guard missing: {needle}")
 
     for needle in ("base_floor_anchor(", "extra_model_transform(", "load_extra_model(", "renderer_focus_object(", "camera_radius"):
         if needle in main + render + game:
