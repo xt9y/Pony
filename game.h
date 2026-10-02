@@ -533,6 +533,7 @@ struct RENDERER {
 
     NriPipelineLayout *surface_layout;
     NriPipelineLayout *dynamic_shadow_layout;
+    NriPipelineLayout *dynamic_surface_layout;
     NriPipelineLayout *line_layout;
     NriPipelineLayout *sky_layout;
     NriPipelineLayout *bake_layout;
@@ -552,6 +553,7 @@ struct RENDERER {
     NriPipeline *solid_pipeline;
     NriPipeline *transmission_pipeline;
     NriPipeline *dynamic_shadow_pipeline;
+    NriPipeline *dynamic_surface_pipeline;
     NriPipeline *line_pipeline;
     NriPipeline *bake_pipeline;
     NriPipeline *lightmap_queue_reset_pipeline;
