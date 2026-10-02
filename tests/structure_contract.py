@@ -119,8 +119,9 @@ def main() -> None:
         "void bake_worker_deinit(",
     )
 
+    game_header = text("game.h")
     gpu = body(gpu_header, r"typedef struct GPU\s*\{(.*?)\}\s*GPU;", "GPU")
-    renderer = body(gpu_header, r"struct RENDERER\s*\{(.*?)\n\};", "RENDERER")
+    renderer = body(game_header, r"struct RENDERER\s*\{(.*?)\n\};", "RENDERER")
     low_level = (
         "SDL_Window *window;",
         "NriDevice *device;",
