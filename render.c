@@ -1927,11 +1927,13 @@ static bool draw_surface_range(RENDERER *r, NriCommandBuffer *cmd, const RENDER_
     if (draw->object_id) {
         DYNAMIC_LIGHTING_ALLOCATION *allocation = dynamic_lighting_find(r, draw->object_id);
 
-        if (allocation) {
+        if (uniforms.dynamic_flags[1] > 0.5f && allocation) {
             if (r->reference_lighting_enabled && allocation->reference_texture)
                 lighting = allocation->reference_texture;
-            else if (allocation->texture)
+            else if (!r->reference_lighting_enabled && allocation->texture)
                 lighting = allocation->texture;
+        } else {
+            lighting = r->default_white;
         }
     }
 
