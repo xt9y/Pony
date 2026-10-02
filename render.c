@@ -2615,6 +2615,14 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
             gpu_create_texture(renderer, NriFormat_RGBA16_SFLOAT,
                                NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE,
                                allocation->layout->width, allocation->layout->height);
+
+        if (allocation->texture &&
+            !gpu_clear_texture_zero(renderer, allocation->texture, 8u, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
+                                    NriStageBits_COMPUTE_SHADER | NriStageBits_FRAGMENT_SHADER)) {
+            release_texture(renderer, allocation->texture);
+            allocation->texture = NULL;
+        }
+
         allocation->sample_buffer =
             gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, allocation->layout->samples,
                               (size_t)allocation->layout->sample_count * sizeof(*allocation->layout->samples), sizeof(LMAP_SAMPLE));
