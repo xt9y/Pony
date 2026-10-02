@@ -581,6 +581,18 @@ struct RENDERER {
     DYNAMIC_LIGHTING_ALLOCATION *dynamic_lighting;
     uint32_t dynamic_lighting_count;
 
+    /*
+     * Slow correctness oracle for dynamic-lighting development. When enabled,
+     * these caches are rebuilt from the current full scene with probe reuse
+     * disabled, so stationary and moving-pose captures can be compared
+     * against the same transport equations as the bake.
+     */
+    NriTexture *reference_static_texture;
+    uint32_t reference_geometry_revision;
+    uint32_t reference_lighting_revision;
+    bool reference_lighting_enabled;
+    bool bake_full_transport;
+
     RENDER_VERTEX *vertices;
     uint32_t vertex_count;
     uint32_t vertex_capacity;
