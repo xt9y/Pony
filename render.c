@@ -3137,8 +3137,8 @@ static bool renderer_update_reference_lighting(RENDERER *r, const struct LIGHT *
 
             if (object && allocation->reference_texture &&
                 allocation->sample_pass >= DYNAMIC_SURFACE_CONVERGENCE_PASSES &&
-                allocation->acceptance_transform_revision != object->transform_revision &&
-                allocation->acceptance_scene_lighting_revision != scene->lighting_revision) {
+                (allocation->acceptance_transform_revision != object->transform_revision ||
+                 allocation->acceptance_scene_lighting_revision != scene->lighting_revision)) {
                 log_dynamic_matte_reference_error(r, allocation, object, allocation->reference_texture);
                 allocation->acceptance_transform_revision = object->transform_revision;
                 allocation->acceptance_scene_lighting_revision = scene->lighting_revision;
