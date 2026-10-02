@@ -386,10 +386,15 @@ def main() -> None:
         if needle not in render + text("render_internal.h"):
             raise AssertionError(f"dynamic GPU cost instrumentation missing: {needle}")
 
+    if "bool lmap_build_density(" not in text("lmap.c") or "lmap_build_density" not in game:
+        raise AssertionError("fractional lightmap density API missing for bounded dynamic atlases")
+
     dynamic_surface = text("shaders/dynamic_surface.hlsl")
     for needle in (
         "DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u",
         "model_surface_layout(struct MODEL *model, uint32_t target_samples)",
+        "lmap_build_density(",
+        "DYNAMIC_LIGHTING_MIN_TEXELS_PER_UNIT",
         "model->surface_layout->sample_count <= target_samples",
         "DYNAMIC_SURFACE_SAMPLES_PER_FRAME / count",
         "dynamic_surface_target",
