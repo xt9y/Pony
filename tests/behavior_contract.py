@@ -86,8 +86,8 @@ def main() -> None:
         r'\{"([^"]+\.hlsl)",\s*"([^"]+)",\s*"([^"]+)",\s*(NULL|"[^"]+"),\s*"([^"]+)",\s*([01])\}',
         build,
     )
-    if len(jobs) != 29:
-        raise AssertionError(f"expected 29 shader jobs, found {len(jobs)}")
+    if len(jobs) != 30:
+        raise AssertionError(f"expected 30 shader jobs, found {len(jobs)}")
 
     for path, entry, define, fallback, stage, wave in jobs:
         source = shader_source(path)
@@ -400,6 +400,7 @@ def main() -> None:
         raise AssertionError("fractional lightmap density API missing for bounded dynamic atlases")
 
     dynamic_surface = text("shaders/dynamic_surface.hlsl")
+    dynamic_receiver = text("shaders/dynamic_receiver.hlsl")
     for needle in (
         "DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u",
         "DYNAMIC_SURFACE_CONVERGENCE_PASSES 4u",
@@ -529,36 +530,56 @@ def main() -> None:
             raise AssertionError(f"dynamic lighting debug visualization missing: {needle}")
 
     for needle in (
-        "DYNAMIC_EMISSIVE_SAMPLES_PER_OBJECT 4u",
-        "dynamic_emissive_samples(",
-        "dynamic_emissive_sample_position",
-        "dynamic_emissive_sample_power",
-        "dynamic_instance_inverse",
-        "dynamic_instance_meta",
-        "src, 20",
+        "DYNAMIC_RECEIVER_DILATION_PASSES 3u",
+        "renderer_build_dynamic_receiver_cache(",
+        "dynamic_receiver_sample_buffer",
+        "dynamic_receiver_texture",
+        "dynamic_receiver_scratch",
+        "dynamic_receiver_instances(",
+        "allocation->emissive_weight = tree.emissive_weight",
+        "update_dynamic_receiver_cache(",
+        "src, 19",
+        "result.dynamic_influence_meta[2] = r->dynamic_receiver_ready ? 1u : 0u",
     ):
         if needle not in render:
-            raise AssertionError(f"geometry-backed dynamic emissive receiver data missing: {needle}")
+            raise AssertionError(f"bake-equivalent dynamic receiver cache missing: {needle}")
 
     for needle in (
-        "StructuredBuffer<BvhNode> DynamicNodes",
-        "StructuredBuffer<BvhTriangle> DynamicTriangles",
-        "dynamic_instance_occluded(",
-        "dynamic_geometry_occluded(",
-        "dynamic_emissive_direct(",
-        "if (emissive_luma > 1.0e-6f) continue",
+        "EMISSIVE_SAMPLES = 32u",
+        "direct_emissive_target(",
+        "direct_emissive_stratified(",
+        "receiver_cosine",
+        "emitter_cosine",
+        "triangle_probability",
+        "pdf_area",
+        "static_any(shadow) || dynamic_any(shadow)",
+        "filtered_pixel(",
+        "dilated_pixel(",
+        "PHASE_FILTER",
+        "PHASE_DILATE",
+        "PHASE_CLEAR",
+    ):
+        if needle not in dynamic_receiver:
+            raise AssertionError(f"bake-equivalent dynamic receiver shader missing: {needle}")
+
+    for needle in (
+        "Texture2D<float4> DynamicReceiver",
+        "dynamic_influence_meta.z != 0u",
+        "DynamicReceiver.Sample(LightmapSampler, lighting_uv)",
         "baked + dynamic_correction",
-        "dynamic_correction = dynamic_emissive_direct(input.world_position, geometric_normal)",
     ):
         if needle not in fragment:
-            raise AssertionError(f"geometry-backed dynamic emissive receiver lighting missing: {needle}")
+            raise AssertionError(f"filtered dynamic receiver atlas consumption missing: {needle}")
 
     for forbidden in (
         "signed_dynamic_near_field(",
         "outgoing - baseline",
+        "dynamic_emissive_direct(",
+        "StructuredBuffer<BvhNode> DynamicNodes",
+        "StructuredBuffer<BvhTriangle> DynamicTriangles",
     ):
         if forbidden in fragment:
-            raise AssertionError(f"proxy receiver subtraction regression returned: {forbidden}")
+            raise AssertionError(f"separate per-fragment dynamic lighting path returned: {forbidden}")
 
     compute = text("shaders/compute.hlsl")
     for needle in (
