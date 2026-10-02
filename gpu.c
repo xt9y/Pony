@@ -1211,6 +1211,76 @@ fail:
     return NULL;
 }
 
+bool gpu_clear_texture_zero(RENDERER *r, NriTexture *texture, uint32_t bytes_per_texel, NriAccessBits access, NriLayout layout, NriStageBits stages) {
+    if (!r || !texture || !bytes_per_texel) return false;
+
+    const NriTextureDesc *desc = r->gpu->core.GetTextureDesc(texture);
+    const NriDeviceDesc *device = r->gpu->core.GetDeviceDesc(r->gpu->device);
+
+    if (!desc || !device || !desc->width || !desc->height) return false;
+    if ((uint64_t)desc->width * bytes_per_texel > UINT32_MAX) return false;
+
+    const uint32_t row_pitch = (uint32_t)desc->width * bytes_per_texel;
+    const uint64_t aligned_row = upload_align(row_pitch, device->memoryAlignment.uploadBufferTextureRow);
+
+    if (!aligned_row || aligned_row > UPLOAD_CHUNK_BYTES) return false;
+
+    const NriAccessLayoutStage copy_state = {.access = NriAccessBits_COPY_DESTINATION, .layout = NriLayout_COPY_DESTINATION, .stages = NriStageBits_ALL};
+    const NriAccessLayoutStage final_state = {.access = access, .layout = layout, .stages = stages};
+
+    uint32_t first_row = 0u;
+    const uint32_t row_count = (uint32_t)desc->height;
+
+    while (first_row < row_count) {
+        uint32_t rows = (uint32_t)(UPLOAD_CHUNK_BYTES / aligned_row);
+        const uint32_t remaining = row_count - first_row;
+
+        if (!rows) rows = 1u;
+        if (rows > remaining) rows = remaining;
+
+        uint64_t staging_bytes = upload_align(aligned_row * rows, device->memoryAlignment.uploadBufferTextureSlice);
+
+        while (rows > 1u && staging_bytes > UPLOAD_CHUNK_BYTES) {
+            --rows;
+            staging_bytes = upload_align(aligned_row * rows, device->memoryAlignment.uploadBufferTextureSlice);
+        }
+
+        if (staging_bytes > UPLOAD_CHUNK_BYTES) return false;
+
+        UPLOAD_SLOT *slot = NULL;
+        if (!upload_begin_slot(r, &slot)) goto fail;
+
+        void *mapped = r->gpu->core.MapBuffer(slot->staging, 0u, staging_bytes);
+
+        if (!mapped) {
+            (void)r->gpu->core.EndCommandBuffer(slot->command_buffer);
+            goto fail;
+        }
+
+        memset(mapped, 0, (size_t)staging_bytes);
+        r->gpu->core.UnmapBuffer(slot->staging);
+
+        if (!first_row && !gpu_texture_barrier(r, slot->command_buffer, texture, (NriAccessLayoutStage){0}, copy_state)) goto fail;
+
+        const NriTextureDataLayoutDesc source_layout = {.offset = 0u, .rowPitch = (uint32_t)aligned_row, .slicePitch = (uint32_t)staging_bytes};
+        const NriTextureRegionDesc region = {
+            .x = 0u, .y = (NriDim_t)first_row, .z = 0u, .width = desc->width, .height = (NriDim_t)rows, .depth = 1u, .mipOffset = 0u, .layerOffset = 0u};
+
+        r->gpu->core.CmdUploadBufferToTexture(slot->command_buffer, texture, &region, slot->staging, &source_layout);
+
+        if (first_row + rows == row_count && !gpu_texture_barrier(r, slot->command_buffer, texture, copy_state, final_state)) goto fail;
+        if (!upload_submit_slot(r, slot)) goto fail;
+
+        first_row += rows;
+    }
+
+    return true;
+
+fail:
+    (void)upload_drain(r);
+    return false;
+}
+
 bool gpu_upload_texture_data(RENDERER *r, NriTexture *texture, const void *data, uint32_t row_pitch, uint32_t slice_pitch, NriAccessBits access,
                              NriLayout layout, NriStageBits stages) {
     if (!r || !texture || !data || !row_pitch || !slice_pitch || slice_pitch % row_pitch) return false;
