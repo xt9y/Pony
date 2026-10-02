@@ -21,6 +21,7 @@
 #define DYNAMIC_RECEIVER_GRID_MIN_CELL_SIZE 0.5f
 #define DYNAMIC_RECEIVER_GRID_TARGET_AXIS 48.0f
 #define DYNAMIC_RECEIVER_GRID_MAX_CELLS 262144u
+#define DYNAMIC_RECEIVER_SAMPLE_BUDGET 12288u
 #define DYNAMIC_SHADOW_SIZE 2048u
 #define DYNAMIC_TIMESTAMP_BASE 4u
 #define DYNAMIC_TIMESTAMP_STRIDE 6u
@@ -1204,6 +1205,8 @@ static void release_dynamic_receiver_cache(RENDERER *r) {
     memset(r->dynamic_receiver_grid_min, 0, sizeof(r->dynamic_receiver_grid_min));
     r->dynamic_receiver_grid_cell_count = 0u;
     r->dynamic_receiver_grid_mark = 0u;
+    r->dynamic_receiver_cursor_cell = 0u;
+    r->dynamic_receiver_cursor_offset = 0u;
     r->dynamic_receiver_grid_cell_size = 0.0f;
     r->dynamic_receiver_ready = false;
 }
@@ -2173,43 +2176,63 @@ static bool dynamic_receiver_dispatch_range(RENDERER *r, NriCommandBuffer *cmd, 
     return true;
 }
 
-static bool dynamic_receiver_dispatch_active(RENDERER *r, NriCommandBuffer *cmd, DYNAMIC_RECEIVER_UNIFORMS *uniforms,
-                                             uint32_t phase, NriTexture *source, NriTexture *output) {
-    if (!r || !cmd || !uniforms || !source || !output) return false;
+static bool dynamic_receiver_dispatch_budgeted(RENDERER *r, NriCommandBuffer *cmd, DYNAMIC_RECEIVER_UNIFORMS *uniforms,
+                                               uint32_t phase, NriTexture *source, NriTexture *output,
+                                               uint32_t start_cell, uint32_t start_offset, uint32_t budget,
+                                               uint32_t *next_cell, uint32_t *next_offset, uint32_t *processed) {
+    if (next_cell) *next_cell = start_cell;
+    if (next_offset) *next_offset = start_offset;
+    if (processed) *processed = 0u;
+    if (!r || !cmd || !uniforms || !source || !output || !budget || !r->dynamic_receiver_grid_cell_count) return false;
     if (!bind_dynamic_receiver_sets(r, cmd, source, output)) return false;
 
     r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
 
     const uint32_t mark = r->dynamic_receiver_grid_mark;
-    uint32_t run_first = 0u;
-    uint32_t run_end = 0u;
-    bool have_run = false;
+    const uint32_t cell_count = r->dynamic_receiver_grid_cell_count;
+    uint32_t cell = start_cell < cell_count ? start_cell : 0u;
+    uint32_t offset = start_offset;
+    uint32_t remaining = budget;
+    uint32_t total = 0u;
 
-    for (uint32_t cell = 0u; cell < r->dynamic_receiver_grid_cell_count; ++cell) {
+    for (uint32_t visited = 0u; visited < cell_count && remaining; ++visited) {
         const uint32_t first = r->dynamic_receiver_grid_offsets[cell];
         const uint32_t end = r->dynamic_receiver_grid_offsets[cell + 1u];
-        const bool populated = end > first;
-        const bool selected = r->dynamic_receiver_grid_marks[cell] == mark && populated;
+        const uint32_t count = end - first;
+        const bool selected = count && r->dynamic_receiver_grid_marks[cell] == mark;
 
         if (selected) {
-            if (!have_run) {
-                run_first = first;
-                run_end = end;
-                have_run = true;
-            } else if (first == run_end) {
-                run_end = end;
-            } else {
-                if (!dynamic_receiver_dispatch_range(r, cmd, uniforms, phase, run_first, run_end - run_first)) return false;
-                run_first = first;
-                run_end = end;
+            if (offset >= count) offset = 0u;
+
+            const uint32_t available = count - offset;
+            const uint32_t take = available < remaining ? available : remaining;
+
+            if (!dynamic_receiver_dispatch_range(r, cmd, uniforms, phase, first + offset, take)) return false;
+
+            total += take;
+            remaining -= take;
+            offset += take;
+
+            if (offset < count) {
+                if (next_cell) *next_cell = cell;
+                if (next_offset) *next_offset = offset;
+                if (processed) *processed = total;
+                return true;
             }
-        } else if (populated && have_run) {
-            if (!dynamic_receiver_dispatch_range(r, cmd, uniforms, phase, run_first, run_end - run_first)) return false;
-            have_run = false;
+
+            offset = 0u;
+        } else {
+            offset = 0u;
         }
+
+        cell++;
+        if (cell == cell_count) cell = 0u;
     }
 
-    return !have_run || dynamic_receiver_dispatch_range(r, cmd, uniforms, phase, run_first, run_end - run_first);
+    if (next_cell) *next_cell = cell;
+    if (next_offset) *next_offset = 0u;
+    if (processed) *processed = total;
+    return true;
 }
 
 static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame) {
@@ -2247,18 +2270,41 @@ static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd, co
         return true;
     }
 
-    if (!dynamic_receiver_dispatch_active(r, cmd, &uniforms, 0u, r->dynamic_receiver_texture, r->dynamic_receiver_scratch))
+    const uint32_t start_cell = r->dynamic_receiver_cursor_cell;
+    const uint32_t start_offset = r->dynamic_receiver_cursor_offset;
+    uint32_t next_cell = start_cell;
+    uint32_t next_offset = start_offset;
+    uint32_t processed = 0u;
+
+    if (!dynamic_receiver_dispatch_budgeted(r, cmd, &uniforms, 0u, r->dynamic_receiver_texture, r->dynamic_receiver_scratch,
+                                            start_cell, start_offset, DYNAMIC_RECEIVER_SAMPLE_BUDGET,
+                                            &next_cell, &next_offset, &processed))
         return false;
 
-    if (!dynamic_receiver_dispatch_active(r, cmd, &uniforms, 1u, r->dynamic_receiver_scratch, r->dynamic_receiver_texture))
+    uint32_t filter_next_cell = start_cell;
+    uint32_t filter_next_offset = start_offset;
+    uint32_t filtered = 0u;
+
+    if (!dynamic_receiver_dispatch_budgeted(r, cmd, &uniforms, 1u, r->dynamic_receiver_scratch, r->dynamic_receiver_texture,
+                                            start_cell, start_offset, DYNAMIC_RECEIVER_SAMPLE_BUDGET,
+                                            &filter_next_cell, &filter_next_offset, &filtered))
         return false;
+
+    if (filtered != processed || filter_next_cell != next_cell || filter_next_offset != next_offset) {
+        SDL_SetError("dynamic receiver direct/filter sparse ranges diverged");
+        return false;
+    }
+
+    r->dynamic_receiver_cursor_cell = next_cell;
+    r->dynamic_receiver_cursor_offset = next_offset;
 
     if (!gpu_transition_texture(r, cmd, r->dynamic_receiver_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
                                 NriStageBits_FRAGMENT_SHADER))
         return false;
 
     if (r->gpu->frame_index % DYNAMIC_TIMING_LOG_INTERVAL == 0u)
-        SDL_Log("dynamic receiver active: %u/%u samples | %u merged ranges", active_samples, lightmap->sample_count, active_ranges);
+        SDL_Log("dynamic receiver active: %u/%u samples | %u merged ranges | %u updated",
+                active_samples, lightmap->sample_count, active_ranges, processed);
 
     r->dynamic_receiver_ready = true;
     return true;
@@ -3267,6 +3313,8 @@ static bool renderer_build_dynamic_receiver_cache(RENDERER *renderer, const SCEN
     renderer->dynamic_receiver_grid_offsets = offsets;
     renderer->dynamic_receiver_grid_marks = marks;
     renderer->dynamic_receiver_grid_mark = 0u;
+    renderer->dynamic_receiver_cursor_cell = 0u;
+    renderer->dynamic_receiver_cursor_offset = 0u;
 
     free(counts);
     free(cursor);
