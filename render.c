@@ -538,10 +538,10 @@ static bool create_dynamic_surface_layout(RENDERER *r) {
         NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
         NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
         NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
-        NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER,
+        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER,
     };
 
-    return gpu_create_compute_layout(r, &r->dynamic_surface_layout, sources, 10, NriDescriptorType_STORAGE_TEXTURE, true);
+    return gpu_create_compute_layout(r, &r->dynamic_surface_layout, sources, 11, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_surface_layout(RENDERER *r) {
@@ -729,10 +729,12 @@ static bool bind_dynamic_surface_resources(RENDERER *r, NriCommandBuffer *cmd, c
                                            const DYNAMIC_SURFACE_UNIFORMS *uniforms) {
     if (!r || !cmd || !allocation || !allocation->texture || !allocation->sample_buffer || !allocation->self_node_buffer ||
         !allocation->self_triangle_buffer || !uniforms || !r->dynamic_static_node_buffer || !r->dynamic_static_triangle_buffer ||
-        !r->dynamic_static_surface_buffer || !r->dynamic_static_uv_buffer || !r->beam_buffer || !r->lightmap_texture || !r->lightmap_sampler)
+        !r->dynamic_static_surface_buffer || !r->dynamic_static_uv_buffer || !r->beam_buffer || !r->lightmap_texture ||
+        !r->baked_direct_texture || !r->lightmap_sampler)
         return false;
 
     if (!gpu_transition_texture(r, cmd, r->lightmap_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
+        !gpu_transition_texture(r, cmd, r->baked_direct_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
         !gpu_transition_texture(r, cmd, allocation->texture, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE,
                                 NriStageBits_COMPUTE_SHADER))
         return false;
@@ -747,11 +749,12 @@ static bool bind_dynamic_surface_resources(RENDERER *r, NriCommandBuffer *cmd, c
         gpu_create_buffer_view(r, allocation->self_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
         gpu_create_buffer_view(r, allocation->self_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
         gpu_create_texture_view(r, r->lightmap_texture, NriTextureView_TEXTURE),
+        gpu_create_texture_view(r, r->baked_direct_texture, NriTextureView_TEXTURE),
         r->lightmap_sampler,
     };
     NriDescriptor *dst = gpu_create_texture_view(r, allocation->texture, NriTextureView_STORAGE_TEXTURE);
 
-    return gpu_bind_descriptor_set(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 0, src, 10) &&
+    return gpu_bind_descriptor_set(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 0, src, 11) &&
            gpu_bind_descriptor_set(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
            gpu_bind_uniform_data(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
 }
