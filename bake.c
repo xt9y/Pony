@@ -224,6 +224,7 @@ static void bake_worker_deinit(RENDERER *r) {
         release_buffer(r, r->volume_probe_buffer);
         release_buffer(r, r->beam_buffer);
         release_texture(r, r->lightmap_texture);
+        release_texture(r, r->baked_direct_texture);
 
         if (r->lightmap_sampler) gpu->core.DestroyDescriptor(r->lightmap_sampler);
         bake_gpu_layouts_deinit(r);
