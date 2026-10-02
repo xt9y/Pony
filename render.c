@@ -613,11 +613,14 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
                             gpu_create_texture_view(r, material->iridescence, NriTextureView_TEXTURE),
                             gpu_create_texture_view(r, material->iridescence_thickness, NriTextureView_TEXTURE),
                             gpu_create_texture_view(r, scene_color, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, r->dynamic_shadow_ready && r->dynamic_shadow_texture ? r->dynamic_shadow_texture : r->default_white,
+                                                    NriTextureView_TEXTURE),
                             material_sampler,
                             lightmap_sampler,
-                            scene_sampler};
+                            scene_sampler,
+                            r->dynamic_shadow_sampler ? r->dynamic_shadow_sampler : material_sampler};
 
-    return gpu_bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 14) &&
+    return gpu_bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 16) &&
            gpu_bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
 }
 
@@ -654,6 +657,38 @@ static bool begin_surface_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTextu
     r->gpu->core.CmdSetScissors(cmd, &(NriRect){.width = (NriDim_t)width, .height = (NriDim_t)height}, 1);
     r->gpu->core.CmdBeginRendering(cmd, &desc);
 
+    return true;
+}
+
+static bool ensure_dynamic_shadow_texture(RENDERER *r) {
+    if (!r || !r->gpu->device) return false;
+    if (r->dynamic_shadow_texture && r->dynamic_shadow_size == DYNAMIC_SHADOW_SIZE) return true;
+
+    release_texture(r, r->dynamic_shadow_texture);
+    r->dynamic_shadow_texture =
+        gpu_create_texture(r, r->depth_format, NriTextureUsageBits_DEPTH_STENCIL_ATTACHMENT | NriTextureUsageBits_SHADER_RESOURCE, DYNAMIC_SHADOW_SIZE,
+                           DYNAMIC_SHADOW_SIZE);
+    r->dynamic_shadow_size = r->dynamic_shadow_texture ? DYNAMIC_SHADOW_SIZE : 0u;
+    r->dynamic_shadow_ready = false;
+    return r->dynamic_shadow_texture != NULL;
+}
+
+static bool begin_dynamic_shadow_rendering(RENDERER *r, NriCommandBuffer *cmd) {
+    if (!r || !cmd || !ensure_dynamic_shadow_texture(r)) return false;
+
+    NriDescriptor *depth_view = gpu_create_texture_view(r, r->dynamic_shadow_texture, NriTextureView_DEPTH_STENCIL_ATTACHMENT);
+    if (!depth_view) return false;
+
+    if (!gpu_transition_texture(r, cmd, r->dynamic_shadow_texture, NriAccessBits_DEPTH_STENCIL_ATTACHMENT, NriLayout_DEPTH_STENCIL_ATTACHMENT,
+                                NriStageBits_DEPTH_STENCIL_ATTACHMENT))
+        return false;
+
+    const NriRenderingDesc desc = {
+        .depth = {.descriptor = depth_view, .loadOp = NriLoadOp_CLEAR, .storeOp = NriStoreOp_STORE, .clearValue = {.depthStencil = {.depth = 1.0f}}}};
+
+    r->gpu->core.CmdSetViewports(cmd, &(NriViewport){.width = (float)DYNAMIC_SHADOW_SIZE, .height = (float)DYNAMIC_SHADOW_SIZE, .depthMax = 1.0f}, 1);
+    r->gpu->core.CmdSetScissors(cmd, &(NriRect){.width = DYNAMIC_SHADOW_SIZE, .height = DYNAMIC_SHADOW_SIZE}, 1);
+    r->gpu->core.CmdBeginRendering(cmd, &desc);
     return true;
 }
 
