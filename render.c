@@ -19,8 +19,8 @@
 #define DYNAMIC_SURFACE_CONVERGENCE_PASSES 4u
 #define DYNAMIC_RECEIVER_IRRADIANCE_FLOOR 0.00075f
 #define DYNAMIC_SHADOW_SIZE 2048u
-#define DYNAMIC_TIMESTAMP_BASE 8u
-#define DYNAMIC_TIMESTAMP_STRIDE 4u
+#define DYNAMIC_TIMESTAMP_BASE 4u
+#define DYNAMIC_TIMESTAMP_STRIDE 6u
 #define DYNAMIC_TIMING_LOG_INTERVAL 120u
 #define DYNAMIC_ACCEPTANCE_MIN_COVERAGE_PERCENT 99.0
 #define DYNAMIC_ACCEPTANCE_MAX_RGB_MAE 0.03
@@ -2389,17 +2389,22 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
         DYNAMIC_TIMESTAMP_BASE + (uint32_t)(r->gpu->frame_index % GPU_FRAME_QUEUE_DEPTH) * DYNAMIC_TIMESTAMP_STRIDE;
 
     if (r->gpu->frame_index >= GPU_FRAME_QUEUE_DEPTH && r->gpu->frame_index % DYNAMIC_TIMING_LOG_INTERVAL == 0u) {
-        gpu_timestamp_log(r, timing_base, "dynamic lighting caches");
-        gpu_timestamp_log(r, timing_base + 2u, "dynamic shadow map");
+        gpu_timestamp_log(r, timing_base, "dynamic object cache");
+        gpu_timestamp_log(r, timing_base + 2u, "dynamic receiver cache");
+        gpu_timestamp_log(r, timing_base + 4u, "dynamic shadow map");
     }
 
     if (!gpu_timestamp_begin(r, cmd, timing_base)) goto failed_frame;
-    if (!update_dynamic_surface_caches(r, cmd, frame) || !update_dynamic_receiver_cache(r, cmd, frame)) goto failed_frame;
+    if (!update_dynamic_surface_caches(r, cmd, frame)) goto failed_frame;
     if (!gpu_timestamp_end(r, cmd, timing_base)) goto failed_frame;
 
     if (!gpu_timestamp_begin(r, cmd, timing_base + 2u)) goto failed_frame;
-    if (!render_dynamic_shadow_map(r, cmd, frame)) goto failed_frame;
+    if (!update_dynamic_receiver_cache(r, cmd, frame)) goto failed_frame;
     if (!gpu_timestamp_end(r, cmd, timing_base + 2u)) goto failed_frame;
+
+    if (!gpu_timestamp_begin(r, cmd, timing_base + 4u)) goto failed_frame;
+    if (!render_dynamic_shadow_map(r, cmd, frame)) goto failed_frame;
+    if (!gpu_timestamp_end(r, cmd, timing_base + 4u)) goto failed_frame;
 
     CAMERA_UNIFORMS camera = {0};
 
