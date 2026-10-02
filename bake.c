@@ -19,6 +19,223 @@
 #define PHASE_COMBINE 5u
 #define PHASE_RECONSTRUCT 6u
 
+static bool create_bake_layout(RENDERER *r) {
+    static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE,           NriDescriptorType_SAMPLER,           NriDescriptorType_TEXTURE,
+                                            NriDescriptorType_SAMPLER,           NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
+                                            NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
+                                            NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER};
+
+    static const NriDescriptorType dst[] = {NriDescriptorType_STORAGE_TEXTURE, NriDescriptorType_STORAGE_STRUCTURED_BUFFER,
+                                            NriDescriptorType_STORAGE_STRUCTURED_BUFFER};
+    static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
+    const NriDescriptorType *sets[4] = {src, dst, uniform, NULL};
+    const uint8_t counts[4] = {12, 3, 1, 0};
+
+    return gpu_create_pipeline_layout(r, &r->bake_layout, sets, counts, NriStageBits_COMPUTE_SHADER);
+}
+
+static bool create_lightmap_queue_layouts(RENDERER *r) {
+    static const NriDescriptorType read_count[] = {NriDescriptorType_STRUCTURED_BUFFER};
+    static const NriDescriptorType write_buffer[] = {NriDescriptorType_STORAGE_STRUCTURED_BUFFER};
+    static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
+
+    const NriDescriptorType *reset_sets[4] = {NULL, write_buffer, NULL, NULL};
+    const uint8_t reset_counts[4] = {0, 1, 0, 0};
+    const NriDescriptorType *args_sets[4] = {read_count, write_buffer, uniform, NULL};
+    const uint8_t args_counts[4] = {1, 1, 1, 0};
+
+    return gpu_create_pipeline_layout(r, &r->lightmap_queue_reset_layout, reset_sets, reset_counts, NriStageBits_COMPUTE_SHADER) &&
+           gpu_create_pipeline_layout(r, &r->lightmap_queue_args_layout, args_sets, args_counts, NriStageBits_COMPUTE_SHADER);
+}
+
+static bool create_probe_layout(RENDERER *r) {
+    static const NriDescriptorType src[] = {NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER};
+
+    return gpu_create_compute_layout(r, &r->probe_layout, src, 3, NriDescriptorType_STORAGE_STRUCTURED_BUFFER, true);
+}
+
+bool bake_gpu_layouts_init(RENDERER *r) {
+    return create_bake_layout(r) && create_lightmap_queue_layouts(r) && create_probe_layout(r);
+}
+
+void bake_gpu_layouts_deinit(RENDERER *r) {
+    if (!r || !r->gpu) return;
+
+    NriPipelineLayout **layouts[] = {
+        &r->bake_layout,
+        &r->lightmap_queue_reset_layout,
+        &r->lightmap_queue_args_layout,
+        &r->probe_layout,
+    };
+
+    for (uint32_t i = 0; i < sizeof(layouts) / sizeof(layouts[0]); ++i) {
+        if (*layouts[i]) {
+            r->gpu->core.DestroyPipelineLayout(*layouts[i]);
+            *layouts[i] = NULL;
+        }
+    }
+}
+
+static bool bake_bind_resources_ex(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, NriBuffer *active_in,
+                                   NriBuffer *active_count, NriBuffer *active_out, NriBuffer *active_out_count, const BAKE_UNIFORMS *uniforms, size_t size) {
+    if (!r || !cmd || !source || !destination || !r->lightmap_sampler || !r->bvh_node_buffer || !r->bvh_triangle_buffer || !r->lightmap_sample_buffer ||
+        !r->lightmap_probe_buffer || !active_in || !active_count || !active_out || !active_out_count)
+        return false;
+
+    NriTexture *direct = r->lightmap_direct && r->lightmap_direct != destination ? r->lightmap_direct : source;
+
+    if (!gpu_transition_texture(r, cmd, source, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
+        (direct != source && !gpu_transition_texture(r, cmd, direct, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER)) ||
+        !gpu_transition_texture(r, cmd, destination, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER))
+        return false;
+
+    NriBuffer *patch_map = r->lightmap_patch_map_buffer ? r->lightmap_patch_map_buffer : r->lightmap_sample_buffer;
+
+    NriBuffer *patch_anchors = r->lightmap_patch_anchor_buffer ? r->lightmap_patch_anchor_buffer : r->lightmap_sample_buffer;
+
+    NriDescriptor *src[] = {gpu_create_texture_view(r, source, NriTextureView_TEXTURE),
+                            r->lightmap_sampler,
+                            gpu_create_texture_view(r, direct, NriTextureView_TEXTURE),
+                            r->lightmap_sampler,
+                            gpu_create_buffer_view(r, r->bvh_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
+                            gpu_create_buffer_view(r, r->bvh_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
+                            gpu_create_buffer_view(r, r->lightmap_sample_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(LMAP_SAMPLE)),
+                            gpu_create_buffer_view(r, r->lightmap_probe_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
+                            gpu_create_buffer_view(r, patch_map, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32)),
+                            gpu_create_buffer_view(r, patch_anchors, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32[4])),
+                            gpu_create_buffer_view(r, active_in, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32)),
+                            gpu_create_buffer_view(r, active_count, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32))};
+
+    NriDescriptor *dst[] = {gpu_create_texture_view(r, destination, NriTextureView_STORAGE_TEXTURE),
+                            gpu_create_buffer_view(r, active_out, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32)),
+                            gpu_create_buffer_view(r, active_out_count, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32))};
+
+    return gpu_bind_descriptor_set(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 0, src, 12) &&
+           gpu_bind_descriptor_set(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 1, dst, 3) &&
+           gpu_bind_uniform_data(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
+}
+
+static bool bake_bind_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, const BAKE_UNIFORMS *uniforms, size_t size) {
+    return bake_bind_resources_ex(r, cmd, source, destination, r->lightmap_active_buffer[0], r->lightmap_active_count[0], r->lightmap_active_buffer[1],
+                                  r->lightmap_active_count[1], uniforms, size);
+}
+
+static bool bake_bind_probe_resources(RENDERER *r, NriCommandBuffer *cmd, NriBuffer *input, NriBuffer *nodes, NriBuffer *triangles, NriBuffer *output,
+                                      const BAKE_UNIFORMS *uniforms, size_t size) {
+    const NriBufferBarrierDesc barrier = {.buffer = output, .after = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER}};
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
+
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
+
+    NriDescriptor *src[] = {gpu_create_buffer_view(r, input, NriBufferView_STRUCTURED_BUFFER, sizeof(float[4])),
+                            gpu_create_buffer_view(r, nodes, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
+                            gpu_create_buffer_view(r, triangles, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE))};
+
+    NriDescriptor *dst = gpu_create_buffer_view(r, output, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(float[4]));
+
+    return gpu_bind_descriptor_set(r, cmd, r->probe_layout, NriBindPoint_COMPUTE, 0, src, 3) &&
+           gpu_bind_descriptor_set(r, cmd, r->probe_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
+           gpu_bind_uniform_data(r, cmd, r->probe_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
+}
+
+static bool bake_read_probe_buffer(RENDERER *r, NriBuffer *output, PROBE_GRID *grid, uint32_t bytes, uint32_t count) {
+    const NriBufferDesc desc = {.size = bytes};
+
+    NriBuffer *staging = NULL;
+
+    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_HOST_READBACK, 1.0f, &desc, &staging) != NriResult_SUCCESS) return false;
+
+    NriCommandAllocator *allocator = NULL;
+    NriCommandBuffer *cmd = NULL;
+    bool good = false;
+
+    if (gpu_begin_commands(r, &allocator, &cmd) == NriResult_SUCCESS) {
+        const NriBufferBarrierDesc barrier = {.buffer = output,
+                                              .before = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER},
+                                              .after = {.access = NriAccessBits_COPY_SOURCE, .stages = NriStageBits_COPY}};
+
+        r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
+        r->gpu->core.CmdCopyBuffer(cmd, staging, 0, output, 0, bytes);
+
+        good = gpu_submit_commands(r, allocator, cmd);
+    }
+
+    if (good) {
+        const float(*values)[4] = r->gpu->core.MapBuffer(staging, 0, bytes);
+
+        good = values != NULL;
+
+        if (good) {
+            for (uint32_t i = 0; i < count; ++i) {
+                for (uint32_t j = 0; j < 9; ++j) memcpy(grid->probes[i].coefficients[j], values[i * 9u + j], sizeof(float[4]));
+                grid->probes[i].position[3] = values[i * 9u][3];
+            }
+
+            r->gpu->core.UnmapBuffer(staging);
+        }
+    }
+
+    r->gpu->core.DestroyBuffer(staging);
+
+    return good;
+}
+
+static void bake_worker_deinit(RENDERER *r);
+
+static bool bake_worker_init(RENDERER *r) {
+    if (!r) return false;
+
+    memset(r, 0, sizeof(*r));
+    r->gpu = calloc(1, sizeof(*r->gpu));
+    if (!r->gpu) return false;
+
+    if (!gpu_init_worker(r->gpu) || !bake_gpu_layouts_init(r)) {
+        bake_worker_deinit(r);
+        return false;
+    }
+
+    r->lightmap_sampler = gpu_create_sampler(r, NriFilter_LINEAR, NriFilter_LINEAR, NriAddressMode_CLAMP_TO_EDGE);
+    r->lightmap_texture = gpu_create_texture(r, NriFormat_RGBA16_SFLOAT, NriTextureUsageBits_SHADER_RESOURCE, 1, 1);
+
+    if (!r->lightmap_sampler || !r->lightmap_texture) {
+        bake_worker_deinit(r);
+        return false;
+    }
+
+    return true;
+}
+
+static void bake_worker_deinit(RENDERER *r) {
+    if (!r) return;
+
+    GPU *gpu = r->gpu;
+
+    free(r->volume_probes.probes);
+    memset(&r->volume_probes, 0, sizeof(r->volume_probes));
+    beam_free(&r->beams);
+
+    if (gpu && gpu->device) {
+        if (gpu->graphics_queue) gpu->core.QueueWaitIdle(gpu->graphics_queue);
+
+        gpu_clear_temporary(r);
+        probe_wavefront_scratch_destroy(r);
+        release_bake_resources(r);
+        release_buffer(r, r->volume_probe_buffer);
+        release_buffer(r, r->beam_buffer);
+        release_texture(r, r->lightmap_texture);
+
+        if (r->lightmap_sampler) gpu->core.DestroyDescriptor(r->lightmap_sampler);
+        bake_gpu_layouts_deinit(r);
+    }
+
+    if (gpu) {
+        gpu_deinit(gpu);
+        free(gpu);
+    }
+
+    memset(r, 0, sizeof(*r));
+}
+
 static NriTexture *create_lightmap_texture(RENDERER *r, Uint32 width, Uint32 height) {
     return gpu_create_texture(r, NriFormat_RGBA16_SFLOAT, NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE, width, height);
 }

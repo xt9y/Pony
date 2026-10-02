@@ -387,7 +387,7 @@ static NriPipeline *make_surface_pipeline(RENDERER *r, NriCoreInterface *core, N
     return pipeline;
 }
 
-static void clear_temporary(RENDERER *r);
+void gpu_clear_temporary(RENDERER *r);
 static bool begin_work_commands(RENDERER *r, NriCommandAllocator **allocator, NriCommandBuffer **command_buffer);
 static bool submit_work_commands(RENDERER *r, NriCommandAllocator *allocator, NriCommandBuffer *command_buffer, bool wait);
 static void abort_work_commands(RENDERER *r, NriCommandAllocator *allocator, NriCommandBuffer *command_buffer);
@@ -477,8 +477,8 @@ static bool create_sky_layout(RENDERER *r) {
     return gpu_create_pipeline_layout(r, &r->sky_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
 
-static bool create_compute_layout(RENDERER *r, NriPipelineLayout **out, const NriDescriptorType *sources, uint8_t source_num, NriDescriptorType output_type,
-                                  bool has_uniform) {
+bool gpu_create_compute_layout(RENDERER *r, NriPipelineLayout **out, const NriDescriptorType *sources, uint8_t source_num, NriDescriptorType output_type,
+                               bool has_uniform) {
     static const NriDescriptorType output_texture[] = {NriDescriptorType_STORAGE_TEXTURE};
 
     static const NriDescriptorType output_buffer[] = {NriDescriptorType_STORAGE_STRUCTURED_BUFFER};
@@ -493,69 +493,34 @@ static bool create_compute_layout(RENDERER *r, NriPipelineLayout **out, const Nr
     return gpu_create_pipeline_layout(r, out, sets, counts, NriStageBits_COMPUTE_SHADER);
 }
 
-static bool create_bake_layout(RENDERER *r) {
-    static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE,           NriDescriptorType_SAMPLER,           NriDescriptorType_TEXTURE,
-                                            NriDescriptorType_SAMPLER,           NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
-                                            NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
-                                            NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER};
-
-    static const NriDescriptorType dst[] = {NriDescriptorType_STORAGE_TEXTURE, NriDescriptorType_STORAGE_STRUCTURED_BUFFER,
-                                            NriDescriptorType_STORAGE_STRUCTURED_BUFFER};
-    static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
-    const NriDescriptorType *sets[4] = {src, dst, uniform, NULL};
-    const uint8_t counts[4] = {12, 3, 1, 0};
-
-    return gpu_create_pipeline_layout(r, &r->bake_layout, sets, counts, NriStageBits_COMPUTE_SHADER);
-}
-
-static bool create_lightmap_queue_layouts(RENDERER *r) {
-    static const NriDescriptorType read_count[] = {NriDescriptorType_STRUCTURED_BUFFER};
-    static const NriDescriptorType write_buffer[] = {NriDescriptorType_STORAGE_STRUCTURED_BUFFER};
-    static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
-
-    const NriDescriptorType *reset_sets[4] = {NULL, write_buffer, NULL, NULL};
-    const uint8_t reset_counts[4] = {0, 1, 0, 0};
-    const NriDescriptorType *args_sets[4] = {read_count, write_buffer, uniform, NULL};
-    const uint8_t args_counts[4] = {1, 1, 1, 0};
-
-    return gpu_create_pipeline_layout(r, &r->lightmap_queue_reset_layout, reset_sets, reset_counts, NriStageBits_COMPUTE_SHADER) &&
-           gpu_create_pipeline_layout(r, &r->lightmap_queue_args_layout, args_sets, args_counts, NriStageBits_COMPUTE_SHADER);
-}
-
-static bool create_probe_layout(RENDERER *r) {
-    static const NriDescriptorType src[] = {NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER};
-
-    return create_compute_layout(r, &r->probe_layout, src, 3, NriDescriptorType_STORAGE_STRUCTURED_BUFFER, true);
-}
-
 static bool create_ssao_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER};
 
-    return create_compute_layout(r, &r->ssao_layout, src, 2, NriDescriptorType_STORAGE_TEXTURE, true);
+    return gpu_create_compute_layout(r, &r->ssao_layout, src, 2, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_bloom_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER};
 
-    return create_compute_layout(r, &r->bloom_layout, src, 2, NriDescriptorType_STORAGE_TEXTURE, true);
+    return gpu_create_compute_layout(r, &r->bloom_layout, src, 2, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_grade_layout(RENDERER *r) {
-    return create_compute_layout(r, &r->grade_layout, NULL, 0, NriDescriptorType_STORAGE_TEXTURE, false);
+    return gpu_create_compute_layout(r, &r->grade_layout, NULL, 0, NriDescriptorType_STORAGE_TEXTURE, false);
 }
 
 static bool create_volume_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_STRUCTURED_BUFFER,
                                             NriDescriptorType_STRUCTURED_BUFFER};
 
-    return create_compute_layout(r, &r->volume_layout, src, 4, NriDescriptorType_STORAGE_TEXTURE, true);
+    return gpu_create_compute_layout(r, &r->volume_layout, src, 4, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_volume_compose_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
                                             NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
-    return create_compute_layout(r, &r->volume_compose_layout, src, 6, NriDescriptorType_STORAGE_TEXTURE, true);
+    return gpu_create_compute_layout(r, &r->volume_compose_layout, src, 6, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_compose_layout(RENDERER *r) {
@@ -648,7 +613,7 @@ static bool track_buffer(RENDERER *r, NriBuffer *buffer) {
     return track_buffer_array(r, &r->gpu->temporary_buffers, &r->gpu->temporary_buffer_num, &r->gpu->temporary_buffer_cap, buffer);
 }
 
-static void clear_temporary(RENDERER *r) {
+void gpu_clear_temporary(RENDERER *r) {
     for (uint32_t i = 0; i < r->gpu->temporary_descriptor_num; ++i) r->gpu->core.DestroyDescriptor(r->gpu->temporary_descriptors[i]);
 
     for (uint32_t i = 0; i < r->gpu->temporary_buffer_num; ++i) r->gpu->core.DestroyBuffer(r->gpu->temporary_buffers[i]);
@@ -910,7 +875,7 @@ static void abort_frame_commands(RENDERER *r, FRAME_CONTEXT *frame) {
         r->gpu->core.CreateCommandBuffer(frame->allocator, &frame->command_buffer);
 }
 
-static NriDescriptor *create_texture_view(RENDERER *r, NriTexture *texture, NriTextureView type) {
+NriDescriptor *gpu_create_texture_view(RENDERER *r, NriTexture *texture, NriTextureView type) {
     if (!texture) return NULL;
 
     NriDescriptor *view = NULL;
@@ -1023,110 +988,6 @@ bool gpu_bind_uniform_data(RENDERER *r, NriCommandBuffer *cmd, NriPipelineLayout
 
 bool gpu_transition_texture(RENDERER *r, NriCommandBuffer *cmd, NriTexture *texture, NriAccessBits access, NriLayout layout, NriStageBits stages);
 
-bool bake_bind_resources_ex(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, NriBuffer *active_in, NriBuffer *active_count,
-                            NriBuffer *active_out, NriBuffer *active_out_count, const BAKE_UNIFORMS *uniforms, size_t size) {
-    if (!r || !cmd || !source || !destination || !r->lightmap_sampler || !r->bvh_node_buffer || !r->bvh_triangle_buffer || !r->lightmap_sample_buffer ||
-        !r->lightmap_probe_buffer || !active_in || !active_count || !active_out || !active_out_count)
-        return false;
-
-    NriTexture *direct = r->lightmap_direct && r->lightmap_direct != destination ? r->lightmap_direct : source;
-
-    if (!gpu_transition_texture(r, cmd, source, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
-        (direct != source && !gpu_transition_texture(r, cmd, direct, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER)) ||
-        !gpu_transition_texture(r, cmd, destination, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER))
-        return false;
-
-    NriBuffer *patch_map = r->lightmap_patch_map_buffer ? r->lightmap_patch_map_buffer : r->lightmap_sample_buffer;
-
-    NriBuffer *patch_anchors = r->lightmap_patch_anchor_buffer ? r->lightmap_patch_anchor_buffer : r->lightmap_sample_buffer;
-
-    NriDescriptor *src[] = {create_texture_view(r, source, NriTextureView_TEXTURE),
-                            r->lightmap_sampler,
-                            create_texture_view(r, direct, NriTextureView_TEXTURE),
-                            r->lightmap_sampler,
-                            gpu_create_buffer_view(r, r->bvh_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
-                            gpu_create_buffer_view(r, r->bvh_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
-                            gpu_create_buffer_view(r, r->lightmap_sample_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(LMAP_SAMPLE)),
-                            gpu_create_buffer_view(r, r->lightmap_probe_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
-                            gpu_create_buffer_view(r, patch_map, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32)),
-                            gpu_create_buffer_view(r, patch_anchors, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32[4])),
-                            gpu_create_buffer_view(r, active_in, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32)),
-                            gpu_create_buffer_view(r, active_count, NriBufferView_STRUCTURED_BUFFER, sizeof(Uint32))};
-
-    NriDescriptor *dst[] = {create_texture_view(r, destination, NriTextureView_STORAGE_TEXTURE),
-                            gpu_create_buffer_view(r, active_out, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32)),
-                            gpu_create_buffer_view(r, active_out_count, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(Uint32))};
-
-    return gpu_bind_descriptor_set(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 0, src, 12) &&
-           gpu_bind_descriptor_set(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 1, dst, 3) &&
-           gpu_bind_uniform_data(r, cmd, r->bake_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
-}
-
-bool bake_bind_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, const BAKE_UNIFORMS *uniforms, size_t size) {
-    return bake_bind_resources_ex(r, cmd, source, destination, r->lightmap_active_buffer[0], r->lightmap_active_count[0], r->lightmap_active_buffer[1],
-                                  r->lightmap_active_count[1], uniforms, size);
-}
-
-bool bake_bind_probe_resources(RENDERER *r, NriCommandBuffer *cmd, NriBuffer *input, NriBuffer *nodes, NriBuffer *triangles, NriBuffer *output,
-                               const BAKE_UNIFORMS *uniforms, size_t size) {
-    const NriBufferBarrierDesc barrier = {.buffer = output, .after = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER}};
-    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
-
-    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
-
-    NriDescriptor *src[] = {gpu_create_buffer_view(r, input, NriBufferView_STRUCTURED_BUFFER, sizeof(float[4])),
-                            gpu_create_buffer_view(r, nodes, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
-                            gpu_create_buffer_view(r, triangles, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE))};
-
-    NriDescriptor *dst = gpu_create_buffer_view(r, output, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(float[4]));
-
-    return gpu_bind_descriptor_set(r, cmd, r->probe_layout, NriBindPoint_COMPUTE, 0, src, 3) &&
-           gpu_bind_descriptor_set(r, cmd, r->probe_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
-           gpu_bind_uniform_data(r, cmd, r->probe_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
-}
-
-bool bake_read_probe_buffer(RENDERER *r, NriBuffer *output, PROBE_GRID *grid, uint32_t bytes, uint32_t count) {
-    const NriBufferDesc desc = {.size = bytes};
-
-    NriBuffer *staging = NULL;
-
-    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_HOST_READBACK, 1.0f, &desc, &staging) != NriResult_SUCCESS) return false;
-
-    NriCommandAllocator *allocator = NULL;
-    NriCommandBuffer *cmd = NULL;
-    bool good = false;
-
-    if (gpu_begin_commands(r, &allocator, &cmd) == NriResult_SUCCESS) {
-        const NriBufferBarrierDesc barrier = {.buffer = output,
-                                              .before = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER},
-                                              .after = {.access = NriAccessBits_COPY_SOURCE, .stages = NriStageBits_COPY}};
-
-        r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1});
-        r->gpu->core.CmdCopyBuffer(cmd, staging, 0, output, 0, bytes);
-
-        good = gpu_submit_commands(r, allocator, cmd);
-    }
-
-    if (good) {
-        const float(*values)[4] = r->gpu->core.MapBuffer(staging, 0, bytes);
-
-        good = values != NULL;
-
-        if (good) {
-            for (uint32_t i = 0; i < count; ++i) {
-                for (uint32_t j = 0; j < 9; ++j) memcpy(grid->probes[i].coefficients[j], values[i * 9u + j], sizeof(float[4]));
-                grid->probes[i].position[3] = values[i * 9u][3];
-            }
-
-            r->gpu->core.UnmapBuffer(staging);
-        }
-    }
-
-    r->gpu->core.DestroyBuffer(staging);
-
-    return good;
-}
-
 static bool bind_fx_resources(RENDERER *r, NriCommandBuffer *cmd, NriPipeline *pipeline, NriTexture *source, NriTexture *destination,
                               NriDescriptor *sampler_desc, const void *uniforms, uint32_t size) {
     if ((source && !gpu_transition_texture(r, cmd, source, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER)) ||
@@ -1135,10 +996,10 @@ static bool bind_fx_resources(RENDERER *r, NriCommandBuffer *cmd, NriPipeline *p
 
     NriPipelineLayout *layout = pipeline == r->fx.grade_pipeline ? r->grade_layout : pipeline == r->fx.bloom_pipeline ? r->bloom_layout : r->ssao_layout;
 
-    NriDescriptor *dst = create_texture_view(r, destination, NriTextureView_STORAGE_TEXTURE);
+    NriDescriptor *dst = gpu_create_texture_view(r, destination, NriTextureView_STORAGE_TEXTURE);
 
     if (source) {
-        NriDescriptor *src[] = {create_texture_view(r, source, NriTextureView_TEXTURE), sampler_desc};
+        NriDescriptor *src[] = {gpu_create_texture_view(r, source, NriTextureView_TEXTURE), sampler_desc};
 
         if (!gpu_bind_descriptor_set(r, cmd, layout, NriBindPoint_COMPUTE, 0, src, 2)) return false;
     }
@@ -1153,11 +1014,11 @@ static bool bind_volume_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture
         !gpu_transition_texture(r, cmd, output, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER))
         return false;
 
-    NriDescriptor *src[] = {create_texture_view(r, normal, NriTextureView_TEXTURE), sampler_desc,
+    NriDescriptor *src[] = {gpu_create_texture_view(r, normal, NriTextureView_TEXTURE), sampler_desc,
                             gpu_create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
                             gpu_create_buffer_view(r, beams, NriBufferView_STRUCTURED_BUFFER, sizeof(float))};
 
-    NriDescriptor *dst = create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
+    NriDescriptor *dst = gpu_create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
 
     return gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 0, src, 4) &&
            gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
@@ -1174,14 +1035,14 @@ static bool bind_volume_compose_resources(RENDERER *r, NriCommandBuffer *cmd, Nr
     if (!gpu_transition_texture(r, cmd, output, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER))
         return false;
 
-    NriDescriptor *src[] = {create_texture_view(r, hdr, NriTextureView_TEXTURE),
-                            create_texture_view(r, volume, NriTextureView_TEXTURE),
-                            create_texture_view(r, normal, NriTextureView_TEXTURE),
+    NriDescriptor *src[] = {gpu_create_texture_view(r, hdr, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, volume, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, normal, NriTextureView_TEXTURE),
                             sampler_desc,
                             sampler_desc,
                             depth_sampler};
 
-    NriDescriptor *dst = create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
+    NriDescriptor *dst = gpu_create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
 
     return gpu_bind_descriptor_set(r, cmd, r->volume_compose_layout, NriBindPoint_COMPUTE, 0, src, 6) &&
            gpu_bind_descriptor_set(r, cmd, r->volume_compose_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
@@ -1198,12 +1059,12 @@ static bool bind_camera_resources(RENDERER *r, NriCommandBuffer *cmd, const void
 
 static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const RENDER_MATERIAL *material, NriTexture *lightmap, NriDescriptor *material_sampler,
                                    NriDescriptor *lightmap_sampler, const void *uniforms, size_t size) {
-    NriDescriptor *src[] = {create_texture_view(r, material->base_color, NriTextureView_TEXTURE),
-                            create_texture_view(r, material->metallic_roughness, NriTextureView_TEXTURE),
-                            create_texture_view(r, material->normal, NriTextureView_TEXTURE),
-                            create_texture_view(r, material->occlusion, NriTextureView_TEXTURE),
-                            create_texture_view(r, material->emissive, NriTextureView_TEXTURE),
-                            create_texture_view(r, lightmap, NriTextureView_TEXTURE),
+    NriDescriptor *src[] = {gpu_create_texture_view(r, material->base_color, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, material->metallic_roughness, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, material->normal, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, material->occlusion, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, material->emissive, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, lightmap, NriTextureView_TEXTURE),
                             material_sampler,
                             material_sampler,
                             material_sampler,
@@ -1377,11 +1238,11 @@ bool gpu_transition_texture(RENDERER *r, NriCommandBuffer *cmd, NriTexture *text
 }
 
 static bool begin_scene_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTexture *hdr, NriTexture *normal, NriTexture *depth, uint32_t width, uint32_t height) {
-    NriDescriptor *hdr_view = create_texture_view(r, hdr, NriTextureView_COLOR_ATTACHMENT);
+    NriDescriptor *hdr_view = gpu_create_texture_view(r, hdr, NriTextureView_COLOR_ATTACHMENT);
 
-    NriDescriptor *normal_view = create_texture_view(r, normal, NriTextureView_COLOR_ATTACHMENT);
+    NriDescriptor *normal_view = gpu_create_texture_view(r, normal, NriTextureView_COLOR_ATTACHMENT);
 
-    NriDescriptor *depth_view = create_texture_view(r, depth, NriTextureView_DEPTH_STENCIL_ATTACHMENT);
+    NriDescriptor *depth_view = gpu_create_texture_view(r, depth, NriTextureView_DEPTH_STENCIL_ATTACHMENT);
 
     if (!hdr_view || !normal_view || !depth_view) return false;
 
@@ -1416,10 +1277,10 @@ static bool begin_compose_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTextu
     for (uint32_t i = 0; i < 4; ++i)
         if (!gpu_transition_texture(r, cmd, sources[i], NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_FRAGMENT_SHADER)) return false;
 
-    NriDescriptor *src[] = {create_texture_view(r, hdr, NriTextureView_TEXTURE),
-                            create_texture_view(r, ao, NriTextureView_TEXTURE),
-                            create_texture_view(r, bloom, NriTextureView_TEXTURE),
-                            create_texture_view(r, lut, NriTextureView_TEXTURE),
+    NriDescriptor *src[] = {gpu_create_texture_view(r, hdr, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, ao, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, bloom, NriTextureView_TEXTURE),
+                            gpu_create_texture_view(r, lut, NriTextureView_TEXTURE),
                             sampler_desc,
                             sampler_desc,
                             sampler_desc,
@@ -1493,7 +1354,7 @@ static bool submit_frame(RENDERER *r, FRAME_CONTEXT *frame, NriCommandBuffer *cm
     return good;
 }
 
-static NriDescriptor *sampler(RENDERER *r, NriFilter min_filter, NriFilter mag_filter, NriAddressMode address) {
+NriDescriptor *gpu_create_sampler(RENDERER *r, NriFilter min_filter, NriFilter mag_filter, NriAddressMode address) {
     const NriSamplerDesc desc = {.filters = {.min = min_filter, .mag = mag_filter, .mip = NriFilter_NEAREST},
                                  .addressModes = {address, address, address},
                                  .mipMin = 0.0f,
@@ -2049,7 +1910,7 @@ bool upload_scene(RENDERER *r, const GLTF_SCENE *visual) {
 
     r->default_white = pixel_texture(r, 255, 255, 255, 255);
     r->default_normal = pixel_texture(r, 128, 128, 255, 255);
-    r->material_sampler = sampler(r, NriFilter_LINEAR, NriFilter_LINEAR, NriAddressMode_REPEAT);
+    r->material_sampler = gpu_create_sampler(r, NriFilter_LINEAR, NriFilter_LINEAR, NriAddressMode_REPEAT);
 
     if (!r->default_white || !r->default_normal || !r->material_sampler) return false;
 
@@ -2080,7 +1941,7 @@ bool upload_scene(RENDERER *r, const GLTF_SCENE *visual) {
         m->emissive = resolve_texture(r, visual, m->data.emissive_texture, r->default_white);
     }
 
-    r->lightmap_sampler = sampler(r, NriFilter_LINEAR, NriFilter_LINEAR, NriAddressMode_CLAMP_TO_EDGE);
+    r->lightmap_sampler = gpu_create_sampler(r, NriFilter_LINEAR, NriFilter_LINEAR, NriAddressMode_CLAMP_TO_EDGE);
     r->lightmap_texture = pixel_texture(r, 0, 0, 0, 255);
 
     return r->lightmap_sampler && r->lightmap_texture;
@@ -2179,9 +2040,9 @@ static bool fx_init(FX_STATE *fx, RENDERER *r) {
     memset(fx, 0, sizeof(*fx));
     fx->owner = r;
 
-    fx->sampler = sampler(r, NriFilter_LINEAR, NriFilter_LINEAR, NriAddressMode_CLAMP_TO_EDGE);
+    fx->sampler = gpu_create_sampler(r, NriFilter_LINEAR, NriFilter_LINEAR, NriAddressMode_CLAMP_TO_EDGE);
 
-    fx->depth_sampler = sampler(r, NriFilter_NEAREST, NriFilter_NEAREST, NriAddressMode_CLAMP_TO_EDGE);
+    fx->depth_sampler = gpu_create_sampler(r, NriFilter_NEAREST, NriFilter_NEAREST, NriAddressMode_CLAMP_TO_EDGE);
 
     if (!fx->sampler || !fx->depth_sampler) goto fail;
 
@@ -2418,27 +2279,17 @@ static bool fx_apply(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *swap, floa
  * never learns about NRI descriptor sets/views.
  */
 static bool create_pipeline_layouts(RENDERER *r) {
-    return create_surface_layout(r) && create_line_layout(r) && create_sky_layout(r) && create_bake_layout(r) && create_lightmap_queue_layouts(r) &&
-           create_probe_layout(r) && create_ssao_layout(r) && create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) &&
-           create_volume_compose_layout(r) && create_compose_layout(r);
+    return create_surface_layout(r) && create_line_layout(r) && create_sky_layout(r) && bake_gpu_layouts_init(r) && create_ssao_layout(r) &&
+           create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) && create_volume_compose_layout(r) && create_compose_layout(r);
 }
 
 static void destroy_pipeline_layouts(RENDERER *r) {
     if (!r) return;
 
-    NriPipelineLayout **layouts[] = {&r->surface_layout,
-                                     &r->line_layout,
-                                     &r->sky_layout,
-                                     &r->bake_layout,
-                                     &r->lightmap_queue_reset_layout,
-                                     &r->lightmap_queue_args_layout,
-                                     &r->probe_layout,
-                                     &r->ssao_layout,
-                                     &r->bloom_layout,
-                                     &r->grade_layout,
-                                     &r->volume_layout,
-                                     &r->volume_compose_layout,
-                                     &r->compose_layout};
+    bake_gpu_layouts_deinit(r);
+
+    NriPipelineLayout **layouts[] = {&r->surface_layout, &r->line_layout,           &r->sky_layout,    &r->ssao_layout, &r->bloom_layout, &r->grade_layout,
+                                     &r->volume_layout,  &r->volume_compose_layout, &r->compose_layout};
 
     for (uint32_t i = 0; i < sizeof(layouts) / sizeof(layouts[0]); ++i) {
         if (*layouts[i]) {
@@ -2446,6 +2297,37 @@ static void destroy_pipeline_layouts(RENDERER *r) {
             *layouts[i] = NULL;
         }
     }
+}
+
+bool gpu_init_worker(GPU *gpu) {
+    if (!gpu) return false;
+
+    memset(gpu, 0, sizeof(*gpu));
+
+    NriDeviceCreationDesc device_desc = {0};
+    device_desc.graphicsAPI = NriGraphicsAPI_VK;
+    device_desc.vkBindingOffsets = (NriVKBindingOffsets){.sRegister = 0, .tRegister = 16, .bRegister = 32, .uRegister = 48};
+
+    if (nriCreateDevice(&device_desc, &gpu->device) != NriResult_SUCCESS) {
+        gpu_deinit(gpu);
+        return false;
+    }
+
+    if (nriGetInterface(gpu->device, NRI_INTERFACE(NriCoreInterface), &gpu->core) != NriResult_SUCCESS ||
+        nriGetInterface(gpu->device, NRI_INTERFACE(NriHelperInterface), &gpu->helper) != NriResult_SUCCESS) {
+        gpu_deinit(gpu);
+        return false;
+    }
+
+    RENDERER shell = {.gpu = gpu};
+
+    if (!acquire_queues(&shell) || !create_pipeline_cache(&shell) || !create_gpu_timestamps(&shell) || !create_descriptor_pool(&shell) ||
+        !create_work_contexts(&shell)) {
+        gpu_deinit(gpu);
+        return false;
+    }
+
+    return true;
 }
 
 bool gpu_init(GPU *gpu, const char *title, int width, int height) {
@@ -2676,73 +2558,6 @@ failed_frame:
     return false;
 }
 
-bool bake_worker_init(RENDERER *r) {
-    if (!r) return false;
-
-    memset(r, 0, sizeof(*r));
-    r->gpu = calloc(1, sizeof(*r->gpu));
-    if (!r->gpu) return false;
-
-    NriDeviceCreationDesc device_desc = {0};
-    device_desc.graphicsAPI = NriGraphicsAPI_VK;
-    device_desc.vkBindingOffsets = (NriVKBindingOffsets){.sRegister = 0, .tRegister = 16, .bRegister = 32, .uRegister = 48};
-
-    if (nriCreateDevice(&device_desc, &r->gpu->device) != NriResult_SUCCESS) {
-        bake_worker_deinit(r);
-        return false;
-    }
-
-    if (nriGetInterface(r->gpu->device, NRI_INTERFACE(NriCoreInterface), &r->gpu->core) != NriResult_SUCCESS ||
-        nriGetInterface(r->gpu->device, NRI_INTERFACE(NriHelperInterface), &r->gpu->helper) != NriResult_SUCCESS || !acquire_queues(r)) {
-        bake_worker_deinit(r);
-        return false;
-    }
-
-    if (!create_pipeline_cache(r) || !create_gpu_timestamps(r) || !create_descriptor_pool(r) || !create_work_contexts(r) || !create_pipeline_layouts(r)) {
-        bake_worker_deinit(r);
-        return false;
-    }
-
-    r->lightmap_sampler = sampler(r, NriFilter_LINEAR, NriFilter_LINEAR, NriAddressMode_CLAMP_TO_EDGE);
-    r->lightmap_texture = gpu_create_texture(r, NriFormat_RGBA16_SFLOAT, NriTextureUsageBits_SHADER_RESOURCE, 1, 1);
-
-    if (!r->lightmap_sampler || !r->lightmap_texture) {
-        bake_worker_deinit(r);
-        return false;
-    }
-
-    return true;
-}
-
-void bake_worker_deinit(RENDERER *r) {
-    if (!r) return;
-
-    GPU *gpu = r->gpu;
-    free_probe_grid(&r->volume_probes);
-    beam_free(&r->beams);
-
-    if (gpu && gpu->device) {
-        if (gpu->graphics_queue) gpu->core.QueueWaitIdle(gpu->graphics_queue);
-
-        clear_temporary(r);
-        probe_wavefront_scratch_destroy(r);
-        release_bake_resources(r);
-        release_buffer(r, r->volume_probe_buffer);
-        release_buffer(r, r->beam_buffer);
-        release_texture(r, r->lightmap_texture);
-
-        if (r->lightmap_sampler) gpu->core.DestroyDescriptor(r->lightmap_sampler);
-        destroy_pipeline_layouts(r);
-    }
-
-    if (gpu) {
-        gpu_deinit(gpu);
-        free(gpu);
-    }
-
-    memset(r, 0, sizeof(*r));
-}
-
 void renderer_gpu_resources_deinit(RENDERER *r) {
     if (!r) return;
 
@@ -2755,7 +2570,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
     if (gpu && gpu->device) {
         if (gpu->graphics_queue) gpu->core.QueueWaitIdle(gpu->graphics_queue);
 
-        clear_temporary(r);
+        gpu_clear_temporary(r);
         probe_wavefront_scratch_destroy(r);
         fx_deinit(&r->fx);
 
@@ -2798,7 +2613,7 @@ void gpu_deinit(GPU *gpu) {
 
         destroy_upload_context(&shell);
         destroy_work_contexts(&shell);
-        clear_temporary(&shell);
+        gpu_clear_temporary(&shell);
         destroy_frame_contexts(&shell);
         destroy_gpu_timestamps(&shell);
         destroy_swapchain(&shell);
