@@ -377,7 +377,7 @@ void dynamic_receiver_cs(uint3 id : SV_DispatchThreadID) {
     if (id.x >= item_count) return;
 
     if (phase == PHASE_DIRECT) {
-        SurfaceSample sample = Samples[id.x];
+        SurfaceSample sample = Samples[dynamic_instance_data.y + id.x];
         uint pixel = asuint(sample.position.w);
         uint pixel_count = dispatch_data.z * dispatch_data.w;
         if (pixel >= pixel_count) return;
@@ -409,7 +409,7 @@ void dynamic_receiver_cs(uint3 id : SV_DispatchThreadID) {
     }
 
     if (phase == PHASE_FILTER) {
-        SurfaceSample sample = Samples[id.x];
+        SurfaceSample sample = Samples[dynamic_instance_data.y + id.x];
         uint pixel = asuint(sample.position.w);
         uint pixel_count = dispatch_data.z * dispatch_data.w;
         if (pixel >= pixel_count) return;
