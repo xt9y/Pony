@@ -344,6 +344,35 @@ float static_beam_visibility(float3 position) {
     return total > 0.0f ? saturate(visibility / total) : 1.0f;
 }
 
+float4 dynamic_lightmap_sample(float2 uv) {
+    uint width, height;
+    Lightmap.GetDimensions(width, height);
+
+    if (width == 0u || height == 0u) return 0.0f;
+
+    float2 texel_position = uv * float2(width, height) - 0.5f;
+    int2 base = int2(floor(texel_position));
+    float2 fraction = frac(texel_position);
+    float4 sum = 0.0f;
+    float weight_sum = 0.0f;
+    const float validity_floor = (1.0f / 1024.0f) * 0.5f;
+
+    [unroll] for (uint y = 0u; y < 2u; ++y)
+    [unroll] for (uint x = 0u; x < 2u; ++x) {
+        int2 pixel = clamp(base + int2(x, y), int2(0, 0), int2((int)width - 1, (int)height - 1));
+        float2 axis_weight = lerp(1.0f - fraction, fraction, float2(x, y));
+        float weight = axis_weight.x * axis_weight.y;
+        float4 sample = Lightmap.Load(int3(pixel, 0));
+
+        if (sample.a < validity_floor) continue;
+
+        sum += sample * weight;
+        weight_sum += weight;
+    }
+
+    return weight_sum > 1.0e-6f ? sum / weight_sum : 0.0f;
+}
+
 float3 signed_dynamic_near_field(float3 position, float3 normal) {
     uint count = min(dynamic_influence_meta.x, 8u);
     if (count == 0u || dynamic_flags.z > 0.5f) return 0.0f;
@@ -506,8 +535,13 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     float dynamic_cache_valid = saturate(dynamic_flags.y);
     float reference_mode = saturate(dynamic_flags.z);
     float2 lighting_uv = front_face ? input.lightmap_uv : input.back_lightmap_uv;
-    float4 baked_sample = camera_position.w > 0.5f ? Lightmap.Sample(LightmapSampler, lighting_uv)
-                                                    : float4(0.12f, 0.12f, 0.12f, 1.0f);
+    float4 baked_sample = float4(0.12f, 0.12f, 0.12f, 1.0f);
+
+    if (camera_position.w > 0.5f) {
+        baked_sample = is_dynamic > 0.5f && dynamic_cache_valid > 0.5f
+                           ? dynamic_lightmap_sample(lighting_uv)
+                           : Lightmap.Sample(LightmapSampler, lighting_uv);
+    }
 
     const float visibility_floor = 1.0f / 1024.0f;
     if (is_dynamic > 0.5f && baked_sample.a < visibility_floor * 0.5f) dynamic_cache_valid = 0.0f;
