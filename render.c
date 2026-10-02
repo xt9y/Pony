@@ -2034,6 +2034,173 @@ static uint32_t dynamic_receiver_instances(RENDERER *r, DYNAMIC_RECEIVER_UNIFORM
     return count;
 }
 
+static uint32_t dynamic_receiver_mark_active_cells(RENDERER *r, const DYNAMIC_RECEIVER_UNIFORMS *uniforms, uint32_t *active_samples) {
+    if (active_samples) *active_samples = 0u;
+    if (!r || !uniforms || !r->dynamic_receiver_grid_offsets || !r->dynamic_receiver_grid_marks ||
+        !r->dynamic_receiver_grid_cell_count || r->dynamic_receiver_grid_cell_size <= 0.0f)
+        return 0u;
+
+    uint32_t mark = ++r->dynamic_receiver_grid_mark;
+
+    if (!mark) {
+        memset(r->dynamic_receiver_grid_marks, 0,
+               (size_t)r->dynamic_receiver_grid_cell_count * sizeof(*r->dynamic_receiver_grid_marks));
+        mark = ++r->dynamic_receiver_grid_mark;
+    }
+
+    const float cell_size = r->dynamic_receiver_grid_cell_size;
+    const uint32_t dim_x = r->dynamic_receiver_grid_dims[0];
+    const uint32_t dim_y = r->dynamic_receiver_grid_dims[1];
+    const uint32_t dim_z = r->dynamic_receiver_grid_dims[2];
+    const uint32_t count = uniforms->dynamic_instance_data[0];
+
+    for (uint32_t instance = 0u; instance < count; ++instance) {
+        const float previous_weight = instance ? uniforms->dynamic_instance_emissive[instance - 1u][1] : 0.0f;
+        const float world_weight = uniforms->dynamic_instance_emissive[instance][1] - previous_weight;
+
+        if (world_weight <= 0.0f) continue;
+
+        const float center[3] = {
+            uniforms->dynamic_instance_center_radius[instance][0],
+            uniforms->dynamic_instance_center_radius[instance][1],
+            uniforms->dynamic_instance_center_radius[instance][2],
+        };
+        const float object_radius = fmaxf(uniforms->dynamic_instance_center_radius[instance][3], 1.0e-3f);
+        const float influence =
+            fmaxf(sqrtf(world_weight / fmaxf(3.14159265358979323846f * DYNAMIC_RECEIVER_IRRADIANCE_FLOOR, 1.0e-8f)),
+                  object_radius * 1.5f);
+        const float radius = object_radius + influence;
+        int minimum[3];
+        int maximum[3];
+
+        for (uint32_t axis = 0u; axis < 3u; ++axis) {
+            minimum[axis] = (int)floorf((center[axis] - radius - r->dynamic_receiver_grid_min[axis]) / cell_size);
+            maximum[axis] = (int)floorf((center[axis] + radius - r->dynamic_receiver_grid_min[axis]) / cell_size);
+
+            if (minimum[axis] < 0) minimum[axis] = 0;
+            if (maximum[axis] < 0) continue;
+            if ((uint32_t)minimum[axis] >= r->dynamic_receiver_grid_dims[axis]) minimum[axis] = (int)r->dynamic_receiver_grid_dims[axis] - 1;
+            if ((uint32_t)maximum[axis] >= r->dynamic_receiver_grid_dims[axis]) maximum[axis] = (int)r->dynamic_receiver_grid_dims[axis] - 1;
+        }
+
+        if (maximum[0] < 0 || maximum[1] < 0 || maximum[2] < 0 ||
+            minimum[0] >= (int)dim_x || minimum[1] >= (int)dim_y || minimum[2] >= (int)dim_z)
+            continue;
+
+        const float radius2 = radius * radius;
+
+        for (int z = minimum[2]; z <= maximum[2]; ++z) {
+            for (int y = minimum[1]; y <= maximum[1]; ++y) {
+                for (int x = minimum[0]; x <= maximum[0]; ++x) {
+                    float distance2 = 0.0f;
+                    const int coord[3] = {x, y, z};
+
+                    for (uint32_t axis = 0u; axis < 3u; ++axis) {
+                        const float cell_min = r->dynamic_receiver_grid_min[axis] + (float)coord[axis] * cell_size;
+                        const float cell_max = cell_min + cell_size;
+                        float delta = 0.0f;
+
+                        if (center[axis] < cell_min)
+                            delta = cell_min - center[axis];
+                        else if (center[axis] > cell_max)
+                            delta = center[axis] - cell_max;
+
+                        distance2 += delta * delta;
+                    }
+
+                    if (distance2 > radius2) continue;
+
+                    const uint32_t cell = (uint32_t)x + dim_x * ((uint32_t)y + dim_y * (uint32_t)z);
+                    r->dynamic_receiver_grid_marks[cell] = mark;
+                }
+            }
+        }
+    }
+
+    uint32_t ranges = 0u;
+    uint32_t samples = 0u;
+    bool in_range = false;
+
+    for (uint32_t cell = 0u; cell < r->dynamic_receiver_grid_cell_count; ++cell) {
+        const uint32_t first = r->dynamic_receiver_grid_offsets[cell];
+        const uint32_t end = r->dynamic_receiver_grid_offsets[cell + 1u];
+        const bool populated = end > first;
+        const bool selected = r->dynamic_receiver_grid_marks[cell] == mark && populated;
+
+        if (selected) {
+            samples += end - first;
+
+            if (!in_range) {
+                ++ranges;
+                in_range = true;
+            }
+        } else if (populated) {
+            in_range = false;
+        }
+    }
+
+    if (active_samples) *active_samples = samples;
+    return ranges;
+}
+
+static bool dynamic_receiver_dispatch_range(RENDERER *r, NriCommandBuffer *cmd, DYNAMIC_RECEIVER_UNIFORMS *uniforms,
+                                            uint32_t phase, uint32_t first, uint32_t count) {
+    if (!count) return true;
+
+    uniforms->dispatch_data[0] = phase;
+    uniforms->dispatch_data[1] = count;
+    uniforms->dynamic_instance_data[1] = first;
+
+    if (!gpu_bind_uniform_data(r, cmd, r->dynamic_receiver_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms)))
+        return false;
+
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
+        .workGroupNumX = (count + 63u) / 64u,
+        .workGroupNumY = 1u,
+        .workGroupNumZ = 1u,
+    });
+    return true;
+}
+
+static bool dynamic_receiver_dispatch_active(RENDERER *r, NriCommandBuffer *cmd, DYNAMIC_RECEIVER_UNIFORMS *uniforms,
+                                             uint32_t phase, NriTexture *source, NriTexture *output) {
+    if (!r || !cmd || !uniforms || !source || !output) return false;
+    if (!bind_dynamic_receiver_sets(r, cmd, source, output)) return false;
+
+    r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
+
+    const uint32_t mark = r->dynamic_receiver_grid_mark;
+    uint32_t run_first = 0u;
+    uint32_t run_end = 0u;
+    bool have_run = false;
+
+    for (uint32_t cell = 0u; cell < r->dynamic_receiver_grid_cell_count; ++cell) {
+        const uint32_t first = r->dynamic_receiver_grid_offsets[cell];
+        const uint32_t end = r->dynamic_receiver_grid_offsets[cell + 1u];
+        const bool populated = end > first;
+        const bool selected = r->dynamic_receiver_grid_marks[cell] == mark && populated;
+
+        if (selected) {
+            if (!have_run) {
+                run_first = first;
+                run_end = end;
+                have_run = true;
+            } else if (first == run_end) {
+                run_end = end;
+            } else {
+                if (!dynamic_receiver_dispatch_range(r, cmd, uniforms, phase, run_first, run_end - run_first)) return false;
+                run_first = first;
+                run_end = end;
+            }
+        } else if (populated && have_run) {
+            if (!dynamic_receiver_dispatch_range(r, cmd, uniforms, phase, run_first, run_end - run_first)) return false;
+            have_run = false;
+        }
+    }
+
+    return !have_run || dynamic_receiver_dispatch_range(r, cmd, uniforms, phase, run_first, run_end - run_first);
+}
+
 static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd, const RENDER_FRAME *frame) {
     if (!r || !cmd || !frame) return false;
 
