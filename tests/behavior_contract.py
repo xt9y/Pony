@@ -508,6 +508,24 @@ def main() -> None:
             raise AssertionError(f"bounded dynamic reflection integration missing: {needle}")
 
     for needle in (
+        "event->key.key == SDLK_F6",
+        "event->key.key == SDLK_F7",
+        "(float)r->debug_view",
+    ):
+        if needle not in render:
+            raise AssertionError(f"dynamic lighting debug control missing: {needle}")
+
+    for needle in (
+        "dynamic_flags.w > 4.5f",
+        "dynamic_cache_valid > 0.5f",
+        "dynamic_flags.w > 5.5f",
+        "float negative = length(max(-dynamic_correction, 0.0f))",
+        "float positive = length(max(dynamic_correction, 0.0f))",
+    ):
+        if needle not in fragment:
+            raise AssertionError(f"dynamic lighting debug visualization missing: {needle}")
+
+    for needle in (
         "signed_dynamic_near_field(",
         "projected_area",
         "surface_probe_irradiance(closest, object_normal)",
