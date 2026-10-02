@@ -2230,7 +2230,13 @@ static const struct LIGHT *bake_scene_directional_light(const SCENE *scene) {
 
 bool bake_start(RENDERER *renderer, const SCENE *scene, const char *path, uint64_t scene_hash, uint64_t layout_hash, uint64_t volume_hash,
                 uint64_t beam_hash) {
-    if (!renderer || !renderer->gpu->device || !scene || !scene->compiled || !scene->lightmap_valid || !scene->lightmap || !path) return false;
+    /*
+     * DYNAMIC transforms intentionally leave the flattened all-object CPU view
+     * stale. The permanent bake consumes only static_geometry/static_visual;
+     * static edits already invalidate lightmap_valid, so compiled is not a
+     * prerequisite here.
+     */
+    if (!renderer || !renderer->gpu->device || !scene || !scene->lightmap_valid || !scene->lightmap || !path) return false;
 
     const struct LIGHT *light = bake_scene_directional_light(scene);
 
