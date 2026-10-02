@@ -144,7 +144,9 @@ bool trace_triangle(TraceRay ray, BvhTriangle tri, float max_t, out float hit_t,
     float determinant = dot(edge1, p);
 
     if (abs(determinant) < 1.0e-7f) {
-        hit_t = hit_u = hit_v = 0.0f;
+        hit_t = 0.0f;
+        hit_u = 0.0f;
+        hit_v = 0.0f;
         return false;
     }
 
@@ -153,7 +155,9 @@ bool trace_triangle(TraceRay ray, BvhTriangle tri, float max_t, out float hit_t,
     float u = dot(s, p) * inverse;
 
     if (u < 0.0f || u > 1.0f) {
-        hit_t = hit_u = hit_v = 0.0f;
+        hit_t = 0.0f;
+        hit_u = 0.0f;
+        hit_v = 0.0f;
         return false;
     }
 
@@ -161,13 +165,17 @@ bool trace_triangle(TraceRay ray, BvhTriangle tri, float max_t, out float hit_t,
     float v = dot(ray.direction, q) * inverse;
 
     if (v < 0.0f || u + v > 1.0f) {
-        hit_t = hit_u = hit_v = 0.0f;
+        hit_t = 0.0f;
+        hit_u = 0.0f;
+        hit_v = 0.0f;
         return false;
     }
 
     float t = dot(edge2, q) * inverse;
     if (t <= ray.tmin || t >= min(ray.tmax, max_t)) {
-        hit_t = hit_u = hit_v = 0.0f;
+        hit_t = 0.0f;
+        hit_u = 0.0f;
+        hit_v = 0.0f;
         return false;
     }
 
