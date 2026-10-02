@@ -517,12 +517,13 @@ static bool create_surface_layout(RENDERER *r) {
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_TEXTURE,
         NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
 
     const NriDescriptorType *sets[4] = {NULL, camera, material, uniform};
-    const uint8_t counts[4] = {0, 1, 18, 1};
+    const uint8_t counts[4] = {0, 1, 19, 1};
 
     return gpu_create_pipeline_layout(r, &r->surface_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
@@ -680,12 +681,13 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
                                                    NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
                             gpu_create_buffer_view(r, r->volume_probe_buffer ? r->volume_probe_buffer : r->surface_probe_fallback_buffer,
                                                    NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
+                            gpu_create_texture_view(r, r->baked_direct_texture ? r->baked_direct_texture : r->lightmap_texture, NriTextureView_TEXTURE),
                             material_sampler,
                             lightmap_sampler,
                             scene_sampler,
                             r->dynamic_shadow_sampler ? r->dynamic_shadow_sampler : material_sampler};
 
-    return gpu_bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 18) &&
+    return gpu_bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 19) &&
            gpu_bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
 }
 
