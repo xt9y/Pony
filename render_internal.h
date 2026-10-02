@@ -1,7 +1,7 @@
 #ifndef RENDER_INTERNAL_H
 #define RENDER_INTERNAL_H
 
-#include "gpu.h"
+#include "game.h"
 
 #include <stddef.h>
 
@@ -39,6 +39,8 @@ NriDescriptor *gpu_create_texture_view(RENDERER *renderer, NriTexture *texture, 
 NriDescriptor *gpu_create_sampler(RENDERER *renderer, NriFilter min_filter, NriFilter mag_filter, NriAddressMode address);
 bool gpu_init_worker(GPU *gpu);
 void gpu_clear_temporary(RENDERER *renderer);
+void release_texture(RENDERER *renderer, NriTexture *texture);
+void release_buffer(RENDERER *renderer, NriBuffer *buffer);
 bool gpu_bind_descriptor_set(RENDERER *renderer, NriCommandBuffer *command_buffer, NriPipelineLayout *layout, NriBindPoint point, uint32_t set_index,
                              NriDescriptor *const *descriptors, uint32_t count);
 bool gpu_bind_uniform_data(RENDERER *renderer, NriCommandBuffer *command_buffer, NriPipelineLayout *layout, NriBindPoint point, uint32_t set,
