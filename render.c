@@ -2419,19 +2419,35 @@ bool renderer_rebake_current_scene(RENDERER *renderer, const MESH *mesh, const G
     return good;
 }
 
-static bool model_surface_layout(struct MODEL *model) {
-    if (!model || !model->geometry || !model->visual) return false;
-    if (model->surface_layout) return true;
+static bool model_surface_layout(struct MODEL *model, uint32_t target_samples) {
+    if (!model || !model->geometry || !model->visual || !target_samples) return false;
+    if (model->surface_layout && model->surface_layout->sample_count <= target_samples) return true;
 
-    model->surface_layout = calloc(1, sizeof(*model->surface_layout));
-    if (!model->surface_layout) return false;
-
-    if (!lmap_build(model->surface_layout, model->geometry, DYNAMIC_LIGHTING_TEXELS_PER_UNIT, DYNAMIC_LIGHTING_MAX_SIZE)) {
-        free(model->surface_layout);
-        model->surface_layout = NULL;
-        return false;
+    if (!model->surface_layout) {
+        model->surface_layout = calloc(1, sizeof(*model->surface_layout));
+        if (!model->surface_layout) return false;
+    } else {
+        lmap_free(model->surface_layout);
     }
 
+    uint32_t density = DYNAMIC_LIGHTING_TEXELS_PER_UNIT;
+
+    for (;;) {
+        if (!lmap_build(model->surface_layout, model->geometry, density, DYNAMIC_LIGHTING_MAX_SIZE)) return false;
+        if (model->surface_layout->sample_count <= target_samples || density <= 1u) break;
+
+        const float ratio = sqrtf((float)target_samples / (float)model->surface_layout->sample_count);
+        uint32_t next = (uint32_t)floorf((float)density * ratio * 0.90f);
+
+        if (next >= density) next = density - 1u;
+        if (!next) next = 1u;
+
+        lmap_free(model->surface_layout);
+        density = next;
+    }
+
+    SDL_Log("dynamic surface layout: %u samples | %.2f texels/unit | target %u",
+            model->surface_layout->sample_count, model->surface_layout->texel_density, target_samples);
     return true;
 }
 
@@ -2535,6 +2551,8 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
 
     if (!count) return true;
 
+    const uint32_t target_samples = fmaxf(1.0f, floorf((float)DYNAMIC_SURFACE_SAMPLES_PER_FRAME / (float)count));
+
     renderer->dynamic_lighting = calloc(count, sizeof(*renderer->dynamic_lighting));
     if (!renderer->dynamic_lighting) return false;
 
@@ -2545,7 +2563,7 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
 
         struct MODEL *model = object->data;
 
-        if (!model_surface_layout(model)) {
+        if (!model_surface_layout(model, target_samples)) {
             release_dynamic_lighting(renderer);
             return false;
         }
@@ -2773,6 +2791,7 @@ static bool renderer_build_scene(RENDERER *renderer, SCENE *scene, const LIGHTMA
     renderer->distance = renderer->scene_radius * 2.15f;
 
     uint32_t draw_capacity = visual->material_count;
+    uint32_t dynamic_model_count = 0u;
 
     for (uint32_t i = 0; i < scene->object_count; ++i) {
         const OBJECT *object = &scene->objects[i];
@@ -2782,7 +2801,12 @@ static bool renderer_build_scene(RENDERER *renderer, SCENE *scene, const LIGHTMA
         const struct MODEL *model = object->data;
         if (UINT32_MAX - draw_capacity < model->visual->material_count) return false;
         draw_capacity += model->visual->material_count;
+        ++dynamic_model_count;
     }
+
+    const uint32_t dynamic_surface_target =
+        dynamic_model_count ? (DYNAMIC_SURFACE_SAMPLES_PER_FRAME / dynamic_model_count ? DYNAMIC_SURFACE_SAMPLES_PER_FRAME / dynamic_model_count : 1u)
+                            : DYNAMIC_SURFACE_SAMPLES_PER_FRAME;
 
     free(renderer->draws);
     renderer->draws = calloc(draw_capacity ? draw_capacity : 1u, sizeof(*renderer->draws));
@@ -2828,7 +2852,7 @@ static bool renderer_build_scene(RENDERER *renderer, SCENE *scene, const LIGHTMA
 
         struct MODEL *model = object->data;
 
-        if (!model_surface_layout(model)) return false;
+        if (!model_surface_layout(model, dynamic_surface_target)) return false;
 
         const LIGHTMAP *layout = model->surface_layout;
         const size_t triangle_count = model->visual->vertex_count / 3u;
