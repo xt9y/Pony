@@ -504,10 +504,13 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
 
     float is_dynamic = saturate(dynamic_flags.x);
     float dynamic_cache_valid = saturate(dynamic_flags.y);
+    float reference_mode = saturate(dynamic_flags.z);
     float4 baked_sample = camera_position.w > 0.5f ? Lightmap.Sample(LightmapSampler, front_face ? input.lightmap_uv : input.back_lightmap_uv)
                                                     : float4(0.12f, 0.12f, 0.12f, 1.0f);
 
     const float visibility_floor = 1.0f / 1024.0f;
+    if (is_dynamic > 0.5f && baked_sample.a < visibility_floor * 0.5f) dynamic_cache_valid = 0.0f;
+
     float cached_sun_visibility = camera_position.w > 0.5f
                                       ? saturate((baked_sample.a - visibility_floor) / (1.0f - visibility_floor))
                                       : 1.0f;
@@ -521,15 +524,17 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     }
 
     float dynamic_visibility = dynamic_shadow_visibility(input.world_position);
-    float sun_visibility = cached_sun_visibility * dynamic_visibility;
+    float sun_visibility = reference_mode > 0.5f ? cached_sun_visibility : cached_sun_visibility * dynamic_visibility;
     float3 baked = max(baked_sample.rgb, 0.0f);
+    float3 static_direct = sun_color.rgb * roughness_normal_ao_sun.w * geometric_n_dot_l;
 
     if (is_dynamic > 0.5f && dynamic_cache_valid < 0.5f) {
-        baked += sun_color.rgb * roughness_normal_ao_sun.w * geometric_n_dot_l * sun_visibility;
-    } else if (camera_position.w > 0.5f && is_dynamic < 0.5f) {
-        float3 static_direct = sun_color.rgb * roughness_normal_ao_sun.w * geometric_n_dot_l;
+        baked += static_direct * sun_visibility;
+    } else if (reference_mode < 0.5f && camera_position.w > 0.5f) {
         baked = max(baked + static_direct * (sun_visibility - cached_sun_visibility), 0.0f);
-        baked = max(baked + signed_dynamic_near_field(input.world_position, geometric_normal), 0.0f);
+
+        if (is_dynamic < 0.5f)
+            baked = max(baked + signed_dynamic_near_field(input.world_position, geometric_normal), 0.0f);
     }
 
     if (camera_position.w > 1.5f) {
