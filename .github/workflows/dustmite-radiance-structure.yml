@@ -6,8 +6,54 @@ on:
       - dustmite-radiance-structure
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 
 jobs:
+  apply-render-split:
+    if: github.event_name == 'push' && github.event.head_commit.message == 'run renderer implementation split'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: install platform headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan-dev
+      - name: fetch dependency headers
+        run: |
+          git clone --depth=1 https://github.com/libsdl-org/SDL.git /tmp/SDL
+          git clone --depth=1 https://github.com/libsdl-org/SDL_image.git /tmp/SDL_image
+          git clone https://github.com/NVIDIA-RTX/NRI.git /tmp/NRI
+          git -C /tmp/NRI checkout d0c578e613d6efa32893e597b0c24b2f34b9064a
+      - name: apply renderer split
+        run: |
+          python3 tools/split_render_gpu.py
+          STYLE='{BasedOnStyle: LLVM, IndentWidth: 4, TabWidth: 4, UseTab: Never, ColumnLimit: 160, BreakBeforeBraces: Attach, PointerAlignment: Right, SortIncludes: Never, AllowShortEnumsOnASingleLine: true, AllowShortIfStatementsOnASingleLine: true, AllowShortLoopsOnASingleLine: true, AllowShortFunctionsOnASingleLine: Empty}'
+          clang-format -i --style="$STYLE" gpu.c render.c gpu.h
+          git diff --check
+      - name: syntax-check split
+        run: |
+          CFLAGS="-I/tmp/SDL/include -I/tmp/SDL_image/include -I/tmp/NRI/Include -I."
+          for file in gpu.c render.c bake.c main.c; do
+            echo "checking $file"
+            cc -std=c11 -Wall -Wextra -Wpedantic -Werror=implicit-function-declaration -fsyntax-only $CFLAGS "$file"
+          done
+      - name: verify contracts after split
+        run: |
+          python3 tests/structure_contract.py
+          python3 tests/behavior_contract.py
+      - name: publish renderer split
+        run: |
+          git config user.name xt9y
+          git config user.email felix@xt9y.de
+          git add gpu.c render.c gpu.h
+          git commit -m "move renderer gpu implementation"
+          git push origin HEAD:dustmite-radiance-structure
+
   structure:
     runs-on: ubuntu-latest
     timeout-minutes: 5
