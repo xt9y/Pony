@@ -1916,18 +1916,6 @@ static bool renderer_draw(RENDERER *renderer, const struct LIGHT *light, const S
     return draw_frame(renderer, &frame);
 }
 
-static struct MODEL *scene_model(const SCENE *scene) {
-    if (!scene) return NULL;
-
-    for (uint32_t i = 0; i < scene->object_count; ++i) {
-        OBJECT *object = &scene->objects[i];
-
-        if (object->type == MODEL && object->data) return object->data;
-    }
-
-    return NULL;
-}
-
 static struct LIGHT *scene_directional_light(const SCENE *scene) {
     if (!scene) return NULL;
 
@@ -1960,11 +1948,14 @@ bool renderer_init(RENDERER *renderer, GPU *gpu) {
 
 bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
     if (!renderer || !scene || !scene->lightmap) return false;
+    if (!scene_compile(scene)) return false;
 
-    struct MODEL *model = scene_model(scene);
+    if (!scene->lightmap_valid) {
+        SDL_SetError("scene lightmap is stale; call scene_build_lightmap after changing models or transforms");
+        return false;
+    }
 
-    if (!model || !model->geometry || !model->visual) return false;
-    if (!renderer_build_scene(renderer, model->geometry, model->visual, scene->lightmap)) return false;
+    if (!renderer_build_scene(renderer, &scene->geometry, &scene->visual, scene->lightmap)) return false;
 
     renderer->scene = scene;
     scene->radius = renderer->scene_radius;
