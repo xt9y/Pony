@@ -86,8 +86,8 @@ def main() -> None:
         r'\{"([^"]+\.hlsl)",\s*"([^"]+)",\s*"([^"]+)",\s*(NULL|"[^"]+"),\s*"([^"]+)",\s*([01])\}',
         build,
     )
-    if len(jobs) != 28:
-        raise AssertionError(f"expected 28 shader jobs, found {len(jobs)}")
+    if len(jobs) != 29:
+        raise AssertionError(f"expected 29 shader jobs, found {len(jobs)}")
 
     for path, entry, define, fallback, stage, wave in jobs:
         source = shader_source(path)
@@ -346,7 +346,7 @@ def main() -> None:
         "dynamic_cache_valid",
         "surface_probe_irradiance(input.world_position, geometric_normal) / PI",
         "cached_sun_visibility = static_beam_visibility(input.world_position)",
-        "sun_visibility = cached_sun_visibility * dynamic_visibility",
+        "reference_mode > 0.5f ? cached_sun_visibility : cached_sun_visibility * dynamic_visibility",
     ):
         if needle not in fragment:
             raise AssertionError(f"dynamic baked-context fallback missing: {needle}")
@@ -358,6 +358,39 @@ def main() -> None:
     ):
         if needle not in render:
             raise AssertionError(f"stale dynamic cache rejection missing: {needle}")
+
+    dynamic_surface = text("shaders/dynamic_surface.hlsl")
+    for needle in (
+        "DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u",
+        "update_dynamic_surface_caches(",
+        "pending_transform_revision",
+        "pending_lighting_revision",
+        "allocation->sample_cursor = 0u",
+        "allocation->sample_cursor == total",
+        "allocation->transform_revision = object->transform_revision",
+        "gpu_transition_texture(r, cmd, allocation->texture, NriAccessBits_SHADER_RESOURCE",
+    ):
+        if needle not in render:
+            raise AssertionError(f"fixed-budget dynamic cache scheduling missing: {needle}")
+
+    for needle in (
+        "BUILD_DYNAMIC_SURFACE_CS",
+        "StructuredBuffer<SurfaceSample> Samples",
+        "probe_irradiance(",
+        "beam_visibility(",
+        "encoded_visibility",
+        "Output[uint2(pixel % texture_width, pixel / texture_width)]",
+    ):
+        if needle not in dynamic_surface:
+            raise AssertionError(f"dynamic surface cache shader missing: {needle}")
+
+    for needle in (
+        "reference_mode",
+        "baked_sample.a < visibility_floor * 0.5f",
+        "reference_mode < 0.5f",
+    ):
+        if needle not in fragment:
+            raise AssertionError(f"runtime/reference cache separation missing: {needle}")
 
     for needle in (
         "DYNAMIC_INFLUENCE_LIMIT",
