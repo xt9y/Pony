@@ -334,6 +334,9 @@ typedef struct MATERIAL_UNIFORMS {
 
     Uint32 dynamic_influence_meta[4];
     float dynamic_influence_center_radius[DYNAMIC_INFLUENCE_LIMIT][4];
+    float dynamic_influence_axis_x[DYNAMIC_INFLUENCE_LIMIT][4];
+    float dynamic_influence_axis_y[DYNAMIC_INFLUENCE_LIMIT][4];
+    float dynamic_influence_axis_z[DYNAMIC_INFLUENCE_LIMIT][4];
     float dynamic_influence_diffuse[DYNAMIC_INFLUENCE_LIMIT][4];
     float dynamic_influence_emissive[DYNAMIC_INFLUENCE_LIMIT][4];
 } MATERIAL_UNIFORMS;
@@ -417,6 +420,7 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     NriBuffer *self_node_buffer;
     NriBuffer *self_triangle_buffer;
     VEC3 local_center;
+    VEC3 local_extents;
     float local_radius;
     VEC3 average_diffuse;
     VEC3 average_emissive;
@@ -1919,13 +1923,30 @@ static uint32_t dynamic_influences(const RENDERER *r, MATERIAL_UNIFORMS *uniform
 
         const MAT4 model = m4_transform(object->transform, false);
         const VEC3 center = m4_point(model, allocation->local_center);
-        const float scale = fmaxf(fabsf(object->transform.scale.x), fmaxf(fabsf(object->transform.scale.y), fabsf(object->transform.scale.z)));
-        const float radius = fmaxf(allocation->local_radius * scale, 1.0e-3f);
+        const VEC3 axis_x =
+            v3(model.m[0] * allocation->local_extents.x, model.m[1] * allocation->local_extents.x, model.m[2] * allocation->local_extents.x);
+        const VEC3 axis_y =
+            v3(model.m[4] * allocation->local_extents.y, model.m[5] * allocation->local_extents.y, model.m[6] * allocation->local_extents.y);
+        const VEC3 axis_z =
+            v3(model.m[8] * allocation->local_extents.z, model.m[9] * allocation->local_extents.z, model.m[10] * allocation->local_extents.z);
+        const float radius = fmaxf(sqrtf(v3_len_sq(axis_x) + v3_len_sq(axis_y) + v3_len_sq(axis_z)), 1.0e-3f);
 
         uniforms->dynamic_influence_center_radius[count][0] = center.x;
         uniforms->dynamic_influence_center_radius[count][1] = center.y;
         uniforms->dynamic_influence_center_radius[count][2] = center.z;
         uniforms->dynamic_influence_center_radius[count][3] = radius;
+
+        uniforms->dynamic_influence_axis_x[count][0] = axis_x.x;
+        uniforms->dynamic_influence_axis_x[count][1] = axis_x.y;
+        uniforms->dynamic_influence_axis_x[count][2] = axis_x.z;
+
+        uniforms->dynamic_influence_axis_y[count][0] = axis_y.x;
+        uniforms->dynamic_influence_axis_y[count][1] = axis_y.y;
+        uniforms->dynamic_influence_axis_y[count][2] = axis_y.z;
+
+        uniforms->dynamic_influence_axis_z[count][0] = axis_z.x;
+        uniforms->dynamic_influence_axis_z[count][1] = axis_z.y;
+        uniforms->dynamic_influence_axis_z[count][2] = axis_z.z;
 
         uniforms->dynamic_influence_diffuse[count][0] = allocation->average_diffuse.x;
         uniforms->dynamic_influence_diffuse[count][1] = allocation->average_diffuse.y;
@@ -2650,6 +2671,7 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         allocation->object_id = object->id;
         allocation->layout = model->surface_layout;
         allocation->local_center = model->geometry->bounds.center;
+        allocation->local_extents = model->geometry->bounds.extents;
         allocation->local_radius = sqrtf(v3_len_sq(model->geometry->bounds.extents));
         model_lighting_summary(model, &allocation->average_diffuse, &allocation->average_emissive);
         allocation->transform_revision = 0u;
