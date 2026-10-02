@@ -15,6 +15,8 @@ struct VolumeProbe {
 };
 GPU_BIND_T(1, 0) StructuredBuffer<VolumeProbe> VolumeProbes : register(t1, space0);
 GPU_BIND_T(2, 0) StructuredBuffer<float> SunBeams : register(t2, space0);
+GPU_BIND_T(3, 0) Texture2D<float> DynamicShadow : register(t3, space0);
+GPU_BIND_S(1, 0) SamplerState DynamicShadowSampler : register(s1, space0);
 GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
 GPU_BIND_B(0, 2) cbuffer VolumeData : register(b0, space2) {
     float4 eye_density;
@@ -33,6 +35,12 @@ GPU_BIND_B(0, 2) cbuffer VolumeData : register(b0, space2) {
     float4 volume_filter;
     uint4 volume_quality;
     uint4 volume_strides;
+
+    float4 shadow_u_min;
+    float4 shadow_v_min;
+    float4 shadow_sun_max;
+    float4 shadow_extent_bias;
+    float4 shadow_texel_enabled;
 };
 
 static const uint BEAM_WIDTH = 64u;
@@ -42,6 +50,21 @@ uint beam_shadow_index(uint x, uint y, uint beam_depth) {
     return BEAM_WIDTH * BEAM_HEIGHT * beam_depth + x + BEAM_WIDTH * y;
 }
 
+float volume_dynamic_shadow_visibility(float3 position) {
+    if (shadow_texel_enabled.z < 0.5f || any(shadow_extent_bias.xyz <= 0.0f)) return 1.0f;
+
+    float sx = dot(position, shadow_u_min.xyz);
+    float sy = dot(position, shadow_v_min.xyz);
+    float sz = dot(position, shadow_sun_max.xyz);
+    float2 uv = (float2(sx, sy) - float2(shadow_u_min.w, shadow_v_min.w)) / shadow_extent_bias.xy;
+    float depth = (shadow_sun_max.w - sz) / shadow_extent_bias.z;
+
+    if (any(uv < 0.0f) || any(uv > 1.0f) || depth < 0.0f || depth > 1.0f) return 1.0f;
+
+    float blocker = DynamicShadow.SampleLevel(DynamicShadowSampler, uv, 0.0f);
+    return depth <= blocker + shadow_extent_bias.w ? 1.0f : 0.0f;
+}
+
 float integrate_beam_interval(float3 ray_origin, float3 ray_direction, float t0, float t1, float medium_enter, float density, uint beam_depth,
                               out float lit_distance) {
     lit_distance = 0.0f;
@@ -49,6 +72,13 @@ float integrate_beam_interval(float3 ray_origin, float3 ray_direction, float t0,
 
     float midpoint = 0.5f * (t0 + t1);
     float3 sun_position = ray_origin + ray_direction * midpoint;
+    float3 sun = normalize(sun_intensity.xyz);
+    float3 u = normalize(cross(float3(0, 1, 0), sun));
+    float3 v = cross(sun, u);
+    float3 world_midpoint = u * sun_position.x + v * sun_position.y + sun * sun_position.z;
+    float dynamic_visibility = volume_dynamic_shadow_visibility(world_midpoint);
+    if (dynamic_visibility <= 0.0f) return 0.0f;
+
     float2 cell = (sun_position.xy - beam_origin.xy) / beam_step.xy - 0.5f;
     int2 base = int2(floor(cell));
     float2 fraction = frac(cell);
@@ -83,7 +113,7 @@ float integrate_beam_interval(float3 ray_origin, float3 ray_direction, float t0,
         if (any(index < 0) || index.x >= (int)BEAM_WIDTH || index.y >= (int)BEAM_HEIGHT) continue;
 
         float2 axis_weight = lerp(1.0f - fraction, fraction, float2(x, y));
-        float visibility = axis_weight.x * axis_weight.y * visibility_shape;
+        float visibility = axis_weight.x * axis_weight.y * visibility_shape * dynamic_visibility;
         if (visibility <= 0.0f) continue;
 
         float a = t0;
