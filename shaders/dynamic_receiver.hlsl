@@ -402,7 +402,7 @@ void dynamic_receiver_cs(uint3 id : SV_DispatchThreadID) {
         uint seed = hash_u32(pixel ^ 0xb5297a4du);
         float3 emissive_sum = 0.0f;
 
-        [unroll] for (uint i = 0u; i < EMISSIVE_SAMPLES; ++i)
+        [loop] for (uint i = 0u; i < EMISSIVE_SAMPLES; ++i)
             emissive_sum += direct_emissive_stratified(sample.position.xyz, normal, seed, i, EMISSIVE_SAMPLES);
 
         Output[uint2(pixel % dispatch_data.z, pixel / dispatch_data.z)] =
