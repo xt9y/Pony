@@ -522,8 +522,8 @@ def main() -> None:
         "dynamic_flags.w > 4.5f",
         "dynamic_cache_valid > 0.5f",
         "dynamic_flags.w > 5.5f",
-        "float negative = length(max(-dynamic_correction, 0.0f))",
         "float positive = length(max(dynamic_correction, 0.0f))",
+        "float3 correction_debug = saturate(float3(0.0f, positive, 0.0f) * 6.0f)",
     ):
         if needle not in fragment:
             raise AssertionError(f"dynamic lighting debug visualization missing: {needle}")
