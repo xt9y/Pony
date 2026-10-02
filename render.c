@@ -11,6 +11,7 @@
 
 #define DYNAMIC_LIGHTING_TEXELS_PER_UNIT 24u
 #define DYNAMIC_LIGHTING_MAX_SIZE 4096u
+#define DYNAMIC_SHADOW_SIZE 2048u
 
 typedef struct MAT4 {
     float m[16];
@@ -290,7 +291,22 @@ typedef struct MATERIAL_UNIFORMS {
     float camera_forward[4];
     float sky_zenith[4];
     float sky_horizon[4];
+
+    float shadow_u_min[4];
+    float shadow_v_min[4];
+    float shadow_sun_max[4];
+    float shadow_extent_bias[4];
+    float shadow_texel_enabled[4];
+    float dynamic_flags[4];
 } MATERIAL_UNIFORMS;
+
+typedef struct DYNAMIC_SHADOW_UNIFORMS {
+    float model[16];
+    float shadow_u_min[4];
+    float shadow_v_min[4];
+    float shadow_sun_max[4];
+    float shadow_extent[4];
+} DYNAMIC_SHADOW_UNIFORMS;
 
 typedef struct SSAO_UNIFORMS {
     Uint32 width, height, ao_width, ao_height;
