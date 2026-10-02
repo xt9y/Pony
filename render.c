@@ -2551,7 +2551,8 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
 
     if (!count) return true;
 
-    const uint32_t target_samples = fmaxf(1.0f, floorf((float)DYNAMIC_SURFACE_SAMPLES_PER_FRAME / (float)count));
+    const uint32_t target_samples =
+        DYNAMIC_SURFACE_SAMPLES_PER_FRAME / count ? DYNAMIC_SURFACE_SAMPLES_PER_FRAME / count : 1u;
 
     renderer->dynamic_lighting = calloc(count, sizeof(*renderer->dynamic_lighting));
     if (!renderer->dynamic_lighting) return false;
