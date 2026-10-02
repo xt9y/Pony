@@ -267,9 +267,12 @@ def main() -> None:
         "load_scene_model(&scene, &models[0], BASE_MODEL_PATH",
         "const char *path = argv[extra_start + i];",
         "load_scene_model(&scene, &models[i + 1], path,",
-        'strncmp(path, "dynamic:", 8u) == 0',
-        "state = DYNAMIC",
-        "object_set_transform(dynamic, moved)",
+        "OBJECT_STATE state = DYNAMIC",
+        'strncmp(path, "static:", 7u) == 0',
+        "DYNAMIC_Z_AMPLITUDE 1.0f",
+        "DYNAMIC_Z_PERIOD_SECONDS 4.0f",
+        "animated_dynamic_base_z + sinf(phase) * DYNAMIC_Z_AMPLITUDE",
+        "object_set_transform(animated, moved)",
         "scene_build_lightmap(&scene, LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE)",
         "scene_content_hash(&scene)",
         "bake_start(&renderer, &scene",
@@ -614,6 +617,22 @@ def main() -> None:
             raise AssertionError(f"matte dynamic/reference acceptance metric missing: {needle}")
 
     bake = text("bake.c")
+    render = text("render.c")
+
+    for needle in (
+        "seed.direct_pixels = black_pixel",
+        "cache_write(job->worker_path",
+    ):
+        if needle not in bake:
+            raise AssertionError(f"fast bake seed separated-direct regression missing: {needle}")
+
+    for needle in (
+        "if (!reuse_volume && !upload_bvh(renderer, &tree))",
+        "fallback volume-probe bake failed",
+    ):
+        if needle not in render:
+            raise AssertionError(f"legacy fallback probe prerequisites missing: {needle}")
+
     for needle in ("job->scene = &scene->static_geometry;", "job->visual = &scene->static_visual;", "job->layout = scene->lightmap;"):
         if needle not in bake:
             raise AssertionError(f"baker does not consume static-only scene: {needle}")
