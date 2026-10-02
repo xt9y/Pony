@@ -825,6 +825,34 @@ static bool bind_dynamic_surface_resources(RENDERER *r, NriCommandBuffer *cmd, c
            gpu_bind_uniform_data(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
 }
 
+static bool bind_dynamic_receiver_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *output,
+                                            const DYNAMIC_RECEIVER_UNIFORMS *uniforms) {
+    if (!r || !cmd || !source || !output || !uniforms || !r->dynamic_receiver_sample_buffer ||
+        !r->dynamic_static_node_buffer || !r->dynamic_static_triangle_buffer ||
+        !r->dynamic_object_node_buffer || !r->dynamic_object_triangle_buffer || !r->lightmap_sampler)
+        return false;
+
+    if (!gpu_transition_texture(r, cmd, source, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
+        !gpu_transition_texture(r, cmd, output, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER))
+        return false;
+
+    NriDescriptor *src[] = {
+        gpu_create_buffer_view(r, r->dynamic_receiver_sample_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(LMAP_SAMPLE)),
+        gpu_create_buffer_view(r, r->dynamic_static_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
+        gpu_create_buffer_view(r, r->dynamic_static_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
+        gpu_create_buffer_view(r, r->dynamic_object_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
+        gpu_create_buffer_view(r, r->dynamic_object_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
+        gpu_create_texture_view(r, source, NriTextureView_TEXTURE),
+        r->lightmap_sampler,
+    };
+
+    NriDescriptor *dst = gpu_create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
+
+    return gpu_bind_descriptor_set(r, cmd, r->dynamic_receiver_layout, NriBindPoint_COMPUTE, 0, src, 7) &&
+           gpu_bind_descriptor_set(r, cmd, r->dynamic_receiver_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
+           gpu_bind_uniform_data(r, cmd, r->dynamic_receiver_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
+}
+
 static bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
     return gpu_bind_uniform_data(r, cmd, r->line_layout, NriBindPoint_GRAPHICS, 1, data, size);
 }
@@ -1154,6 +1182,19 @@ static void release_dynamic_static_transport(RENDERER *r) {
     r->dynamic_static_triangle_count = 0u;
 }
 
+static void release_dynamic_receiver_cache(RENDERER *r) {
+    if (!r) return;
+
+    release_buffer(r, r->dynamic_receiver_sample_buffer);
+    release_texture(r, r->dynamic_receiver_texture);
+    release_texture(r, r->dynamic_receiver_scratch);
+
+    r->dynamic_receiver_sample_buffer = NULL;
+    r->dynamic_receiver_texture = NULL;
+    r->dynamic_receiver_scratch = NULL;
+    r->dynamic_receiver_ready = false;
+}
+
 static void release_reference_lighting(RENDERER *r) {
     if (!r) return;
 
@@ -1184,6 +1225,7 @@ static const DYNAMIC_LIGHTING_ALLOCATION *dynamic_lighting_find_const(const REND
 static void release_scene_resources(RENDERER *r) {
     if (!r || !r->gpu->device) return;
 
+    release_dynamic_receiver_cache(r);
     release_dynamic_lighting(r);
     release_dynamic_static_transport(r);
     release_reference_lighting(r);
@@ -2368,6 +2410,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
     free(r->vertices);
     free(r->draws);
     free(r->transmission_draws);
+    release_dynamic_receiver_cache(r);
     release_dynamic_lighting(r);
     release_dynamic_static_transport(r);
     release_reference_lighting(r);
