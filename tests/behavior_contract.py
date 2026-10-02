@@ -298,6 +298,11 @@ def main() -> None:
         if needle not in bvh:
             raise AssertionError(f"BVH surface identity implementation missing: {needle}")
 
+    lmap = text("lmap.c")
+    for needle in ("lmap_surface_uv(", "local_triangle * 6u", "back_face ? 3u : 0u", "barycentric[0]"):
+        if needle not in lmap:
+            raise AssertionError(f"object-local lighting-chart lookup missing: {needle}")
+
     for needle in (
         "reference_static_texture",
         "reference_lighting_enabled",

@@ -468,6 +468,7 @@ bool scene_compile(SCENE *scene) {
     geometry.vertices.buffer = calloc(mesh_vertex_count, sizeof(POINT));
     geometry.faces.buffer = calloc(mesh_face_count, sizeof(MESH_FACE));
     BVH_SURFACE_REF *surface_refs = calloc(mesh_face_count, sizeof(*surface_refs));
+    BVH_SURFACE_REF *static_surface_refs = NULL;
     visual.vertices = calloc(visual_vertex_count, sizeof(*visual.vertices));
     visual.materials = calloc(material_count, sizeof(*visual.materials));
     visual.textures = texture_count ? calloc(texture_count, sizeof(*visual.textures)) : NULL;
@@ -580,7 +581,7 @@ bool scene_compile(SCENE *scene) {
 
     if (!scene_extract_static(scene, &geometry, &visual, &static_geometry, &static_visual)) goto fail;
 
-    BVH_SURFACE_REF *static_surface_refs = calloc(static_geometry.faces.count, sizeof(*static_surface_refs));
+    static_surface_refs = calloc(static_geometry.faces.count, sizeof(*static_surface_refs));
     if (!static_surface_refs) goto fail;
 
     uint32_t static_triangle = 0u;
@@ -624,7 +625,10 @@ bool scene_compile(SCENE *scene) {
 fail:
     mesh_free(&geometry);
     gltf_free(&visual);
+    mesh_free(&static_geometry);
+    gltf_free(&static_visual);
     free(surface_refs);
+    free(static_surface_refs);
     return false;
 }
 

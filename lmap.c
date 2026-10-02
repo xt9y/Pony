@@ -319,6 +319,22 @@ static void vertex_normals(const MESH *m, VEC3 *normals) {
     for (size_t i = 0; i < m->vertices.count; ++i) normals[i] = v3_normalize(normals[i]);
 }
 
+bool lmap_surface_uv(const LIGHTMAP *lightmap, uint32_t local_triangle, const float barycentric[3], bool back_face, float *u, float *v) {
+    if (!lightmap || !lightmap->uvs || !barycentric) return false;
+
+    const uint64_t base = (uint64_t)local_triangle * 6u + (back_face ? 3u : 0u);
+    if (base + 2u > UINT32_MAX) return false;
+
+    const LMAP_UV *triangle = &lightmap->uvs[base];
+    const float w0 = barycentric[0];
+    const float w1 = barycentric[1];
+    const float w2 = barycentric[2];
+
+    if (u) *u = triangle[0].u * w0 + triangle[1].u * w1 + triangle[2].u * w2;
+    if (v) *v = triangle[0].v * w0 + triangle[1].v * w1 + triangle[2].v * w2;
+    return true;
+}
+
 void lmap_free(LIGHTMAP *lm) {
     if (!lm) return;
 

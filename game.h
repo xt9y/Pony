@@ -412,6 +412,7 @@ struct LIGHTMAP {
 };
 
 bool lmap_build(LIGHTMAP *lightmap, const MESH *mesh, uint32_t preferred_texels_per_unit, uint32_t max_size);
+bool lmap_surface_uv(const LIGHTMAP *lightmap, uint32_t local_triangle, const float barycentric[3], bool back_face, float *u, float *v);
 void lmap_free(LIGHTMAP *lightmap);
 
 typedef struct PROBE {
