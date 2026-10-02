@@ -475,6 +475,9 @@ def main() -> None:
         if needle not in bake:
             raise AssertionError(f"baker does not consume static-only scene: {needle}")
 
+    if "!scene->compiled || !scene->lightmap_valid" in bake:
+        raise AssertionError("dynamic motion must not block a static-only rebake")
+
     print("dustmite behavior contract: ok")
 
 
