@@ -573,6 +573,13 @@ struct RENDERER {
     NriBuffer *dynamic_static_uv_buffer;
     uint32_t dynamic_static_node_count;
     uint32_t dynamic_static_triangle_count;
+
+    /* Packed local-space DYNAMIC BLAS data; only instance transforms change per frame. */
+    NriBuffer *dynamic_object_node_buffer;
+    NriBuffer *dynamic_object_triangle_buffer;
+    uint32_t dynamic_object_node_count;
+    uint32_t dynamic_object_triangle_count;
+
     NriBuffer *lightmap_sample_buffer;
     NriBuffer *lightmap_full_sample_buffer;
     NriBuffer *lightmap_sparse_sample_buffer;
