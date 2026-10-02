@@ -2982,8 +2982,10 @@ static void log_dynamic_matte_reference_error(RENDERER *r, const DYNAMIC_LIGHTIN
                                               NriTexture *reference_texture) {
     if (!r || !allocation || !allocation->layout || !object || !reference_texture || !allocation->texture || !object->data) return;
 
-    if (allocation->transform_revision != object->transform_revision || allocation->lighting_revision != object->lighting_revision) {
-        SDL_Log("dynamic acceptance object %u: runtime cache is not current; comparison skipped", allocation->object_id);
+    if (allocation->transform_revision != object->transform_revision || allocation->lighting_revision != object->lighting_revision ||
+        allocation->scene_lighting_revision != r->scene->lighting_revision ||
+        allocation->sample_pass < DYNAMIC_SURFACE_CONVERGENCE_PASSES) {
+        SDL_Log("dynamic acceptance object %u: runtime cache is not fully current/converged; comparison skipped", allocation->object_id);
         return;
     }
 
