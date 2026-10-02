@@ -375,6 +375,17 @@ def main() -> None:
     if "if (!scene_compile(r->scene)) return false;" not in render:
         raise AssertionError("F2 reference mode must rebuild the full current scene before oracle baking")
 
+    for needle in (
+        "GPU_FRAME_QUEUE_DEPTH",
+        "DYNAMIC_TIMESTAMP_BASE",
+        'gpu_timestamp_log(r, timing_base, "dynamic surface cache")',
+        'gpu_timestamp_log(r, timing_base + 2u, "dynamic shadow map")',
+        "gpu_timestamp_begin(r, cmd, timing_base)",
+        "gpu_timestamp_end(r, cmd, timing_base + 2u)",
+    ):
+        if needle not in render + text("render_internal.h"):
+            raise AssertionError(f"dynamic GPU cost instrumentation missing: {needle}")
+
     dynamic_surface = text("shaders/dynamic_surface.hlsl")
     for needle in (
         "DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u",
