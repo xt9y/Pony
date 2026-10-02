@@ -83,5 +83,6 @@ NriTexture *upload_direct_lightmap(RENDERER *renderer, const CACHED_LIGHTMAP *ca
 NriBuffer *upload_probes(RENDERER *renderer, const PROBE_GRID *grid);
 NriBuffer *upload_beams(RENDERER *renderer, const BEAM_GRID *grid);
 bool download_lightmap(RENDERER *renderer, CACHED_LIGHTMAP *out);
+bool download_rgba16f_texture(RENDERER *renderer, NriTexture *texture, Uint32 width, Uint32 height, Uint8 **pixels);
 
 #endif
