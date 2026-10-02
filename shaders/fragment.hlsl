@@ -837,9 +837,8 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     }
 
     if (dynamic_flags.w > 5.5f && dynamic_flags.w < 6.5f) {
-        float negative = length(max(-dynamic_correction, 0.0f));
         float positive = length(max(dynamic_correction, 0.0f));
-        float3 correction_debug = saturate(float3(negative, positive, 0.0f) * 6.0f);
+        float3 correction_debug = saturate(float3(0.0f, positive, 0.0f) * 6.0f);
 
         output.hdr = float4(correction_debug, 1.0f);
         output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f, max(input.view_depth, 0.0f));
