@@ -161,6 +161,41 @@ def main() -> None:
         if field not in game:
             raise AssertionError(f"cache ABI field missing: {field}")
 
+    init = text("init.c")
+
+    for needle in (
+        "bool model_load(MODEL_ASSET *asset, const char *path)",
+        "bool scene_compile(SCENE *scene)",
+        "transform_position(object->transform",
+        "transform_normal(object->transform",
+        "material_texture_offset(&material, texture_offset)",
+        "texture.image += (int32_t)image_offset",
+        "bool scene_build_lightmap(SCENE *scene",
+        "uint64_t scene_content_hash(const SCENE *scene)",
+    ):
+        if needle not in init:
+            raise AssertionError(f"multi-model scene compilation missing: {needle}")
+
+    for needle in (
+        "MODEL_ASSET *models",
+        "model_load(&models[i], path)",
+        "scene_add_model(&scene, &models[i].model, STATIC, transform)",
+        "scene_build_lightmap(&scene, LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE)",
+        "scene_content_hash(&scene)",
+        "bake_start(&renderer, &scene",
+    ):
+        if needle not in text("main.c"):
+            raise AssertionError(f"multi-model main path missing: {needle}")
+
+    render = text("render.c")
+    if "renderer_build_scene(renderer, &scene->geometry, &scene->visual, scene->lightmap)" not in render:
+        raise AssertionError("renderer does not consume compiled multi-model scene")
+
+    bake = text("bake.c")
+    for needle in ("job->scene = &scene->geometry;", "job->visual = &scene->visual;", "job->layout = scene->lightmap;"):
+        if needle not in bake:
+            raise AssertionError(f"baker does not consume compiled multi-model scene: {needle}")
+
     print("dustmite behavior contract: ok")
 
 
