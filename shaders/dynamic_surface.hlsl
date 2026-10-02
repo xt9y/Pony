@@ -11,6 +11,7 @@
 static const float PI = 3.14159265358979323846f;
 static const uint INVALID_NODE = 0xffffffffu;
 static const uint DYNAMIC_RAYS_PER_SAMPLE = 8u;
+static const uint DYNAMIC_TRACE_INSTANCE_LIMIT = 8u;
 
 struct SurfaceSample {
     float4 position;
@@ -74,6 +75,11 @@ GPU_BIND_B(0, 2) cbuffer DynamicSurfaceData : register(b0, space2) {
     float4 sky_zenith;
     float4 sky_horizon;
     float4 trace_params;
+
+    uint4 dynamic_instance_data;
+    float4x4 dynamic_instance_inverse[DYNAMIC_TRACE_INSTANCE_LIMIT];
+    float4x4 dynamic_instance_normal[DYNAMIC_TRACE_INSTANCE_LIMIT];
+    uint4 dynamic_instance_meta[DYNAMIC_TRACE_INSTANCE_LIMIT];
 };
 
 uint hash_u32(uint x) {
@@ -231,14 +237,33 @@ bool static_closest(TraceRay ray, out uint triangle_index, out float3 barycentri
     return found;
 }
 
-bool self_closest(TraceRay world_ray, out uint triangle_index, out float hit_distance, out float3 world_normal, out float3 albedo, out float3 emissive) {
+bool instance_closest(TraceRay world_ray, uint instance_index, out uint triangle_index, out float hit_distance,
+                      out float3 world_normal, out float3 albedo, out float3 emissive) {
+    if (instance_index >= min(dynamic_instance_data.x, DYNAMIC_TRACE_INSTANCE_LIMIT)) {
+        triangle_index = INVALID_NODE;
+        hit_distance = world_ray.tmax;
+        world_normal = albedo = emissive = 0.0f;
+        return false;
+    }
+
+    uint4 meta = dynamic_instance_meta[instance_index];
+    if (meta.y == 0u || meta.w == 0u) {
+        triangle_index = INVALID_NODE;
+        hit_distance = world_ray.tmax;
+        world_normal = albedo = emissive = 0.0f;
+        return false;
+    }
+
     TraceRay ray;
-    ray.origin = mul(inverse_model, float4(world_ray.origin, 1.0f)).xyz;
+    ray.origin = mul(dynamic_instance_inverse[instance_index], float4(world_ray.origin, 1.0f)).xyz;
     ray.tmin = world_ray.tmin;
-    ray.direction = mul((float3x3)inverse_model, world_ray.direction);
+    ray.direction = mul((float3x3)dynamic_instance_inverse[instance_index], world_ray.direction);
     ray.tmax = world_ray.tmax;
 
-    uint node_index = 0u;
+    uint node_index = meta.x;
+    uint node_end = meta.x + meta.y;
+    uint triangle_begin = meta.z;
+    uint triangle_end = meta.z + meta.w;
     float closest = ray.tmax;
     bool found = false;
     triangle_index = INVALID_NODE;
@@ -247,7 +272,7 @@ bool self_closest(TraceRay world_ray, out uint triangle_index, out float hit_dis
     albedo = 0.0f;
     emissive = 0.0f;
 
-    while (node_index != INVALID_NODE) {
+    while (node_index != INVALID_NODE && node_index >= meta.x && node_index < node_end) {
         BvhNode node = SelfNodes[node_index];
 
         if (!trace_box(ray, node, closest)) {
@@ -258,6 +283,8 @@ bool self_closest(TraceRay world_ray, out uint triangle_index, out float hit_dis
         if (node.meta.w != 0u) {
             for (uint i = 0u; i < node.meta.w; ++i) {
                 uint candidate = node.meta.z + i;
+                if (candidate < triangle_begin || candidate >= triangle_end) continue;
+
                 BvhTriangle tri = SelfTriangles[candidate];
                 if (tri.normal.w >= 0.999f) continue;
 
@@ -267,7 +294,8 @@ bool self_closest(TraceRay world_ray, out uint triangle_index, out float hit_dis
                 closest = t;
                 triangle_index = candidate;
                 float3 local_normal = normalize(tri.normal.xyz);
-                float3 candidate_world_normal = normalize(mul((float3x3)normal_model, local_normal));
+                float3 candidate_world_normal =
+                    normalize(mul((float3x3)dynamic_instance_normal[instance_index], local_normal));
 
                 if (dot(candidate_world_normal, world_ray.direction) > 0.0f)
                     candidate_world_normal = -candidate_world_normal;
@@ -286,6 +314,57 @@ bool self_closest(TraceRay world_ray, out uint triangle_index, out float hit_dis
 
     hit_distance = closest;
     return found;
+}
+
+bool dynamic_closest(TraceRay world_ray, out uint instance_index, out uint triangle_index, out float hit_distance,
+                     out float3 world_normal, out float3 albedo, out float3 emissive) {
+    bool found = false;
+    float closest = world_ray.tmax;
+    instance_index = INVALID_NODE;
+    triangle_index = INVALID_NODE;
+    hit_distance = world_ray.tmax;
+    world_normal = albedo = emissive = 0.0f;
+
+    uint count = min(dynamic_instance_data.x, DYNAMIC_TRACE_INSTANCE_LIMIT);
+    [loop] for (uint i = 0u; i < count; ++i) {
+        uint candidate_triangle;
+        float candidate_distance;
+        float3 candidate_normal;
+        float3 candidate_albedo;
+        float3 candidate_emissive;
+
+        TraceRay candidate_ray = world_ray;
+        candidate_ray.tmax = closest;
+
+        if (!instance_closest(candidate_ray, i, candidate_triangle, candidate_distance, candidate_normal,
+                              candidate_albedo, candidate_emissive))
+            continue;
+
+        found = true;
+        closest = candidate_distance;
+        instance_index = i;
+        triangle_index = candidate_triangle;
+        world_normal = candidate_normal;
+        albedo = candidate_albedo;
+        emissive = candidate_emissive;
+    }
+
+    hit_distance = closest;
+    return found;
+}
+
+bool dynamic_any(TraceRay world_ray) {
+    uint instance_index;
+    uint triangle_index;
+    float hit_distance;
+    float3 normal;
+    float3 albedo;
+    float3 emissive;
+    return dynamic_closest(world_ray, instance_index, triangle_index, hit_distance, normal, albedo, emissive);
+}
+
+bool self_closest(TraceRay world_ray, out uint triangle_index, out float hit_distance, out float3 world_normal, out float3 albedo, out float3 emissive) {
+    return instance_closest(world_ray, dynamic_instance_data.y, triangle_index, hit_distance, world_normal, albedo, emissive);
 }
 
 bool self_any(TraceRay world_ray) {
@@ -324,7 +403,7 @@ float3 static_outgoing(uint triangle_index, float3 barycentric, bool back_face) 
         shadow.direction = sun;
         shadow.tmax = 1.0e20f;
 
-        if (self_any(shadow)) {
+        if (dynamic_any(shadow)) {
             float3 baked_sun = sun_color_visibility_floor.rgb * (sun_direction_intensity.w * n_dot_l * cached_sun_visibility);
             lighting = max(lighting - baked_sun, 0.0f);
         }
@@ -356,19 +435,21 @@ float3 trace_static_indirect(float3 position, float3 normal, uint sample_id) {
         float static_distance;
         bool hit_static = static_closest(ray, static_triangle, static_barycentric, static_back_face, static_distance);
 
-        uint self_triangle;
-        float self_distance;
-        float3 self_normal;
-        float3 self_albedo;
-        float3 self_emissive;
-        bool hit_self = self_closest(ray, self_triangle, self_distance, self_normal, self_albedo, self_emissive);
+        uint dynamic_instance;
+        uint dynamic_triangle;
+        float dynamic_distance;
+        float3 dynamic_normal;
+        float3 dynamic_albedo;
+        float3 dynamic_emissive;
+        bool hit_dynamic =
+            dynamic_closest(ray, dynamic_instance, dynamic_triangle, dynamic_distance, dynamic_normal, dynamic_albedo, dynamic_emissive);
 
-        if (hit_self && (!hit_static || self_distance < static_distance)) {
-            float3 hit_position = ray.origin + ray.direction * self_distance;
+        if (hit_dynamic && (!hit_static || dynamic_distance < static_distance)) {
+            float3 hit_position = ray.origin + ray.direction * dynamic_distance;
             uint secondary_seed = hash_u32(seed ^ 0x27d4eb2du);
-            float3 secondary_direction = cosine_hemisphere(self_normal, secondary_seed);
+            float3 secondary_direction = cosine_hemisphere(dynamic_normal, secondary_seed);
             TraceRay secondary;
-            secondary.origin = hit_position + self_normal * epsilon;
+            secondary.origin = hit_position + dynamic_normal * epsilon;
             secondary.tmin = epsilon;
             secondary.direction = secondary_direction;
             secondary.tmax = 1.0e20f;
@@ -383,15 +464,16 @@ float3 trace_static_indirect(float3 position, float3 normal, uint sample_id) {
 
             float3 sun = normalize(sun_direction_intensity.xyz);
             TraceRay sun_ray;
-            sun_ray.origin = hit_position + self_normal * epsilon;
+            sun_ray.origin = hit_position + dynamic_normal * epsilon;
             sun_ray.tmin = epsilon;
             sun_ray.direction = sun;
             sun_ray.tmax = 1.0e20f;
-            float self_sun_visibility = self_any(sun_ray) ? 0.0f : beam_visibility(hit_position);
-            float self_n_dot_l = saturate(dot(self_normal, sun));
-            float3 self_direct = sun_color_visibility_floor.rgb * (sun_direction_intensity.w * self_n_dot_l * self_sun_visibility);
+            float dynamic_sun_visibility = dynamic_any(sun_ray) ? 0.0f : beam_visibility(hit_position);
+            float dynamic_n_dot_l = saturate(dot(dynamic_normal, sun));
+            float3 dynamic_direct =
+                sun_color_visibility_floor.rgb * (sun_direction_intensity.w * dynamic_n_dot_l * dynamic_sun_visibility);
 
-            sum += self_albedo * max(secondary_indirect + self_direct, 0.0f) + self_emissive;
+            sum += dynamic_albedo * max(secondary_indirect + dynamic_direct, 0.0f) + dynamic_emissive;
         } else if (hit_static) {
             sum += static_outgoing(static_triangle, static_barycentric, static_back_face);
         } else {
