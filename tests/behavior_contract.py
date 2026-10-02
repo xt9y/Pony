@@ -368,6 +368,10 @@ def main() -> None:
     dynamic_surface = text("shaders/dynamic_surface.hlsl")
     for needle in (
         "DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u",
+        "model_surface_layout(struct MODEL *model, uint32_t target_samples)",
+        "model->surface_layout->sample_count <= target_samples",
+        "DYNAMIC_SURFACE_SAMPLES_PER_FRAME / count",
+        "dynamic_surface_target",
         "renderer_build_dynamic_static_transport(",
         "dynamic_static_node_buffer",
         "dynamic_static_surface_buffer",
