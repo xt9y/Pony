@@ -232,7 +232,7 @@ bool receiver_relevant(float3 position) {
          * with area*luminance / r^2. Contributions below the linear-light
          * floor are visually lost after the shared material/ACES path.
          */
-        float influence = sqrt(world_weight / max(PI * irradiance_floor, 1.0e-8f));
+        float influence = sqrt(world_weight / max(3.14159265358979323846f * irradiance_floor, 1.0e-8f));
         influence = max(influence, radius * 1.5f);
 
         if (distance_to_surface <= influence) return true;
