@@ -1620,6 +1620,17 @@ static bool render_dynamic_shadow_map(RENDERER *r, NriCommandBuffer *cmd, const 
 }
 
 static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATERIAL *material, const RENDER_FRAME *frame, const DRAW_RANGE *draw) {
+    float dynamic_cache_valid = 0.0f;
+
+    if (r && r->scene && draw && draw->object_id && r->reference_lighting_enabled) {
+        DYNAMIC_LIGHTING_ALLOCATION *allocation = dynamic_lighting_find((RENDERER *)r, draw->object_id);
+        const OBJECT *object = scene_object_by_id_const(r->scene, draw->object_id);
+
+        if (allocation && allocation->texture && object && allocation->transform_revision == object->transform_revision &&
+            allocation->lighting_revision == object->lighting_revision)
+            dynamic_cache_valid = 1.0f;
+    }
+
     MATERIAL_UNIFORMS result = (MATERIAL_UNIFORMS){
         .base_color_factor = {material->data.base_color[0], material->data.base_color[1], material->data.base_color[2], material->data.base_color[3]},
         .emissive_metallic = {material->data.emissive[0], material->data.emissive[1], material->data.emissive[2], material->data.metallic},
@@ -1639,7 +1650,7 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
         .shadow_texel_enabled = {r->dynamic_shadow_size ? 1.0f / (float)r->dynamic_shadow_size : 1.0f,
                                  r->dynamic_shadow_size ? 1.0f / (float)r->dynamic_shadow_size : 1.0f,
                                  r->dynamic_shadow_ready ? 1.0f : 0.0f, 0.0f},
-        .dynamic_flags = {draw && draw->object_id ? 1.0f : 0.0f, r->reference_lighting_enabled ? 1.0f : 0.0f, 0.0f, 0.0f},
+        .dynamic_flags = {draw && draw->object_id ? 1.0f : 0.0f, dynamic_cache_valid, r->reference_lighting_enabled ? 1.0f : 0.0f, 0.0f},
         .probe_origin_spacing = {r->volume_probes.origin.x, r->volume_probes.origin.y, r->volume_probes.origin.z, r->volume_probes.spacing},
         .probe_dims = {r->volume_probes.count_x, r->volume_probes.count_y, r->volume_probes.count_z, r->volume_probe_buffer ? 1u : 0u},
         .beam_origin = {r->beams.origin.x, r->beams.origin.y, r->beams.origin.z, 0.0f},
