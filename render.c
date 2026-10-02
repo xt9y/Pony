@@ -821,9 +821,8 @@ static bool bind_dynamic_surface_resources(RENDERER *r, NriCommandBuffer *cmd, c
            gpu_bind_uniform_data(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
 }
 
-static bool bind_dynamic_receiver_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *output,
-                                            const DYNAMIC_RECEIVER_UNIFORMS *uniforms) {
-    if (!r || !cmd || !source || !output || !uniforms || !r->dynamic_receiver_sample_buffer ||
+static bool bind_dynamic_receiver_sets(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *output) {
+    if (!r || !cmd || !source || !output || !r->dynamic_receiver_sample_buffer ||
         !r->dynamic_static_node_buffer || !r->dynamic_static_triangle_buffer ||
         !r->dynamic_object_node_buffer || !r->dynamic_object_triangle_buffer || !r->lightmap_sampler)
         return false;
@@ -845,7 +844,12 @@ static bool bind_dynamic_receiver_resources(RENDERER *r, NriCommandBuffer *cmd, 
     NriDescriptor *dst = gpu_create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
 
     return gpu_bind_descriptor_set(r, cmd, r->dynamic_receiver_layout, NriBindPoint_COMPUTE, 0, src, 7) &&
-           gpu_bind_descriptor_set(r, cmd, r->dynamic_receiver_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
+           gpu_bind_descriptor_set(r, cmd, r->dynamic_receiver_layout, NriBindPoint_COMPUTE, 1, &dst, 1);
+}
+
+static bool bind_dynamic_receiver_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *output,
+                                            const DYNAMIC_RECEIVER_UNIFORMS *uniforms) {
+    return uniforms && bind_dynamic_receiver_sets(r, cmd, source, output) &&
            gpu_bind_uniform_data(r, cmd, r->dynamic_receiver_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
 }
 
