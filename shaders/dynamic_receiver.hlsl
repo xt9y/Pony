@@ -54,6 +54,7 @@ GPU_BIND_B(0, 2) cbuffer DynamicReceiverData : register(b0, space2) {
     uint4 dynamic_instance_data;
     float4 receiver_params;
     float4 temporal_params;
+    float4x4 view_projection;
 
     float4x4 dynamic_instance_model[DYNAMIC_INSTANCE_LIMIT];
     float4x4 dynamic_instance_inverse[DYNAMIC_INSTANCE_LIMIT];
@@ -208,6 +209,13 @@ bool dynamic_any(TraceRay ray) {
 }
 
 bool receiver_relevant(float3 position) {
+    float4 clip = mul(view_projection, float4(position, 1.0f));
+    if (clip.w <= 1.0e-5f) return false;
+
+    float2 ndc = clip.xy / clip.w;
+    const float screen_margin = 1.25f;
+    if (abs(ndc.x) > screen_margin || abs(ndc.y) > screen_margin) return false;
+
     uint count = min(dynamic_instance_data.x, DYNAMIC_INSTANCE_LIMIT);
     const float irradiance_floor = max(receiver_params.y, 1.0e-5f);
 
