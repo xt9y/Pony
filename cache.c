@@ -7,7 +7,7 @@
 #include <string.h>
 
 #define DM_CACHE_MAGIC 0x4b424d44u
-#define DM_CACHE_VERSION 8u
+#define DM_CACHE_VERSION 9u
 #define DM_CACHE_MAX_DIMENSION 16384u
 #define DM_CACHE_BEAM_WIDTH 64u
 #define DM_CACHE_BEAM_HEIGHT 64u

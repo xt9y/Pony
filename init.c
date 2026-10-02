@@ -86,11 +86,24 @@ void model_free(MODEL_ASSET *asset) {
     memset(asset, 0, sizeof(*asset));
 }
 
-static void scene_invalidate_geometry(SCENE *scene) {
+static void revision_bump(uint32_t *revision) {
+    if (!revision) return;
+    ++*revision;
+    if (!*revision) *revision = 1u;
+}
+
+static void scene_invalidate_geometry(SCENE *scene, bool invalidates_static_bake) {
     if (!scene) return;
 
     scene->compiled = false;
-    scene->lightmap_valid = false;
+    revision_bump(&scene->geometry_revision);
+
+    if (invalidates_static_bake) scene->lightmap_valid = false;
+}
+
+static void scene_invalidate_lighting(SCENE *scene) {
+    if (!scene) return;
+    revision_bump(&scene->lighting_revision);
 }
 
 static OBJECT *scene_add_object(SCENE *scene, OBJECT_TYPE type, OBJECT_STATE state, TRANSFORM transform, void *data) {
@@ -110,7 +123,21 @@ static OBJECT *scene_add_object(SCENE *scene, OBJECT_TYPE type, OBJECT_STATE sta
     }
 
     OBJECT *object = &scene->objects[scene->object_count++];
-    *object = (OBJECT){.owner = scene, .state = state, .type = type, .transform = transform, .data = data, .revision = 1u};
+
+    ++scene->next_object_id;
+    if (!scene->next_object_id) ++scene->next_object_id;
+
+    *object = (OBJECT){
+        .owner = scene,
+        .id = scene->next_object_id,
+        .state = state,
+        .type = type,
+        .transform = transform,
+        .data = data,
+        .revision = 1u,
+        .transform_revision = 1u,
+        .lighting_revision = 1u,
+    };
 
     return object;
 }
@@ -122,29 +149,71 @@ TRANSFORM transform_identity(void) {
 OBJECT *scene_add_model(SCENE *scene, struct MODEL *model, OBJECT_STATE state, TRANSFORM transform) {
     OBJECT *object = scene_add_object(scene, MODEL, state, transform, model);
 
-    if (object) scene_invalidate_geometry(scene);
+    if (object) {
+        scene_invalidate_geometry(scene, state == STATIC);
+        scene_invalidate_lighting(scene);
+    }
 
     return object;
 }
 
 OBJECT *scene_add_light(SCENE *scene, struct LIGHT *light, OBJECT_STATE state, TRANSFORM transform) {
-    return scene_add_object(scene, LIGHT, state, transform, light);
+    OBJECT *object = scene_add_object(scene, LIGHT, state, transform, light);
+
+    if (object) scene_invalidate_lighting(scene);
+    return object;
+}
+
+OBJECT *scene_object_by_id(SCENE *scene, OBJECT_ID id) {
+    if (!scene || !id) return NULL;
+
+    for (uint32_t i = 0; i < scene->object_count; ++i)
+        if (scene->objects[i].id == id) return &scene->objects[i];
+
+    return NULL;
+}
+
+const OBJECT *scene_object_by_id_const(const SCENE *scene, OBJECT_ID id) {
+    if (!scene || !id) return NULL;
+
+    for (uint32_t i = 0; i < scene->object_count; ++i)
+        if (scene->objects[i].id == id) return &scene->objects[i];
+
+    return NULL;
 }
 
 void object_set_transform(OBJECT *object, TRANSFORM transform) {
     if (!object) return;
 
     object->transform = transform;
-    object_mark_dirty(object);
+    revision_bump(&object->revision);
+    revision_bump(&object->transform_revision);
+
+    if (object->type == MODEL) {
+        /*
+         * DYNAMIC transforms rebuild only the current CPU trace view. They do
+         * not invalidate the permanent static atlas/bake.
+         */
+        scene_invalidate_geometry(object->owner, object->state == STATIC);
+    }
+
+    object_mark_lighting_dirty(object);
+}
+
+void object_mark_lighting_dirty(OBJECT *object) {
+    if (!object) return;
+
+    revision_bump(&object->lighting_revision);
+    scene_invalidate_lighting(object->owner);
 }
 
 void object_mark_dirty(OBJECT *object) {
     if (!object) return;
 
-    ++object->revision;
+    revision_bump(&object->revision);
 
-    if (!object->revision) object->revision = 1u;
-    if (object->type == MODEL) scene_invalidate_geometry(object->owner);
+    if (object->type == MODEL) scene_invalidate_geometry(object->owner, object->state == STATIC);
+    object_mark_lighting_dirty(object);
 }
 
 static VEC3 rotate_vector(const float rotation[4], VEC3 value) {
@@ -238,6 +307,112 @@ static void scene_mesh_bounds(MESH *mesh) {
     mesh->bounds.extents = v3_scale(v3_sub(maximum, minimum), 0.5f);
 }
 
+static bool scene_extract_static(const SCENE *scene, const MESH *geometry, const GLTF_SCENE *visual, MESH *out_geometry, GLTF_SCENE *out_visual) {
+    if (!scene || !geometry || !visual || !out_geometry || !out_visual) return false;
+
+    size_t vertex_count = 0;
+    size_t face_count = 0;
+    size_t visual_vertex_count = 0;
+
+    for (uint32_t i = 0; i < scene->object_count; ++i) {
+        const OBJECT *object = &scene->objects[i];
+
+        if (object->state != STATIC || object->type != MODEL || !object->data) continue;
+
+        const struct MODEL *model = object->data;
+
+        if (!add_size(&vertex_count, model->geometry->vertices.count) || !add_size(&face_count, model->geometry->faces.count) ||
+            !add_size(&visual_vertex_count, model->visual->vertex_count))
+            return false;
+    }
+
+    if (!vertex_count || !face_count || !visual_vertex_count || vertex_count > UINT32_MAX || face_count > UINT32_MAX) return false;
+
+    MESH result_geometry = {
+        .vertices = {.count = vertex_count, .capacity = vertex_count, .type_size = sizeof(POINT)},
+        .faces = {.count = face_count, .capacity = face_count, .type_size = sizeof(MESH_FACE)},
+    };
+
+    GLTF_SCENE result_visual = {
+        .vertex_count = visual_vertex_count,
+        .vertex_capacity = visual_vertex_count,
+        .material_count = visual->material_count,
+        .texture_count = visual->texture_count,
+        .image_count = visual->image_count,
+        .default_material = visual->default_material,
+    };
+
+    result_geometry.vertices.buffer = calloc(vertex_count, sizeof(POINT));
+    result_geometry.faces.buffer = calloc(face_count, sizeof(MESH_FACE));
+    result_visual.vertices = calloc(visual_vertex_count, sizeof(*result_visual.vertices));
+    result_visual.materials = calloc(visual->material_count, sizeof(*result_visual.materials));
+    result_visual.textures = visual->texture_count ? calloc(visual->texture_count, sizeof(*result_visual.textures)) : NULL;
+    result_visual.images = visual->image_count ? calloc(visual->image_count, sizeof(*result_visual.images)) : NULL;
+
+    if (!result_geometry.vertices.buffer || !result_geometry.faces.buffer || !result_visual.vertices || !result_visual.materials ||
+        (visual->texture_count && !result_visual.textures) || (visual->image_count && !result_visual.images))
+        goto fail;
+
+    memcpy(result_visual.materials, visual->materials, (size_t)visual->material_count * sizeof(*result_visual.materials));
+    if (visual->texture_count)
+        memcpy(result_visual.textures, visual->textures, (size_t)visual->texture_count * sizeof(*result_visual.textures));
+    if (visual->image_count)
+        memcpy(result_visual.images, visual->images, (size_t)visual->image_count * sizeof(*result_visual.images));
+
+    POINT *dst_points = result_geometry.vertices.buffer;
+    MESH_FACE *dst_faces = result_geometry.faces.buffer;
+    size_t vertex_offset = 0;
+    size_t face_offset = 0;
+    size_t visual_offset = 0;
+    const POINT *src_points = geometry->vertices.buffer;
+    const MESH_FACE *src_faces = geometry->faces.buffer;
+
+    for (uint32_t i = 0; i < scene->object_count; ++i) {
+        const OBJECT *object = &scene->objects[i];
+
+        if (object->state != STATIC || object->type != MODEL || !object->data) continue;
+
+        const struct MODEL *model = object->data;
+        const size_t object_vertices = model->geometry->vertices.count;
+        const size_t object_faces = model->geometry->faces.count;
+        const size_t object_visual_vertices = model->visual->vertex_count;
+
+        memcpy(&dst_points[vertex_offset], &src_points[object->geometry_vertex_offset], object_vertices * sizeof(*dst_points));
+
+        for (size_t face = 0; face < object_faces; ++face) {
+            MESH_FACE copied = src_faces[object->geometry_face_offset + face];
+
+            for (uint32_t corner = 0; corner < 3u; ++corner) {
+                if (copied.indices[corner] < object->geometry_vertex_offset) goto fail;
+
+                const uint32_t local = copied.indices[corner] - object->geometry_vertex_offset;
+
+                if (local >= object_vertices || vertex_offset + local > UINT32_MAX) goto fail;
+                copied.indices[corner] = (uint32_t)vertex_offset + local;
+            }
+
+            dst_faces[face_offset + face] = copied;
+        }
+
+        memcpy(&result_visual.vertices[visual_offset], &visual->vertices[object->visual_vertex_offset],
+               object_visual_vertices * sizeof(*result_visual.vertices));
+
+        vertex_offset += object_vertices;
+        face_offset += object_faces;
+        visual_offset += object_visual_vertices;
+    }
+
+    scene_mesh_bounds(&result_geometry);
+    *out_geometry = result_geometry;
+    *out_visual = result_visual;
+    return true;
+
+fail:
+    mesh_free(&result_geometry);
+    gltf_free(&result_visual);
+    return false;
+}
+
 bool scene_compile(SCENE *scene) {
     if (!scene) return false;
     if (scene->compiled) return true;
@@ -306,9 +481,14 @@ bool scene_compile(SCENE *scene) {
     MESH_FACE *faces = geometry.faces.buffer;
 
     for (uint32_t object_index = 0; object_index < scene->object_count; ++object_index) {
-        const OBJECT *object = &scene->objects[object_index];
+        OBJECT *object = &scene->objects[object_index];
 
         if (object->type != MODEL || !object->data) continue;
+
+        object->geometry_vertex_offset = (uint32_t)mesh_vertex_offset;
+        object->geometry_face_offset = (uint32_t)mesh_face_offset;
+        object->visual_vertex_offset = (uint32_t)visual_vertex_offset;
+        object->material_offset = material_offset;
 
         const struct MODEL *model = object->data;
         const MESH *source_geometry = model->geometry;
@@ -382,10 +562,19 @@ bool scene_compile(SCENE *scene) {
 
     scene_mesh_bounds(&geometry);
 
+    MESH static_geometry = {0};
+    GLTF_SCENE static_visual = {0};
+
+    if (!scene_extract_static(scene, &geometry, &visual, &static_geometry, &static_visual)) goto fail;
+
     mesh_free(&scene->geometry);
     gltf_free(&scene->visual);
+    mesh_free(&scene->static_geometry);
+    gltf_free(&scene->static_visual);
     scene->geometry = geometry;
     scene->visual = visual;
+    scene->static_geometry = static_geometry;
+    scene->static_visual = static_visual;
     scene->compiled = true;
 
     return true;
@@ -399,7 +588,7 @@ fail:
 bool scene_build_lightmap(SCENE *scene, uint32_t preferred_texels_per_unit, uint32_t max_size) {
     if (!scene || !scene->lightmap || !scene_compile(scene)) return false;
 
-    scene->lightmap_valid = lmap_build(scene->lightmap, &scene->geometry, preferred_texels_per_unit, max_size);
+    scene->lightmap_valid = lmap_build(scene->lightmap, &scene->static_geometry, preferred_texels_per_unit, max_size);
     return scene->lightmap_valid;
 }
 
@@ -407,13 +596,13 @@ uint64_t scene_content_hash(const SCENE *scene) {
     if (!scene || !scene->compiled) return 0;
 
     uint64_t hash = 0;
-    hash = hash_bytes(hash, &scene->geometry.vertices.count, sizeof(scene->geometry.vertices.count));
-    hash = hash_bytes(hash, scene->geometry.vertices.buffer, scene->geometry.vertices.count * sizeof(POINT));
-    hash = hash_bytes(hash, &scene->geometry.faces.count, sizeof(scene->geometry.faces.count));
-    hash = hash_bytes(hash, scene->geometry.faces.buffer, scene->geometry.faces.count * sizeof(MESH_FACE));
+    hash = hash_bytes(hash, &scene->static_geometry.vertices.count, sizeof(scene->static_geometry.vertices.count));
+    hash = hash_bytes(hash, scene->static_geometry.vertices.buffer, scene->static_geometry.vertices.count * sizeof(POINT));
+    hash = hash_bytes(hash, &scene->static_geometry.faces.count, sizeof(scene->static_geometry.faces.count));
+    hash = hash_bytes(hash, scene->static_geometry.faces.buffer, scene->static_geometry.faces.count * sizeof(MESH_FACE));
 
-    hash = hash_bytes(hash, &scene->visual.vertex_count, sizeof(scene->visual.vertex_count));
-    hash = hash_bytes(hash, scene->visual.vertices, scene->visual.vertex_count * sizeof(*scene->visual.vertices));
+    hash = hash_bytes(hash, &scene->static_visual.vertex_count, sizeof(scene->static_visual.vertex_count));
+    hash = hash_bytes(hash, scene->static_visual.vertices, scene->static_visual.vertex_count * sizeof(*scene->static_visual.vertices));
     hash = hash_bytes(hash, &scene->visual.material_count, sizeof(scene->visual.material_count));
     hash = hash_bytes(hash, scene->visual.materials, (size_t)scene->visual.material_count * sizeof(*scene->visual.materials));
     hash = hash_bytes(hash, &scene->visual.texture_count, sizeof(scene->visual.texture_count));
@@ -440,6 +629,8 @@ void scene_free(SCENE *scene) {
 
     mesh_free(&scene->geometry);
     gltf_free(&scene->visual);
+    mesh_free(&scene->static_geometry);
+    gltf_free(&scene->static_visual);
     free(scene->objects);
 
     scene->objects = NULL;

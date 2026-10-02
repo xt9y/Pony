@@ -2237,8 +2237,8 @@ bool bake_start(RENDERER *renderer, const SCENE *scene, const char *path, uint64
     if (!job) return false;
 
     job->renderer = renderer;
-    job->scene = &scene->geometry;
-    job->visual = &scene->visual;
+    job->scene = &scene->static_geometry;
+    job->visual = &scene->static_visual;
     job->layout = scene->lightmap;
     job->light = light;
     job->sky = scene->sky;

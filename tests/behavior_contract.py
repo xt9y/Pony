@@ -43,7 +43,7 @@ def main() -> None:
         "#defineBAKE_IDLE_SLEEP_MS2u",
         ".direction={0.38f,0.30f,0.32f}",
         ".color={1.00f,0.94f,0.84f}",
-        ".intensity=1.0f",
+        ".intensity=0.0f",
         ".angular_radius=0.00465f",
         ".zenith={0.22f,0.42f,0.78f}",
         ".horizon={0.68f,0.76f,0.88f}",
@@ -261,10 +261,18 @@ def main() -> None:
     if "renderer_build_scene(renderer, &scene->geometry, &scene->visual, scene->lightmap)" not in render:
         raise AssertionError("renderer does not consume compiled multi-model scene")
 
+    for needle in ("MESH static_geometry;", "GLTF_SCENE static_visual;", "OBJECT_ID id;", "transform_revision", "lighting_revision"):
+        if needle not in game:
+            raise AssertionError(f"dynamic-lighting scene contract missing: {needle}")
+
+    for needle in ("scene_extract_static(", "lmap_build(scene->lightmap, &scene->static_geometry", "object->state == STATIC"):
+        if needle not in init:
+            raise AssertionError(f"static/dynamic bake separation missing: {needle}")
+
     bake = text("bake.c")
-    for needle in ("job->scene = &scene->geometry;", "job->visual = &scene->visual;", "job->layout = scene->lightmap;"):
+    for needle in ("job->scene = &scene->static_geometry;", "job->visual = &scene->static_visual;", "job->layout = scene->lightmap;"):
         if needle not in bake:
-            raise AssertionError(f"baker does not consume compiled multi-model scene: {needle}")
+            raise AssertionError(f"baker does not consume static-only scene: {needle}")
 
     print("dustmite behavior contract: ok")
 

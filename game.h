@@ -11,6 +11,7 @@
 
 typedef struct RENDERER RENDERER;
 typedef struct LIGHTMAP LIGHTMAP;
+typedef uint64_t OBJECT_ID;
 
 typedef struct VEC3 {
     float x, y, z;
@@ -259,11 +260,22 @@ typedef struct PERIPHERAL_VISION {
 
 typedef struct OBJECT {
     struct SCENE *owner;
+    OBJECT_ID id;
     OBJECT_STATE state;
     OBJECT_TYPE type;
     TRANSFORM transform;
     void *data;
+
+    /* Stable identity and split invalidation domains. */
     uint32_t revision;
+    uint32_t transform_revision;
+    uint32_t lighting_revision;
+
+    /* Offsets into the compiled all-object resource tables. */
+    uint32_t geometry_vertex_offset;
+    uint32_t geometry_face_offset;
+    uint32_t visual_vertex_offset;
+    uint32_t material_offset;
 } OBJECT;
 
 typedef struct SCENE {
@@ -273,12 +285,22 @@ typedef struct SCENE {
     PERIPHERAL_VISION vision;
     LIGHTMAP *lightmap;
 
+    /*
+     * geometry/visual are the current all-object CPU trace/resource view.
+     * static_geometry/static_visual are the permanent bake view and never
+     * include DYNAMIC models.
+     */
     MESH geometry;
     GLTF_SCENE visual;
+    MESH static_geometry;
+    GLTF_SCENE static_visual;
 
     float radius;
+    OBJECT_ID next_object_id;
     uint32_t object_count;
     uint32_t object_capacity;
+    uint32_t geometry_revision;
+    uint32_t lighting_revision;
     bool compiled;
     bool lightmap_valid;
 } SCENE;
@@ -286,8 +308,11 @@ typedef struct SCENE {
 TRANSFORM transform_identity(void);
 OBJECT *scene_add_model(SCENE *scene, struct MODEL *model, OBJECT_STATE state, TRANSFORM transform);
 OBJECT *scene_add_light(SCENE *scene, struct LIGHT *light, OBJECT_STATE state, TRANSFORM transform);
+OBJECT *scene_object_by_id(SCENE *scene, OBJECT_ID id);
+const OBJECT *scene_object_by_id_const(const SCENE *scene, OBJECT_ID id);
 void object_set_transform(OBJECT *object, TRANSFORM transform);
 void object_mark_dirty(OBJECT *object);
+void object_mark_lighting_dirty(OBJECT *object);
 bool scene_compile(SCENE *scene);
 bool scene_build_lightmap(SCENE *scene, uint32_t preferred_texels_per_unit, uint32_t max_size);
 uint64_t scene_content_hash(const SCENE *scene);

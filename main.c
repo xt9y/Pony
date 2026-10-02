@@ -241,7 +241,7 @@ int main(int argc, char **argv) {
     const uint64_t scene_hash = scene_content_hash(&scene);
     uint64_t layout_hash = hash_bytes(0, &lightmap.width, sizeof(lightmap.width));
     layout_hash = hash_bytes(layout_hash, &lightmap.height, sizeof(lightmap.height));
-    layout_hash = hash_bytes(layout_hash, lightmap.uvs, scene.geometry.faces.count * 6u * sizeof(*lightmap.uvs));
+    layout_hash = hash_bytes(layout_hash, lightmap.uvs, scene.static_geometry.faces.count * 6u * sizeof(*lightmap.uvs));
 
     const uint32_t bake_settings[] = {
         LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE, 128u, 3u, 4u, 32u, 2u, 32u, 8u, 50u, 75u, 1u, 4u, 16u, 2u, 1u, 1u, 4u, 995u, 25u, 60u, 100u, 32u};

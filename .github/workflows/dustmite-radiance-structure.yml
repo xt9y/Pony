@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - dustmite-radiance-structure
+      - dustmite-dynamic-lighting
   workflow_dispatch:
 
 
