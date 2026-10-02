@@ -252,6 +252,17 @@ float3 sample_transmitted_scene(float2 uv, float roughness) {
     return result * 0.125f;
 }
 
+float3 visible_emissive(float3 emissive) {
+    const float knee = 4.0f;
+    const float white = 12.0f;
+
+    float luminance = dot(emissive, float3(0.2126f, 0.7152f, 0.0722f));
+    if (luminance <= knee) return emissive;
+
+    float mapped = knee + (white - knee) * (1.0f - exp(-(luminance - knee) / (white - knee)));
+    return emissive * (mapped / max(luminance, 1.0e-4f));
+}
+
 
 SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     SurfaceOutput output;
@@ -341,7 +352,8 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
         transmitted = scene * attenuation * base * transmission_weight * (1.0f - view_f);
     }
 
-    output.hdr = float4(max(diffuse + direct_specular + environment_specular + transmitted + emissive, 0.0f), base_sample.a * base_color_factor.a);
+    output.hdr = float4(max(diffuse + direct_specular + environment_specular + transmitted + visible_emissive(emissive), 0.0f),
+                        base_sample.a * base_color_factor.a);
     output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f, max(input.view_depth, 0.0f));
 
     return output;
