@@ -10,6 +10,7 @@
 #define BAKE_TARGET_SAMPLES 128u
 #define BAKE_MAX_BOUNCES 3u
 #define BAKE_BATCH_SAMPLES 8u
+#define LIGHTMAP_EMISSIVE_MAX_SAMPLES 32u
 #define BAKE_DILATION_PASSES 3u
 #define PHASE_CLEAR 0u
 #define PHASE_TRACE 1u
@@ -573,7 +574,8 @@ static BAKE_UNIFORMS bake_data(RENDERER *r, Uint32 phase, Uint32 iteration, Uint
         .bake_params = {r->bake_epsilon, 0.72f, sky.intensity, (float)r->lightmap_min_samples},
         .probe_origin_spacing = {r->lightmap_probe_origin.x, r->lightmap_probe_origin.y, r->lightmap_probe_origin.z, r->lightmap_probe_spacing},
         .probe_dims_mode = {r->lightmap_probe_count_x, r->lightmap_probe_count_y, r->lightmap_probe_count_z, 0u},
-        .emissive_data = {r->bvh_emissive_weight, (float)r->bvh_triangle_count, r->volumetrics.emissive_probe_intensity, 0.0f}};
+        .emissive_data = {r->bvh_emissive_weight, (float)r->bvh_triangle_count, r->volumetrics.emissive_probe_intensity,
+                          (float)LIGHTMAP_EMISSIVE_MAX_SAMPLES}};
 }
 
 static bool record_bake_pass(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *destination, Uint32 phase, Uint32 iteration, Uint32 item_count,
@@ -801,6 +803,8 @@ static bool bake_lightmap_once(RENDERER *r, const LIGHTMAP *lm) {
     const Uint32 pixels = r->lightmap_width * r->lightmap_height;
 
     SDL_Log("B: lightmap trace samples per pass: %u", BAKE_BATCH_SAMPLES);
+    if (r->bvh_emissive_weight > 0.0f)
+        SDL_Log("B: lightmap emissive mesh samples: %u per direct texel", LIGHTMAP_EMISSIVE_MAX_SAMPLES);
     bake_progress(r, "surface lightmap", 0u, r->bake_target_samples);
 
     NriCommandAllocator *allocator = NULL;
