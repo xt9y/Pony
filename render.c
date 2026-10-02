@@ -17,7 +17,7 @@
 #define DYNAMIC_TRACE_INSTANCE_LIMIT 8u
 #define DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u
 #define DYNAMIC_SURFACE_CONVERGENCE_PASSES 4u
-#define DYNAMIC_RECEIVER_DILATION_PASSES 3u
+#define DYNAMIC_RECEIVER_IRRADIANCE_FLOOR 0.00075f
 #define DYNAMIC_SHADOW_SIZE 2048u
 #define DYNAMIC_TIMESTAMP_BASE 8u
 #define DYNAMIC_TIMESTAMP_STRIDE 4u
@@ -2015,7 +2015,7 @@ static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd) {
     const uint32_t pixel_count = (uint32_t)pixel_count64;
     DYNAMIC_RECEIVER_UNIFORMS uniforms = {
         .dispatch_data = {3u, pixel_count, lightmap->width, lightmap->height},
-        .receiver_params = {fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f), 0.0f, 0.0f, 32.0f},
+        .receiver_params = {fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f), DYNAMIC_RECEIVER_IRRADIANCE_FLOOR, 0.0f, 32.0f},
     };
 
     (void)dynamic_receiver_instances(r, &uniforms);
@@ -2040,30 +2040,15 @@ static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd) {
     r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (lightmap->sample_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
 
     uniforms.dispatch_data[0] = 1u;
-    uniforms.dispatch_data[1] = pixel_count;
+    uniforms.dispatch_data[1] = lightmap->sample_count;
 
     if (!bind_dynamic_receiver_resources(r, cmd, r->dynamic_receiver_texture, r->dynamic_receiver_scratch, &uniforms)) return false;
     r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
-    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (pixel_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (lightmap->sample_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
 
-    NriTexture *source = r->dynamic_receiver_scratch;
-    NriTexture *destination = r->dynamic_receiver_texture;
-    uniforms.dispatch_data[0] = 2u;
-
-    for (uint32_t pass = 0u; pass < DYNAMIC_RECEIVER_DILATION_PASSES; ++pass) {
-        if (!bind_dynamic_receiver_resources(r, cmd, source, destination, &uniforms)) return false;
-        r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
-        r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (pixel_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
-
-        NriTexture *swap = source;
-        source = destination;
-        destination = swap;
-    }
-
-    if (source != r->dynamic_receiver_texture) {
-        SDL_SetError("dynamic receiver dilation did not finish in primary atlas");
-        return false;
-    }
+    NriTexture *swap = r->dynamic_receiver_texture;
+    r->dynamic_receiver_texture = r->dynamic_receiver_scratch;
+    r->dynamic_receiver_scratch = swap;
 
     if (!gpu_transition_texture(r, cmd, r->dynamic_receiver_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
                                 NriStageBits_FRAGMENT_SHADER))
