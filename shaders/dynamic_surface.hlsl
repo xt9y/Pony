@@ -440,10 +440,14 @@ float beam_visibility(float3 position) {
 [numthreads(64, 1, 1)]
 void dynamic_surface_cs(uint3 id : SV_DispatchThreadID) {
     if (trace_params.y > 0.5f) {
-        uint pixel_count = texture_width * texture_height;
-        if (id.x >= pixel_count) return;
+        if (id.x >= sample_count) return;
 
-        Output[uint2(id.x % texture_width, id.x / texture_width)] = 0.0f;
+        SurfaceSample clear_sample = Samples[sample_offset + id.x];
+        uint clear_pixel = asuint(clear_sample.position.w);
+        uint pixel_count = texture_width * texture_height;
+        if (clear_pixel >= pixel_count) return;
+
+        Output[uint2(clear_pixel % texture_width, clear_pixel / texture_width)] = 0.0f;
         return;
     }
 
