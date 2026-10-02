@@ -843,6 +843,15 @@ static void release_dynamic_lighting(RENDERER *r) {
     r->dynamic_lighting_count = 0u;
 }
 
+static void release_reference_lighting(RENDERER *r) {
+    if (!r) return;
+
+    release_texture(r, r->reference_static_texture);
+    r->reference_static_texture = NULL;
+    r->reference_geometry_revision = 0u;
+    r->reference_lighting_revision = 0u;
+}
+
 static DYNAMIC_LIGHTING_ALLOCATION *dynamic_lighting_find(RENDERER *r, OBJECT_ID object_id) {
     if (!r || !object_id) return NULL;
 
@@ -856,6 +865,7 @@ static void release_scene_resources(RENDERER *r) {
     if (!r || !r->gpu->device) return;
 
     release_dynamic_lighting(r);
+    release_reference_lighting(r);
 
     if (r->image_textures) {
         for (uint32_t i = 0; i < r->image_texture_count; ++i) release_texture(r, r->image_textures[i]);
@@ -1450,7 +1460,7 @@ static bool draw_surface_range(RENDERER *r, NriCommandBuffer *cmd, const RENDER_
     const RENDER_MATERIAL *material = &r->materials[draw->material];
     const MATERIAL_UNIFORMS uniforms = material_uniforms(r, material, frame);
     const CAMERA_UNIFORMS camera = camera_uniforms_for_draw(r, frame, draw);
-    NriTexture *lighting = r->lightmap_texture;
+    NriTexture *lighting = r->reference_lighting_enabled && r->reference_static_texture ? r->reference_static_texture : r->lightmap_texture;
 
     if (draw->object_id) {
         DYNAMIC_LIGHTING_ALLOCATION *allocation = dynamic_lighting_find(r, draw->object_id);
@@ -1586,6 +1596,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
     free(r->draws);
     free(r->transmission_draws);
     release_dynamic_lighting(r);
+    release_reference_lighting(r);
     free_probe_grid(&r->volume_probes);
     beam_free(&r->beams);
 
@@ -1931,6 +1942,175 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
     return renderer->dynamic_lighting_count == count;
 }
 
+static bool reference_world_layout(const LIGHTMAP *local, TRANSFORM transform, LIGHTMAP *world) {
+    if (!local || !world || !local->samples || !local->sample_count) return false;
+
+    *world = *local;
+    world->samples = malloc((size_t)local->sample_count * sizeof(*world->samples));
+
+    if (!world->samples) return false;
+
+    const MAT4 model = m4_transform(transform, false);
+    const MAT4 normal_model = m4_transform(transform, true);
+
+    for (uint32_t i = 0; i < local->sample_count; ++i) {
+        const LMAP_SAMPLE *source = &local->samples[i];
+        LMAP_SAMPLE *target = &world->samples[i];
+        const VEC3 position = m4_point(model, v3(source->position[0], source->position[1], source->position[2]));
+        VEC3 normal = m4_point(normal_model, v3(source->normal[0], source->normal[1], source->normal[2]));
+
+        normal = v3_normalize(normal);
+        *target = *source;
+        target->position[0] = position.x;
+        target->position[1] = position.y;
+        target->position[2] = position.z;
+        target->normal[0] = normal.x;
+        target->normal[1] = normal.y;
+        target->normal[2] = normal.z;
+    }
+
+    return true;
+}
+
+static bool reference_bake_surface(RENDERER *r, const BVH *tree, const LIGHTMAP *layout, NriTexture **out_texture) {
+    if (!r || !tree || !layout || !out_texture || !r->volume_probes.probes) return false;
+
+    NriTexture *base_texture = r->lightmap_texture;
+    const uint32_t base_width = r->lightmap_width;
+    const uint32_t base_height = r->lightmap_height;
+    const uint32_t base_sample_count = r->lightmap_sample_count;
+    const uint32_t base_trace_count = r->lightmap_trace_count;
+    const uint32_t base_target_samples = r->bake_target_samples;
+    const uint32_t base_min_samples = r->lightmap_min_samples;
+    const VEC3 base_probe_origin = r->lightmap_probe_origin;
+    const float base_probe_spacing = r->lightmap_probe_spacing;
+    const uint32_t base_probe_count_x = r->lightmap_probe_count_x;
+    const uint32_t base_probe_count_y = r->lightmap_probe_count_y;
+    const uint32_t base_probe_count_z = r->lightmap_probe_count_z;
+    const float base_epsilon = r->bake_epsilon;
+    const bool base_full_transport = r->bake_full_transport;
+
+    r->lightmap_texture = NULL;
+    r->bake_full_transport = true;
+
+    const bool good = bake_lightmap(r, tree, layout, &r->volume_probes);
+    NriTexture *candidate = r->lightmap_texture;
+
+    r->lightmap_texture = base_texture;
+    release_bake_resources(r);
+    r->lightmap_width = base_width;
+    r->lightmap_height = base_height;
+    r->lightmap_sample_count = base_sample_count;
+    r->lightmap_trace_count = base_trace_count;
+    r->bake_target_samples = base_target_samples;
+    r->lightmap_min_samples = base_min_samples;
+    r->lightmap_probe_origin = base_probe_origin;
+    r->lightmap_probe_spacing = base_probe_spacing;
+    r->lightmap_probe_count_x = base_probe_count_x;
+    r->lightmap_probe_count_y = base_probe_count_y;
+    r->lightmap_probe_count_z = base_probe_count_z;
+    r->bake_epsilon = base_epsilon;
+    r->bake_full_transport = base_full_transport;
+
+    if (!good || !candidate) {
+        release_texture(r, candidate);
+        return false;
+    }
+
+    *out_texture = candidate;
+    return true;
+}
+
+static bool renderer_update_reference_lighting(RENDERER *r, const struct LIGHT *light) {
+    if (!r || !r->reference_lighting_enabled) return true;
+    if (!r->scene || !light || light->type != LIGHT_DIRECTIONAL || !r->has_bake || !r->scene->lightmap) return false;
+
+    const SCENE *scene = r->scene;
+    bool current = r->reference_static_texture && r->reference_geometry_revision == scene->geometry_revision &&
+                   r->reference_lighting_revision == scene->lighting_revision;
+
+    for (uint32_t i = 0; current && i < r->dynamic_lighting_count; ++i) {
+        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        const OBJECT *object = scene_object_by_id_const(scene, allocation->object_id);
+
+        current = object && allocation->transform_revision == object->transform_revision && allocation->lighting_revision == object->lighting_revision;
+    }
+
+    if (current) return true;
+
+    r->sun = light->directional;
+    r->sun.direction = v3_normalize(r->sun.direction);
+    r->sky = scene->sky;
+    r->volumetrics = scene->volumetrics;
+
+    if (v3_len_sq(r->sun.direction) <= 0.0f) return false;
+
+    Uint64 started = SDL_GetPerformanceCounter();
+    BVH tree = {0};
+
+    if (!bvh_build(&tree, &scene->geometry, &scene->visual)) return false;
+
+    NriTexture *static_candidate = NULL;
+    NriTexture **dynamic_candidates = r->dynamic_lighting_count ? calloc(r->dynamic_lighting_count, sizeof(*dynamic_candidates)) : NULL;
+    bool good = !r->dynamic_lighting_count || dynamic_candidates != NULL;
+
+    if (good) good = reference_bake_surface(r, &tree, scene->lightmap, &static_candidate);
+
+    for (uint32_t i = 0; good && i < r->dynamic_lighting_count; ++i) {
+        DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        const OBJECT *object = scene_object_by_id_const(scene, allocation->object_id);
+
+        if (!object || object->type != MODEL || object->state != DYNAMIC || !object->data || !allocation->layout) {
+            good = false;
+            break;
+        }
+
+        LIGHTMAP world_layout = {0};
+
+        if (!reference_world_layout(allocation->layout, object->transform, &world_layout)) {
+            good = false;
+            break;
+        }
+
+        good = reference_bake_surface(r, &tree, &world_layout, &dynamic_candidates[i]);
+        free(world_layout.samples);
+    }
+
+    bvh_free(&tree);
+
+    if (!good) {
+        release_texture(r, static_candidate);
+
+        for (uint32_t i = 0; i < r->dynamic_lighting_count; ++i)
+            release_texture(r, dynamic_candidates ? dynamic_candidates[i] : NULL);
+
+        free(dynamic_candidates);
+        return false;
+    }
+
+    release_texture(r, r->reference_static_texture);
+    r->reference_static_texture = static_candidate;
+
+    for (uint32_t i = 0; i < r->dynamic_lighting_count; ++i) {
+        DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        const OBJECT *object = scene_object_by_id_const(scene, allocation->object_id);
+
+        release_texture(r, allocation->texture);
+        allocation->texture = dynamic_candidates[i];
+        allocation->transform_revision = object->transform_revision;
+        allocation->lighting_revision = object->lighting_revision;
+    }
+
+    free(dynamic_candidates);
+    r->reference_geometry_revision = scene->geometry_revision;
+    r->reference_lighting_revision = scene->lighting_revision;
+
+    SDL_Log("dynamic reference: rebuilt full-current-scene surface lighting in %.2f ms",
+            (double)(SDL_GetPerformanceCounter() - started) * 1000.0 / (double)SDL_GetPerformanceFrequency());
+
+    return true;
+}
+
 static bool renderer_build_scene(RENDERER *renderer, SCENE *scene, const LIGHTMAP *lightmap) {
     if (!renderer || !scene || !lightmap || !scene->static_visual.vertex_count || scene->static_visual.vertex_count % 3u ||
         scene->static_visual.vertex_count / 3u != scene->static_geometry.faces.count || !scene->visual.material_count || !lightmap->uvs) {
@@ -2097,6 +2277,10 @@ static void renderer_handle_event(RENDERER *renderer, const SDL_Event *event) {
 
     case SDL_EVENT_KEY_DOWN:
         if (!event->key.repeat && event->key.key == SDLK_TAB) renderer->show_debug = !renderer->show_debug;
+        if (!event->key.repeat && event->key.key == SDLK_F2) {
+            renderer->reference_lighting_enabled = !renderer->reference_lighting_enabled;
+            SDL_Log("dynamic reference lighting: %s", renderer->reference_lighting_enabled ? "enabled" : "disabled");
+        }
         if (!event->key.repeat && event->key.key == SDLK_F5) renderer->show_volume = !renderer->show_volume;
 
         if (!event->key.repeat && (event->key.key == SDLK_F1 || event->key.key == SDLK_F3 || event->key.key == SDLK_F4)) {
@@ -2232,6 +2416,10 @@ bool renderer_frame(RENDERER *renderer) {
     struct LIGHT *light = scene_directional_light(renderer->scene);
 
     if (!light) return false;
+    if (!renderer_update_reference_lighting(renderer, light)) {
+        SDL_SetError("dynamic reference lighting rebuild failed");
+        return false;
+    }
 
     return renderer_draw(renderer, light, &renderer->scene->sky, &renderer->scene->volumetrics, &renderer->scene->vision);
 }
