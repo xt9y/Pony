@@ -176,15 +176,18 @@ def main() -> None:
         if needle not in init:
             raise AssertionError(f"multi-model scene compilation missing: {needle}")
 
+    main = text("main.c")
     for needle in (
-        "MODEL_ASSET *models",
-        "model_load(&models[i], path)",
-        "scene_add_model(&scene, &models[i].model, STATIC, transform)",
+        '#define BASE_MODEL_PATH "hospital_hallway.glb"',
+        'strcmp(argv[i], "--") == 0',
+        "load_scene_model(&scene, &models[0], BASE_MODEL_PATH",
+        "const char *path = argv[extra_start + i];",
+        "load_scene_model(&scene, &models[i + 1], path",
         "scene_build_lightmap(&scene, LIGHTMAP_TEXELS_PER_UNIT, LIGHTMAP_MAX_SIZE)",
         "scene_content_hash(&scene)",
         "bake_start(&renderer, &scene",
     ):
-        if needle not in text("main.c"):
+        if needle not in main:
             raise AssertionError(f"multi-model main path missing: {needle}")
 
     render = text("render.c")
