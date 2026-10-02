@@ -9,6 +9,7 @@
 #define BAKE_IDLE_GRACE_MS 180u
 #define BAKE_IDLE_RENDER_MS 200u
 #define BAKE_IDLE_SLEEP_MS 2u
+#define BASE_MODEL_PATH "hospital_hallway.glb"
 
 static double elapsed_ms(Uint64 begin) {
     return (double)(SDL_GetPerformanceCounter() - begin) * 1000.0 / (double)SDL_GetPerformanceFrequency();
@@ -57,24 +58,48 @@ static void free_models(MODEL_ASSET *models, int count) {
     free(models);
 }
 
+static int extra_model_start(int argc, char **argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--") == 0) return i + 1;
+    }
+
+    return argc;
+}
+
+static bool load_scene_model(SCENE *scene, MODEL_ASSET *asset, const char *path, TRANSFORM transform, size_t *total_bin_size) {
+    if (!scene || !asset || !path) return false;
+    if (!model_load(asset, path)) return false;
+
+    if (!scene_add_model(scene, &asset->model, STATIC, transform)) {
+        SDL_SetError("could not add %s to scene", path);
+        return false;
+    }
+
+    if (total_bin_size) *total_bin_size += asset->document.bin_size;
+
+    return true;
+}
+
+
 int main(int argc, char **argv) {
-    const int model_count = argc > 1 ? argc - 1 : 1;
-    const char *first_model_path = argc > 1 ? argv[1] : "concrete_temple.glb";
-    const char *filename = strrchr(first_model_path, '/');
-    const char *windows_filename = strrchr(first_model_path, '\\');
+    const int extra_start = extra_model_start(argc, argv);
+    const int extra_model_count = argc - extra_start;
+    const int model_count = 1 + extra_model_count;
+    const char *filename = strrchr(BASE_MODEL_PATH, '/');
+    const char *windows_filename = strrchr(BASE_MODEL_PATH, '\\');
 
     if (windows_filename && (!filename || windows_filename > filename)) filename = windows_filename;
 
-    char *bake_path = bake_cache_path(first_model_path);
+    char *bake_path = bake_cache_path(BASE_MODEL_PATH);
 
     if (!bake_path) return 1;
 
     char title[512];
 
-    if (model_count == 1) {
-        snprintf(title, sizeof(title), "INIT | %s", filename ? filename + 1 : first_model_path);
+    if (!extra_model_count) {
+        snprintf(title, sizeof(title), "INIT | %s", filename ? filename + 1 : BASE_MODEL_PATH);
     } else {
-        snprintf(title, sizeof(title), "INIT | %d models", model_count);
+        snprintf(title, sizeof(title), "INIT | %s + %d", filename ? filename + 1 : BASE_MODEL_PATH, extra_model_count);
     }
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -124,22 +149,17 @@ int main(int argc, char **argv) {
     const char *startup_detail = NULL;
     size_t total_bin_size = 0;
 
-    for (int i = 0; i < model_count && !startup_stage; ++i) {
-        const char *path = argc > 1 ? argv[i + 1] : first_model_path;
+    if (!load_scene_model(&scene, &models[0], BASE_MODEL_PATH, transform_identity(), &total_bin_size)) {
+        startup_stage = "base model load";
+        startup_detail = SDL_GetError();
+    }
 
-        if (!model_load(&models[i], path)) {
-            startup_stage = "model load";
+    for (int i = 0; i < extra_model_count && !startup_stage; ++i) {
+        const char *path = argv[extra_start + i];
+
+        if (!load_scene_model(&scene, &models[i + 1], path, transform_identity(), &total_bin_size)) {
+            startup_stage = "extra model load";
             startup_detail = SDL_GetError();
-            break;
-        }
-
-        total_bin_size += models[i].document.bin_size;
-
-        TRANSFORM transform = transform_identity();
-
-        if (!scene_add_model(&scene, &models[i].model, STATIC, transform)) {
-            startup_stage = "scene composition";
-            break;
         }
     }
 
@@ -217,15 +237,16 @@ int main(int argc, char **argv) {
 
     SDL_SetWindowTitle(gpu.window, cached ? "READY" : "UNBAKED");
 
-    printf("Scene: %d model%s | %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n", model_count, model_count == 1 ? "" : "s", load_ms,
-           scene.geometry.vertices.count, scene.geometry.faces.count, (double)total_bin_size / (1024.0 * 1024.0));
+    printf("Scene: %s + %d extra model%s | %.2f ms load | %zu vertices | %zu triangles | %.2f MiB BIN\n", BASE_MODEL_PATH, extra_model_count,
+           extra_model_count == 1 ? "" : "s", load_ms, scene.geometry.vertices.count, scene.geometry.faces.count,
+           (double)total_bin_size / (1024.0 * 1024.0));
     printf("Visual: %zu vertices | %u materials | %u textures | %u images\n", scene.visual.vertex_count, scene.visual.material_count,
            scene.visual.texture_count, scene.visual.image_count);
     printf("Lightmap: %.2f ms atlas | %ux%u | %u charts | %.2f texels/unit | %u valid texels\n", atlas_ms, lightmap.width, lightmap.height,
            lightmap.chart_count, lightmap.texel_density, lightmap.sample_count);
     printf("Lighting: %s. Press B to rebake this scene in the renderer.\n", cached ? "loaded saved bake" : "unbaked fallback");
     printf("Runtime: PBR + sun beams + volume probes -> HDR -> bloom -> ACES + GPU LUT\n");
-    printf("LMB drag: orbit | wheel: zoom | B: rebake | F5: fog on/off | Tab: wireframe | F11: fullscreen | Esc: quit\n");
+    printf("Extra models: pass them after -- | LMB drag: orbit | wheel: zoom | B: rebake | F5: fog on/off | Tab: wireframe | F11: fullscreen | Esc: quit\n");
 
     bool running = true;
     Uint64 last_frame_print = SDL_GetTicks();
