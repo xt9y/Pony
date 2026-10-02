@@ -1981,10 +1981,11 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
     return true;
 }
 
-static uint32_t dynamic_influences(const RENDERER *r, MATERIAL_UNIFORMS *uniforms) {
+static uint32_t dynamic_influences(const RENDERER *r, MATERIAL_UNIFORMS *uniforms, OBJECT_ID current_object) {
     if (!r || !r->scene || !uniforms) return 0u;
 
     uint32_t count = 0u;
+    uint32_t current = UINT32_MAX;
 
     for (uint32_t i = 0; i < r->dynamic_lighting_count && count < DYNAMIC_INFLUENCE_LIMIT; ++i) {
         const DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
@@ -2028,10 +2029,13 @@ static uint32_t dynamic_influences(const RENDERER *r, MATERIAL_UNIFORMS *uniform
         uniforms->dynamic_influence_emissive[count][1] = allocation->average_emissive.y;
         uniforms->dynamic_influence_emissive[count][2] = allocation->average_emissive.z;
         uniforms->dynamic_influence_emissive[count][3] = 0.0f;
+
+        if (allocation->object_id == current_object) current = count;
         ++count;
     }
 
     uniforms->dynamic_influence_meta[0] = count;
+    uniforms->dynamic_influence_meta[1] = current;
     return count;
 }
 
@@ -2082,7 +2086,7 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
         .beam_dims = {r->beams.width, r->beams.height, r->beams.depth, r->beam_buffer ? 1u : 0u}};
 
     (void)dynamic_shadow_projection(r, frame, result.shadow_u_min, result.shadow_v_min, result.shadow_sun_max, result.shadow_extent_bias);
-    (void)dynamic_influences(r, &result);
+    (void)dynamic_influences(r, &result, draw ? draw->object_id : 0u);
     return result;
 }
 
