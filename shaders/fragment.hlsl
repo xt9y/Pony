@@ -396,12 +396,18 @@ float3 dynamic_receiver_sample(float2 uv) {
         float2 axis_weight = lerp(1.0f - fraction, fraction, float2(x, y));
         float weight = axis_weight.x * axis_weight.y;
         float4 sample = DynamicReceiver.Load(int3(pixel, 0));
-        float generation = (float)dynamic_influence_meta.w;
+        uint generation = dynamic_influence_meta.w;
+        uint stored = (uint)max(sample.a + 0.5f, 0.0f);
 
-        if (abs(sample.a - generation) > 0.25f) continue;
+        if (stored == 0u || stored > 1024u || generation == 0u || generation > 1024u) continue;
 
-        sum += max(sample.rgb, 0.0f) * weight;
-        weight_sum += weight;
+        uint age = generation >= stored ? generation - stored : generation + 1024u - stored;
+        if (age > 12u) continue;
+
+        float freshness = age <= 8u ? 1.0f : saturate(1.0f - (float)(age - 8u) / 5.0f);
+        float fresh_weight = weight * freshness;
+        sum += max(sample.rgb, 0.0f) * fresh_weight;
+        weight_sum += fresh_weight;
     }
 
     return weight_sum > 1.0e-6f ? sum / weight_sum : 0.0f;
