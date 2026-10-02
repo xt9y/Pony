@@ -50,6 +50,16 @@ bool gpu_create_compute_layout(RENDERER *renderer, NriPipelineLayout **out, cons
 bool gpu_timestamp_begin(RENDERER *renderer, NriCommandBuffer *command_buffer, uint32_t slot);
 bool gpu_timestamp_end(RENDERER *renderer, NriCommandBuffer *command_buffer, uint32_t slot);
 void gpu_timestamp_log(RENDERER *renderer, uint32_t slot, const char *label);
+NriShaderDesc gpu_load_shader(const char *entrypoint, const char *define, NriStageBits stage);
+void gpu_free_shader(NriShaderDesc *shader);
+bool gpu_texture_barrier(RENDERER *renderer, NriCommandBuffer *command_buffer, NriTexture *texture, NriAccessLayoutStage before,
+                         NriAccessLayoutStage after);
+bool gpu_ensure_swapchain(RENDERER *renderer, uint32_t width, uint32_t height);
+bool gpu_begin_render_frame(RENDERER *renderer, FRAME_CONTEXT **frame, NriCommandBuffer **command_buffer, NriTexture **swapchain_texture,
+                            uint32_t *swapchain_index);
+bool gpu_submit_render_frame(RENDERER *renderer, FRAME_CONTEXT *frame, NriCommandBuffer *command_buffer, uint32_t swapchain_index);
+void gpu_abort_render_frame(RENDERER *renderer, FRAME_CONTEXT *frame);
+NriDescriptor *gpu_swapchain_color_attachment(RENDERER *renderer, uint32_t swapchain_index);
 
 
 bool renderer_gpu_resources_init(RENDERER *renderer);
