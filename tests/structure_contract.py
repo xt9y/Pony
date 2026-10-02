@@ -64,6 +64,38 @@ def main() -> None:
         "void renderer_deinit(RENDERER *renderer);",
     )
 
+    forbid(
+        "gpu.h",
+        '#include "game.h"',
+        "RENDERER",
+        "FX_STATE",
+        "RENDER_VERTEX",
+        "DRAW_RANGE",
+        "RENDER_FRAME",
+        "PROBE_WAVEFRONT_SCRATCH",
+        "RENDER_MATERIAL",
+        "release_texture(",
+        "release_buffer(",
+    )
+    require(
+        "game.h",
+        '#include "gpu.h"',
+        "typedef struct PROBE_WAVEFRONT_SCRATCH PROBE_WAVEFRONT_SCRATCH;",
+        "typedef struct RENDER_MATERIAL RENDER_MATERIAL;",
+        "typedef struct FX_STATE",
+        "typedef struct RENDER_VERTEX",
+        "typedef struct DRAW_RANGE",
+        "typedef struct RENDER_FRAME",
+        "struct RENDERER",
+    )
+    require(
+        "render_internal.h",
+        '#include "game.h"',
+        "void release_texture(RENDERER *renderer, NriTexture *texture);",
+        "void release_buffer(RENDERER *renderer, NriBuffer *buffer);",
+    )
+    forbid("render_internal.h", '#include "gpu.h"')
+
     gpu_header = text("gpu.h")
     require(
         "gpu.h",
