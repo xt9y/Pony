@@ -401,6 +401,7 @@ typedef struct FX_STATE {
     NriDescriptor *sampler;
     NriDescriptor *depth_sampler;
     NriTexture *hdr;
+    NriTexture *scene_color;
     NriTexture *normal_depth;
     NriTexture *ao;
     NriTexture *bloom_a;
@@ -467,6 +468,7 @@ struct RENDERER {
 
     NriPipeline *sky_pipeline;
     NriPipeline *solid_pipeline;
+    NriPipeline *transmission_pipeline;
     NriPipeline *line_pipeline;
     NriPipeline *bake_pipeline;
     NriPipeline *lightmap_queue_reset_pipeline;
@@ -505,6 +507,7 @@ struct RENDERER {
 
     RENDER_MATERIAL *materials;
     uint32_t material_count;
+    bool has_transmission;
     DRAW_RANGE *draws;
     uint32_t draw_count;
 
