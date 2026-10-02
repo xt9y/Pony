@@ -2008,32 +2008,16 @@ static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd) {
         return false;
 
     const LIGHTMAP *lightmap = r->scene->lightmap;
-    const uint64_t pixel_count64 = (uint64_t)lightmap->width * lightmap->height;
 
-    if (!lightmap->samples || !lightmap->sample_count || !lightmap->width || !lightmap->height || pixel_count64 > UINT32_MAX) return false;
+    if (!lightmap->samples || !lightmap->sample_count || !lightmap->width || !lightmap->height) return false;
 
-    const uint32_t pixel_count = (uint32_t)pixel_count64;
+    const uint32_t generation = (uint32_t)(r->gpu->frame_index % 1024u) + 1u;
     DYNAMIC_RECEIVER_UNIFORMS uniforms = {
-        .dispatch_data = {3u, pixel_count, lightmap->width, lightmap->height},
-        .receiver_params = {fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f), DYNAMIC_RECEIVER_IRRADIANCE_FLOOR, 0.0f, 32.0f},
+        .dispatch_data = {0u, lightmap->sample_count, lightmap->width, lightmap->height},
+        .receiver_params = {fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f), DYNAMIC_RECEIVER_IRRADIANCE_FLOOR, 0.0f, (float)generation},
     };
 
     (void)dynamic_receiver_instances(r, &uniforms);
-
-    if (!bind_dynamic_receiver_resources(r, cmd, r->dynamic_receiver_scratch, r->dynamic_receiver_texture, &uniforms)) return false;
-    r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
-    r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (pixel_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
-
-    const NriAccessLayoutStage receiver_storage = {
-        .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
-        .layout = NriLayout_SHADER_RESOURCE_STORAGE,
-        .stages = NriStageBits_COMPUTE_SHADER,
-    };
-
-    if (!gpu_texture_barrier(r, cmd, r->dynamic_receiver_texture, receiver_storage, receiver_storage)) return false;
-
-    uniforms.dispatch_data[0] = 0u;
-    uniforms.dispatch_data[1] = lightmap->sample_count;
 
     if (!bind_dynamic_receiver_resources(r, cmd, r->dynamic_receiver_scratch, r->dynamic_receiver_texture, &uniforms)) return false;
     r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
@@ -2303,6 +2287,7 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
     (void)dynamic_shadow_projection(r, frame, result.shadow_u_min, result.shadow_v_min, result.shadow_sun_max, result.shadow_extent_bias);
     (void)dynamic_influences(r, &result, draw ? draw->object_id : 0u);
     result.dynamic_influence_meta[2] = r->dynamic_receiver_ready ? 1u : 0u;
+    result.dynamic_influence_meta[3] = (uint32_t)(r->gpu->frame_index % 1024u) + 1u;
     return result;
 }
 
