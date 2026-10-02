@@ -11,8 +11,7 @@
 static const uint INVALID_NODE = 0xffffffffu;
 static const uint PHASE_DIRECT = 0u;
 static const uint PHASE_FILTER = 1u;
-static const uint PHASE_DILATE = 2u;
-static const uint PHASE_CLEAR = 3u;
+static const uint PHASE_CLEAR = 2u;
 static const uint DYNAMIC_INSTANCE_LIMIT = 8u;
 static const uint EMISSIVE_SAMPLES = 32u;
 
@@ -210,13 +209,23 @@ bool dynamic_any(TraceRay ray) {
 
 bool receiver_relevant(float3 position) {
     uint count = min(dynamic_instance_data.x, DYNAMIC_INSTANCE_LIMIT);
+    const float irradiance_floor = max(receiver_params.y, 1.0e-5f);
 
     [loop] for (uint i = 0u; i < count; ++i) {
-        if (dynamic_instance_emissive[i].y <= (i == 0u ? 0.0f : dynamic_instance_emissive[i - 1u].y)) continue;
+        float previous = i == 0u ? 0.0f : dynamic_instance_emissive[i - 1u].y;
+        float world_weight = dynamic_instance_emissive[i].y - previous;
+        if (world_weight <= 0.0f) continue;
 
         float radius = max(dynamic_instance_center_radius[i].w, 1.0e-3f);
         float distance_to_surface = max(length(position - dynamic_instance_center_radius[i].xyz) - radius, 0.0f);
-        float influence = max(radius * 8.0f, 10.0f);
+
+        /*
+         * Conservative upper bound for an area emitter: irradiance falls
+         * with area*luminance / r^2. Contributions below the linear-light
+         * floor are visually lost after the shared material/ACES path.
+         */
+        float influence = sqrt(world_weight / max(PI * irradiance_floor, 1.0e-8f));
+        influence = max(influence, radius * 1.5f);
 
         if (distance_to_surface <= influence) return true;
     }
@@ -352,29 +361,6 @@ float4 filtered_pixel(int2 p) {
     return total > 0.0f ? float4(sum / total, alpha_sum / total) : center;
 }
 
-float4 dilated_pixel(int2 p) {
-    float4 center = source_pixel(p);
-    if (center.a != 0.0f) return center;
-
-    float3 sum = 0.0f;
-    float alpha_sum = 0.0f;
-    float count = 0.0f;
-
-    [unroll] for (int y = -1; y <= 1; ++y) {
-        [unroll] for (int x = -1; x <= 1; ++x) {
-            int2 q = clamp(p + int2(x, y), int2(0, 0), int2((int)dispatch_data.z - 1, (int)dispatch_data.w - 1));
-            float4 c = source_pixel(q);
-            if (c.a == 0.0f) continue;
-
-            sum += c.rgb;
-            alpha_sum += c.a;
-            count += 1.0f;
-        }
-    }
-
-    return count > 0.0f ? float4(sum / count, alpha_sum / count) : 0.0f;
-}
-
 [numthreads(64, 1, 1)]
 void dynamic_receiver_cs(uint3 id : SV_DispatchThreadID) {
     const uint phase = dispatch_data.x;
@@ -410,12 +396,15 @@ void dynamic_receiver_cs(uint3 id : SV_DispatchThreadID) {
         return;
     }
 
-    uint2 p = uint2(id.x % dispatch_data.z, id.x / dispatch_data.z);
+    if (phase == PHASE_FILTER) {
+        SurfaceSample sample = Samples[id.x];
+        uint pixel = asuint(sample.position.w);
+        uint pixel_count = dispatch_data.z * dispatch_data.w;
+        if (pixel >= pixel_count) return;
 
-    if (phase == PHASE_FILTER)
+        uint2 p = uint2(pixel % dispatch_data.z, pixel / dispatch_data.z);
         Output[p] = filtered_pixel(int2(p));
-    else
-        Output[p] = dilated_pixel(int2(p));
+    }
 }
 
 #endif
