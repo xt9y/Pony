@@ -586,6 +586,13 @@ struct RENDERER {
     NriBuffer *dynamic_receiver_sample_buffer;
     NriTexture *dynamic_receiver_texture;
     NriTexture *dynamic_receiver_scratch;
+    uint32_t *dynamic_receiver_grid_offsets;
+    uint32_t *dynamic_receiver_grid_marks;
+    uint32_t dynamic_receiver_grid_dims[3];
+    uint32_t dynamic_receiver_grid_cell_count;
+    uint32_t dynamic_receiver_grid_mark;
+    float dynamic_receiver_grid_min[3];
+    float dynamic_receiver_grid_cell_size;
     bool dynamic_receiver_ready;
 
     NriBuffer *lightmap_sample_buffer;
