@@ -49,12 +49,15 @@ GPU_BIND_T(2, 0) StructuredBuffer<BvhNode> Nodes : register(t2, space0);
 GPU_BIND_T(3, 0) StructuredBuffer<BvhTriangle> Triangles : register(t3, space0);
 GPU_BIND_T(4, 0) StructuredBuffer<StaticSurfaceRef> SurfaceRefs : register(t4, space0);
 GPU_BIND_T(5, 0) StructuredBuffer<float2> StaticUVs : register(t5, space0);
-GPU_BIND_T(6, 0) Texture2D<float4> StaticLightmap : register(t6, space0);
+GPU_BIND_T(6, 0) StructuredBuffer<BvhNode> SelfNodes : register(t6, space0);
+GPU_BIND_T(7, 0) StructuredBuffer<BvhTriangle> SelfTriangles : register(t7, space0);
+GPU_BIND_T(8, 0) Texture2D<float4> StaticLightmap : register(t8, space0);
 GPU_BIND_S(0, 0) SamplerState StaticLightmapSampler : register(s0, space0);
 GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
 
 GPU_BIND_B(0, 2) cbuffer DynamicSurfaceData : register(b0, space2) {
     float4x4 model;
+    float4x4 inverse_model;
     float4x4 normal_model;
 
     uint sample_offset;
@@ -185,13 +188,14 @@ bool trace_triangle(TraceRay ray, BvhTriangle tri, float max_t, out float hit_t,
     return true;
 }
 
-bool static_closest(TraceRay ray, out uint triangle_index, out float3 barycentric, out bool back_face) {
+bool static_closest(TraceRay ray, out uint triangle_index, out float3 barycentric, out bool back_face, out float hit_distance) {
     uint node_index = 0u;
     float closest = ray.tmax;
     bool found = false;
     triangle_index = INVALID_NODE;
     barycentric = 0.0f;
     back_face = false;
+    hit_distance = ray.tmax;
 
     while (node_index != INVALID_NODE) {
         BvhNode node = Nodes[node_index];
@@ -223,7 +227,74 @@ bool static_closest(TraceRay ray, out uint triangle_index, out float3 barycentri
         }
     }
 
+    hit_distance = closest;
     return found;
+}
+
+bool self_closest(TraceRay world_ray, out uint triangle_index, out float hit_distance, out float3 world_normal, out float3 albedo, out float3 emissive) {
+    TraceRay ray;
+    ray.origin = mul(inverse_model, float4(world_ray.origin, 1.0f)).xyz;
+    ray.tmin = world_ray.tmin;
+    ray.direction = mul((float3x3)inverse_model, world_ray.direction);
+    ray.tmax = world_ray.tmax;
+
+    uint node_index = 0u;
+    float closest = ray.tmax;
+    bool found = false;
+    triangle_index = INVALID_NODE;
+    hit_distance = world_ray.tmax;
+    world_normal = 0.0f;
+    albedo = 0.0f;
+    emissive = 0.0f;
+
+    while (node_index != INVALID_NODE) {
+        BvhNode node = SelfNodes[node_index];
+
+        if (!trace_box(ray, node, closest)) {
+            node_index = node.meta.y;
+            continue;
+        }
+
+        if (node.meta.w != 0u) {
+            for (uint i = 0u; i < node.meta.w; ++i) {
+                uint candidate = node.meta.z + i;
+                BvhTriangle tri = SelfTriangles[candidate];
+                if (tri.normal.w >= 0.999f) continue;
+
+                float t, u, v;
+                if (!trace_triangle(ray, tri, closest, t, u, v)) continue;
+
+                closest = t;
+                triangle_index = candidate;
+                float3 local_normal = normalize(tri.normal.xyz);
+                float3 candidate_world_normal = normalize(mul((float3x3)normal_model, local_normal));
+
+                if (dot(candidate_world_normal, world_ray.direction) > 0.0f)
+                    candidate_world_normal = -candidate_world_normal;
+
+                world_normal = candidate_world_normal;
+                albedo = max(float3(tri.a.w, tri.b.w, tri.c.w), 0.0f);
+                emissive = max(tri.emissive.rgb, 0.0f);
+                found = true;
+            }
+
+            node_index = node.meta.y;
+        } else {
+            node_index = node.meta.x;
+        }
+    }
+
+    hit_distance = closest;
+    return found;
+}
+
+bool self_any(TraceRay world_ray) {
+    uint triangle_index;
+    float hit_distance;
+    float3 normal;
+    float3 albedo;
+    float3 emissive;
+    return self_closest(world_ray, triangle_index, hit_distance, normal, albedo, emissive);
 }
 
 float2 static_lightmap_uv(uint triangle_index, float3 barycentric, bool back_face) {
@@ -254,14 +325,53 @@ float3 trace_static_indirect(float3 position, float3 normal, uint sample_id) {
         ray.direction = direction;
         ray.tmax = 1.0e20f;
 
-        uint triangle_index;
-        float3 barycentric;
-        bool back_face;
+        uint static_triangle;
+        float3 static_barycentric;
+        bool static_back_face;
+        float static_distance;
+        bool hit_static = static_closest(ray, static_triangle, static_barycentric, static_back_face, static_distance);
 
-        if (static_closest(ray, triangle_index, barycentric, back_face))
-            sum += static_outgoing(triangle_index, barycentric, back_face);
-        else
+        uint self_triangle;
+        float self_distance;
+        float3 self_normal;
+        float3 self_albedo;
+        float3 self_emissive;
+        bool hit_self = self_closest(ray, self_triangle, self_distance, self_normal, self_albedo, self_emissive);
+
+        if (hit_self && (!hit_static || self_distance < static_distance)) {
+            float3 hit_position = ray.origin + ray.direction * self_distance;
+            uint secondary_seed = hash_u32(seed ^ 0x27d4eb2du);
+            float3 secondary_direction = cosine_hemisphere(self_normal, secondary_seed);
+            TraceRay secondary;
+            secondary.origin = hit_position + self_normal * epsilon;
+            secondary.tmin = epsilon;
+            secondary.direction = secondary_direction;
+            secondary.tmax = 1.0e20f;
+
+            uint secondary_triangle;
+            float3 secondary_barycentric;
+            bool secondary_back_face;
+            float secondary_distance;
+            float3 secondary_indirect = static_closest(secondary, secondary_triangle, secondary_barycentric, secondary_back_face, secondary_distance)
+                                            ? static_outgoing(secondary_triangle, secondary_barycentric, secondary_back_face)
+                                            : sky_radiance(secondary_direction);
+
+            float3 sun = normalize(sun_direction_intensity.xyz);
+            TraceRay sun_ray;
+            sun_ray.origin = hit_position + self_normal * epsilon;
+            sun_ray.tmin = epsilon;
+            sun_ray.direction = sun;
+            sun_ray.tmax = 1.0e20f;
+            float self_sun_visibility = self_any(sun_ray) ? 0.0f : beam_visibility(hit_position);
+            float self_n_dot_l = saturate(dot(self_normal, sun));
+            float3 self_direct = sun_color_visibility_floor.rgb * (sun_direction_intensity.w * self_n_dot_l * self_sun_visibility);
+
+            sum += self_albedo * max(secondary_indirect + self_direct, 0.0f) + self_emissive;
+        } else if (hit_static) {
+            sum += static_outgoing(static_triangle, static_barycentric, static_back_face);
+        } else {
             sum += sky_radiance(direction);
+        }
     }
 
     return sum / (float)DYNAMIC_RAYS_PER_SAMPLE;
