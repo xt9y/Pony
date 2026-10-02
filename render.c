@@ -427,6 +427,7 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     uint32_t pending_transform_revision;
     uint32_t pending_lighting_revision;
     uint32_t sample_cursor;
+    bool cache_needs_clear;
 };
 
 typedef struct DYNAMIC_STATIC_SURFACE_GPU {
@@ -1805,9 +1806,11 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
             allocation->pending_transform_revision = object->transform_revision;
             allocation->pending_lighting_revision = object->lighting_revision;
             allocation->sample_cursor = 0u;
+            allocation->cache_needs_clear = true;
         }
 
-        if (allocation->transform_revision != object->transform_revision || allocation->lighting_revision != object->lighting_revision)
+        if (allocation->cache_needs_clear || allocation->sample_cursor < allocation->layout->sample_count ||
+            allocation->transform_revision != object->transform_revision || allocation->lighting_revision != object->lighting_revision)
             ++dirty_count;
     }
 
@@ -1819,57 +1822,83 @@ static bool update_dynamic_surface_caches(RENDERER *r, NriCommandBuffer *cmd, co
         const OBJECT *object = scene_object_by_id_const(r->scene, allocation->object_id);
 
         if (!object) return false;
-        if (allocation->transform_revision == object->transform_revision && allocation->lighting_revision == object->lighting_revision) continue;
 
         const uint32_t total = allocation->layout->sample_count;
+        if (!allocation->cache_needs_clear && allocation->sample_cursor >= total &&
+            allocation->transform_revision == object->transform_revision && allocation->lighting_revision == object->lighting_revision)
+            continue;
         if (allocation->sample_cursor > total) allocation->sample_cursor = 0u;
 
         uint32_t quota = (budget + dirty_left - 1u) / dirty_left;
         uint32_t remaining = total - allocation->sample_cursor;
         uint32_t count = remaining < quota ? remaining : quota;
 
-        if (count) {
-            const MAT4 model = m4_transform(object->transform, false);
-            const MAT4 inverse_model = m4_inverse_transform(object->transform);
-            const MAT4 normal_model = m4_transform(object->transform, true);
-            DYNAMIC_SURFACE_UNIFORMS uniforms = {
-                .sample_offset = allocation->sample_cursor,
-                .sample_count = count,
-                .texture_width = allocation->layout->width,
-                .texture_height = allocation->layout->height,
-                .beam_origin = {r->beams.origin.x, r->beams.origin.y, r->beams.origin.z, 0.0f},
-                .beam_step = {r->beams.step.x, r->beams.step.y, r->beams.step.z, 0.0f},
-                .beam_dims = {r->beams.width, r->beams.height, r->beams.depth, 1u},
-                .sun_direction_intensity = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, frame->sun.intensity},
-                .sun_color_visibility_floor = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, 1.0f / 1024.0f},
-                .sky_zenith = {frame->sky.zenith.x, frame->sky.zenith.y, frame->sky.zenith.z, frame->sky.intensity},
-                .sky_horizon = {frame->sky.horizon.x, frame->sky.horizon.y, frame->sky.horizon.z, 1.0f},
-                .trace_params = {fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f), 0.0f, 0.0f, 0.0f},
+        const MAT4 model = m4_transform(object->transform, false);
+        const MAT4 inverse_model = m4_inverse_transform(object->transform);
+        const MAT4 normal_model = m4_transform(object->transform, true);
+        DYNAMIC_SURFACE_UNIFORMS uniforms = {
+            .sample_offset = allocation->sample_cursor,
+            .sample_count = count,
+            .texture_width = allocation->layout->width,
+            .texture_height = allocation->layout->height,
+            .beam_origin = {r->beams.origin.x, r->beams.origin.y, r->beams.origin.z, 0.0f},
+            .beam_step = {r->beams.step.x, r->beams.step.y, r->beams.step.z, 0.0f},
+            .beam_dims = {r->beams.width, r->beams.height, r->beams.depth, 1u},
+            .sun_direction_intensity = {frame->sun.direction.x, frame->sun.direction.y, frame->sun.direction.z, frame->sun.intensity},
+            .sun_color_visibility_floor = {frame->sun.color.x, frame->sun.color.y, frame->sun.color.z, 1.0f / 1024.0f},
+            .sky_zenith = {frame->sky.zenith.x, frame->sky.zenith.y, frame->sky.zenith.z, frame->sky.intensity},
+            .sky_horizon = {frame->sky.horizon.x, frame->sky.horizon.y, frame->sky.horizon.z, 1.0f},
+            .trace_params = {fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f), 0.0f, 0.0f, 0.0f},
+        };
+
+        memcpy(uniforms.model, model.m, sizeof(uniforms.model));
+        memcpy(uniforms.inverse_model, inverse_model.m, sizeof(uniforms.inverse_model));
+        memcpy(uniforms.normal_model, normal_model.m, sizeof(uniforms.normal_model));
+
+        if (allocation->cache_needs_clear) {
+            DYNAMIC_SURFACE_UNIFORMS clear = uniforms;
+            const uint64_t pixel_count = (uint64_t)allocation->layout->width * allocation->layout->height;
+
+            if (!pixel_count || pixel_count > UINT32_MAX) return false;
+
+            clear.sample_offset = 0u;
+            clear.sample_count = (uint32_t)pixel_count;
+            clear.trace_params[1] = 1.0f;
+
+            if (!bind_dynamic_surface_resources(r, cmd, allocation, &clear)) return false;
+
+            r->gpu->core.CmdSetPipeline(cmd, r->dynamic_surface_pipeline);
+            r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (clear.sample_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
+
+            const NriAccessLayoutStage storage = {
+                .access = NriAccessBits_SHADER_RESOURCE_STORAGE,
+                .layout = NriLayout_SHADER_RESOURCE_STORAGE,
+                .stages = NriStageBits_COMPUTE_SHADER,
             };
 
-            memcpy(uniforms.model, model.m, sizeof(uniforms.model));
-            memcpy(uniforms.inverse_model, inverse_model.m, sizeof(uniforms.inverse_model));
-            memcpy(uniforms.normal_model, normal_model.m, sizeof(uniforms.normal_model));
+            if (!gpu_texture_barrier(r, cmd, allocation->texture, storage, storage)) return false;
+
+            allocation->cache_needs_clear = false;
+            allocation->transform_revision = object->transform_revision;
+            allocation->lighting_revision = object->lighting_revision;
+        }
+
+        if (count) {
+            uniforms.sample_offset = allocation->sample_cursor;
+            uniforms.sample_count = count;
 
             if (!bind_dynamic_surface_resources(r, cmd, allocation, &uniforms)) return false;
 
             r->gpu->core.CmdSetPipeline(cmd, r->dynamic_surface_pipeline);
             r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
 
-            if (!gpu_transition_texture(r, cmd, allocation->texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
-                                        NriStageBits_FRAGMENT_SHADER))
-                return false;
-
             allocation->sample_cursor += count;
             budget -= count;
         }
 
-        if (allocation->sample_cursor == total &&
-            allocation->pending_transform_revision == object->transform_revision &&
-            allocation->pending_lighting_revision == object->lighting_revision) {
-            allocation->transform_revision = object->transform_revision;
-            allocation->lighting_revision = object->lighting_revision;
-        }
+        if (!gpu_transition_texture(r, cmd, allocation->texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
+                                    NriStageBits_FRAGMENT_SHADER))
+            return false;
 
         --dirty_left;
     }
@@ -2630,6 +2659,7 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         allocation->pending_transform_revision = 0u;
         allocation->pending_lighting_revision = 0u;
         allocation->sample_cursor = 0u;
+        allocation->cache_needs_clear = true;
         allocation->texture =
             gpu_create_texture(renderer, NriFormat_RGBA16_SFLOAT,
                                NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE,
