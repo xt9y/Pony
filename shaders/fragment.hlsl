@@ -506,7 +506,7 @@ bool dynamic_proxy_reflection_hit(float3 origin, float3 direction, uint index, o
     if (hit_t <= 1.0e-4f) return false;
 
     float3 local_hit = local_origin + local_direction * hit_t;
-    float3 normalized_hit = local_hit / max(extents, 1.0e-5f.xxx);
+    float3 normalized_hit = local_hit / max(extents, float3(1.0e-5f, 1.0e-5f, 1.0e-5f));
     float3 absolute_hit = abs(normalized_hit);
 
     if (absolute_hit.x >= absolute_hit.y && absolute_hit.x >= absolute_hit.z)
