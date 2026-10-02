@@ -2020,7 +2020,7 @@ static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd) {
 
     (void)dynamic_receiver_instances(r, &uniforms);
 
-    if (!bind_dynamic_receiver_resources(r, cmd, r->default_white, r->dynamic_receiver_texture, &uniforms)) return false;
+    if (!bind_dynamic_receiver_resources(r, cmd, r->dynamic_receiver_scratch, r->dynamic_receiver_texture, &uniforms)) return false;
     r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
     r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (pixel_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
 
@@ -2035,7 +2035,7 @@ static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd) {
     uniforms.dispatch_data[0] = 0u;
     uniforms.dispatch_data[1] = lightmap->sample_count;
 
-    if (!bind_dynamic_receiver_resources(r, cmd, r->default_white, r->dynamic_receiver_texture, &uniforms)) return false;
+    if (!bind_dynamic_receiver_resources(r, cmd, r->dynamic_receiver_scratch, r->dynamic_receiver_texture, &uniforms)) return false;
     r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
     r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (lightmap->sample_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
 
