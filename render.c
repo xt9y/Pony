@@ -1363,8 +1363,9 @@ static bool fx_apply(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *swap, floa
 }
 
 static bool create_pipeline_layouts(RENDERER *r) {
-    return create_surface_layout(r) && create_line_layout(r) && create_sky_layout(r) && bake_gpu_layouts_init(r) && create_ssao_layout(r) &&
-           create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) && create_volume_compose_layout(r) && create_compose_layout(r);
+    return create_surface_layout(r) && create_dynamic_shadow_layout(r) && create_line_layout(r) && create_sky_layout(r) && bake_gpu_layouts_init(r) &&
+           create_ssao_layout(r) && create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) && create_volume_compose_layout(r) &&
+           create_compose_layout(r);
 }
 
 static void destroy_pipeline_layouts(RENDERER *r) {
@@ -1372,8 +1373,9 @@ static void destroy_pipeline_layouts(RENDERER *r) {
 
     bake_gpu_layouts_deinit(r);
 
-    NriPipelineLayout **layouts[] = {&r->surface_layout, &r->line_layout,           &r->sky_layout,    &r->ssao_layout, &r->bloom_layout, &r->grade_layout,
-                                     &r->volume_layout,  &r->volume_compose_layout, &r->compose_layout};
+    NriPipelineLayout **layouts[] = {&r->surface_layout, &r->dynamic_shadow_layout, &r->line_layout, &r->sky_layout, &r->ssao_layout,
+                                     &r->bloom_layout,   &r->grade_layout,          &r->volume_layout, &r->volume_compose_layout,
+                                     &r->compose_layout};
 
     for (uint32_t i = 0; i < sizeof(layouts) / sizeof(layouts[0]); ++i) {
         if (*layouts[i]) {
@@ -1407,14 +1409,17 @@ bool renderer_gpu_resources_init(RENDERER *r) {
 
     NriShaderDesc surface_vs = gpu_load_shader("surface_vs", "BUILD_SURFACE_VS", NriStageBits_VERTEX_SHADER);
     NriShaderDesc surface_ps = gpu_load_shader("surface_fs", "BUILD_SURFACE_FS", NriStageBits_FRAGMENT_SHADER);
+    NriShaderDesc dynamic_shadow_vs = gpu_load_shader("dynamic_shadow_vs", "BUILD_DYNAMIC_SHADOW_VS", NriStageBits_VERTEX_SHADER);
     NriShaderDesc line_vs = gpu_load_shader("wireframe_vs", "BUILD_WIREFRAME_VS", NriStageBits_VERTEX_SHADER);
     NriShaderDesc line_ps = gpu_load_shader("wireframe_fs", "BUILD_WIREFRAME_FS", NriStageBits_FRAGMENT_SHADER);
     NriShaderDesc sky_vs = gpu_load_shader("fullscreen_vs", "BUILD_FULLSCREEN_VS", NriStageBits_VERTEX_SHADER);
     NriShaderDesc sky_ps = gpu_load_shader("sky_fs", "BUILD_SKY_FS", NriStageBits_FRAGMENT_SHADER);
 
-    if (!surface_vs.bytecode || !surface_ps.bytecode || !line_vs.bytecode || !line_ps.bytecode || !sky_vs.bytecode || !sky_ps.bytecode) {
+    if (!surface_vs.bytecode || !surface_ps.bytecode || !dynamic_shadow_vs.bytecode || !line_vs.bytecode || !line_ps.bytecode || !sky_vs.bytecode ||
+        !sky_ps.bytecode) {
         gpu_free_shader(&surface_vs);
         gpu_free_shader(&surface_ps);
+        gpu_free_shader(&dynamic_shadow_vs);
         gpu_free_shader(&line_vs);
         gpu_free_shader(&line_ps);
         gpu_free_shader(&sky_vs);
@@ -1425,17 +1430,22 @@ bool renderer_gpu_resources_init(RENDERER *r) {
 
     r->solid_pipeline = make_surface_pipeline(r, &r->gpu->core, r->surface_layout, &surface_vs, &surface_ps, false);
     r->transmission_pipeline = make_surface_pipeline(r, &r->gpu->core, r->surface_layout, &surface_vs, &surface_ps, true);
+    r->dynamic_shadow_pipeline = make_dynamic_shadow_pipeline(r, r->dynamic_shadow_layout, &dynamic_shadow_vs);
     r->line_pipeline = make_line_pipeline(r, r->line_layout, &line_vs, &line_ps);
     r->sky_pipeline = make_sky_pipeline(r, r->sky_layout, &sky_vs, &sky_ps);
 
     gpu_free_shader(&surface_vs);
     gpu_free_shader(&surface_ps);
+    gpu_free_shader(&dynamic_shadow_vs);
     gpu_free_shader(&line_vs);
     gpu_free_shader(&line_ps);
     gpu_free_shader(&sky_vs);
     gpu_free_shader(&sky_ps);
 
-    if (!r->solid_pipeline || !r->transmission_pipeline || !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
+    r->dynamic_shadow_sampler = gpu_create_sampler(r, NriFilter_NEAREST, NriFilter_NEAREST, NriAddressMode_CLAMP_TO_EDGE);
+
+    if (!r->solid_pipeline || !r->transmission_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_shadow_sampler || !r->line_pipeline ||
+        !r->sky_pipeline || !fx_init(&r->fx, r)) {
         renderer_gpu_resources_deinit(r);
         return false;
     }
