@@ -252,12 +252,8 @@ bool gpu_init(GPU *gpu, const char *title, int width, int height);
 void gpu_deinit(GPU *gpu);
 
 bool upload_scene(RENDERER *renderer, const GLTF_SCENE *visual);
-bool upload_bvh(RENDERER *renderer, const BVH *tree);
 void release_texture(RENDERER *renderer, NriTexture *texture);
 void release_buffer(RENDERER *renderer, NriBuffer *buffer);
-void release_bake_resources(RENDERER *renderer);
 bool draw_frame(RENDERER *renderer, const RENDER_FRAME *frame);
-bool bake_worker_init(RENDERER *renderer);
-void bake_worker_deinit(RENDERER *renderer);
 
 #endif
