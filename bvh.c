@@ -13,6 +13,7 @@
 
 typedef struct BUILD_TRI {
     BVH_TRIANGLE gpu;
+    BVH_SURFACE_REF surface;
     VEC3 centroid;
     VEC3 min;
     VEC3 max;
@@ -413,7 +414,7 @@ static bool trace_box(TRACE_RAY ray, const BVH_NODE *node, float max_t) {
     return hi >= ray.tmin;
 }
 
-static bool trace_triangle(TRACE_RAY ray, const BVH_TRIANGLE *tri, float max_t, float *hit_t) {
+static bool trace_triangle(TRACE_RAY ray, const BVH_TRIANGLE *tri, float max_t, float *hit_t, float *hit_u, float *hit_v) {
 
     const VEC3 a = v3(tri->a[0], tri->a[1], tri->a[2]);
     const VEC3 e1 = v3_sub(v3(tri->b[0], tri->b[1], tri->b[2]), a);
@@ -439,6 +440,8 @@ static bool trace_triangle(TRACE_RAY ray, const BVH_TRIANGLE *tri, float max_t, 
     if (t <= ray.tmin || t >= fminf(ray.tmax, max_t)) return false;
 
     *hit_t = t;
+    if (hit_u) *hit_u = u;
+    if (hit_v) *hit_v = v;
     return true;
 }
 
@@ -466,7 +469,7 @@ bool trace_any(const BVH *tree, TRACE_RAY ray) {
 
                 float t;
 
-                if (trace_triangle(ray, triangle, ray.tmax, &t)) return true;
+                if (trace_triangle(ray, triangle, ray.tmax, &t, NULL, NULL)) return true;
             }
 
             node_index = node->meta[1];
@@ -504,9 +507,9 @@ bool trace_closest(const BVH *tree, TRACE_RAY ray, TRACE_HIT *hit) {
             for (uint32_t i = 0; i < node->meta[3]; ++i) {
                 const uint32_t triangle = node->meta[2] + i;
                 const BVH_TRIANGLE *tri = &tree->triangles[triangle];
-                float t;
+                float t, u, v;
 
-                if (bvh_triangle_transmissive(tri) || !trace_triangle(ray, tri, closest, &t)) continue;
+                if (bvh_triangle_transmissive(tri) || !trace_triangle(ray, tri, closest, &t, &u, &v)) continue;
 
                 closest = t;
                 VEC3 normal = v3_normalize(v3(tri->normal[0], tri->normal[1], tri->normal[2]));
@@ -516,7 +519,19 @@ bool trace_closest(const BVH *tree, TRACE_RAY ray, TRACE_HIT *hit) {
                 best.t = t;
                 best.normal = normal;
                 best.albedo = v3(fminf(fmaxf(tri->a[3], 0.0f), 1.0f), fminf(fmaxf(tri->b[3], 0.0f), 1.0f), fminf(fmaxf(tri->c[3], 0.0f), 1.0f));
+                best.emissive = v3(fmaxf(tri->emissive[0], 0.0f), fmaxf(tri->emissive[1], 0.0f), fmaxf(tri->emissive[2], 0.0f));
+                best.barycentric[0] = 1.0f - u - v;
+                best.barycentric[1] = u;
+                best.barycentric[2] = v;
                 best.triangle = triangle;
+
+                if (tree->surfaces) {
+                    best.source_triangle = tree->surfaces[triangle].source_triangle;
+                    best.material = tree->surfaces[triangle].material;
+                } else {
+                    best.source_triangle = triangle;
+                    best.material = UINT32_MAX;
+                }
 
                 found = true;
             }
@@ -532,10 +547,24 @@ bool trace_closest(const BVH *tree, TRACE_RAY ray, TRACE_HIT *hit) {
     return found;
 }
 
+bool bvh_hit_surface_uv(const BVH *tree, const GLTF_SCENE *visual, const TRACE_HIT *hit, float *u, float *v) {
+    if (!tree || !visual || !hit || hit->triangle >= tree->triangle_count || hit->source_triangle >= visual->vertex_count / 3u) return false;
+
+    const GLTF_VERTEX *vertices = &visual->vertices[hit->source_triangle * 3u];
+    const float w0 = hit->barycentric[0];
+    const float w1 = hit->barycentric[1];
+    const float w2 = hit->barycentric[2];
+
+    if (u) *u = vertices[0].u * w0 + vertices[1].u * w1 + vertices[2].u * w2;
+    if (v) *v = vertices[0].v * w0 + vertices[1].v * w1 + vertices[2].v * w2;
+    return true;
+}
+
 void bvh_free(BVH *tree) {
     if (!tree) return;
     free(tree->nodes);
     free(tree->triangles);
+    free(tree->surfaces);
     memset(tree, 0, sizeof(*tree));
 }
 
@@ -637,6 +666,10 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
                                       .c = {c.x, c.y, c.z, albedo.z},
                                       .normal = {n.x, n.y, n.z, transmission},
                                       .emissive = {emissive.x, emissive.y, emissive.z, 0.0f}};
+        build[i].surface = (BVH_SURFACE_REF){
+            .source_triangle = i,
+            .material = visual && i < visual->vertex_count / 3u ? visual->vertices[i * 3u].material : UINT32_MAX,
+        };
 
         build[i].centroid = v3_scale(v3_add(v3_add(a, b), c), 1.0f / 3.0f);
         build[i].min = v3(fminf(a.x, fminf(b.x, c.x)), fminf(a.y, fminf(b.y, c.y)), fminf(a.z, fminf(b.z, c.z)));
@@ -664,15 +697,19 @@ bool bvh_build(BVH *tree, const MESH *m, const GLTF_SCENE *visual) {
     }
 
     tree->triangles = malloc((size_t)count * sizeof(*tree->triangles));
+    tree->surfaces = malloc((size_t)count * sizeof(*tree->surfaces));
 
-    if (!tree->triangles) {
+    if (!tree->triangles || !tree->surfaces) {
         free(build);
         bvh_free(tree);
 
         return false;
     }
 
-    for (uint32_t i = 0; i < count; ++i) tree->triangles[i] = build[i].gpu;
+    for (uint32_t i = 0; i < count; ++i) {
+        tree->triangles[i] = build[i].gpu;
+        tree->surfaces[i] = build[i].surface;
+    }
     free(build);
 
     float emissive_weight = 0.0f;
