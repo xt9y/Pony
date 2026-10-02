@@ -532,10 +532,10 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
         baked += static_direct * sun_visibility;
     } else if (reference_mode < 0.5f && camera_position.w > 0.5f) {
         baked = max(baked + static_direct * (sun_visibility - cached_sun_visibility), 0.0f);
-
-        if (is_dynamic < 0.5f)
-            baked = max(baked + signed_dynamic_near_field(input.world_position, geometric_normal), 0.0f);
     }
+
+    if (reference_mode < 0.5f && camera_position.w > 0.5f)
+        baked = max(baked + signed_dynamic_near_field(input.world_position, geometric_normal), 0.0f);
 
     if (camera_position.w > 1.5f) {
         output.hdr = float4(baked, 1.0f);
