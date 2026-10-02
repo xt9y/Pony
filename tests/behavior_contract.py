@@ -86,8 +86,8 @@ def main() -> None:
         r'\{"([^"]+\.hlsl)",\s*"([^"]+)",\s*"([^"]+)",\s*(NULL|"[^"]+"),\s*"([^"]+)",\s*([01])\}',
         build,
     )
-    if len(jobs) != 27:
-        raise AssertionError(f"expected 27 frozen shader jobs, found {len(jobs)}")
+    if len(jobs) != 28:
+        raise AssertionError(f"expected 28 shader jobs, found {len(jobs)}")
 
     for path, entry, define, fallback, stage, wave in jobs:
         source = shader_source(path)
