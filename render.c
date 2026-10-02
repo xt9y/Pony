@@ -2685,6 +2685,8 @@ static bool renderer_update_reference_lighting(RENDERER *r, const struct LIGHT *
     if (!r || !r->reference_lighting_enabled) return true;
     if (!r->scene || !light || light->type != LIGHT_DIRECTIONAL || !r->has_bake || !r->scene->lightmap) return false;
 
+    if (!scene_compile(r->scene)) return false;
+
     const SCENE *scene = r->scene;
     bool current = r->reference_static_texture && r->reference_geometry_revision == scene->geometry_revision &&
                    r->reference_lighting_revision == scene->lighting_revision;
@@ -3076,11 +3078,10 @@ bool renderer_frame(RENDERER *renderer) {
     }
 
     /*
-     * A DYNAMIC transform dirties only the current CPU trace view. GPU vertices
-     * stay object-space and consume the live instance transform below.
+     * DYNAMIC rendering stays instance-local. Rebuilding the flattened CPU
+     * scene on every transform would turn motion into an O(scene) CPU cost.
+     * The full current scene is compiled only by F2 reference mode above.
      */
-    if (!scene_compile(renderer->scene)) return false;
-
     struct LIGHT *light = scene_directional_light(renderer->scene);
 
     if (!light) return false;
