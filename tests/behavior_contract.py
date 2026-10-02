@@ -461,6 +461,9 @@ def main() -> None:
         "model_lighting_summary(",
         "dynamic_influences(",
         "dynamic_influence_center_radius",
+        "dynamic_influence_axis_x",
+        "dynamic_influence_axis_y",
+        "dynamic_influence_axis_z",
         "dynamic_influence_diffuse",
         "dynamic_influence_emissive",
     ):
@@ -469,6 +472,8 @@ def main() -> None:
 
     for needle in (
         "signed_dynamic_near_field(",
+        "projected_area",
+        "surface_probe_irradiance(closest, object_normal)",
         "outgoing - baseline",
         "dynamic_flags.z > 0.5f",
         "baked + signed_dynamic_near_field(input.world_position, geometric_normal)",
