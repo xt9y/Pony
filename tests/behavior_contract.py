@@ -338,6 +338,27 @@ def main() -> None:
     if "baked_sample.a - visibility_floor" not in fragment:
         raise AssertionError("surface shader does not consume explicit sun visibility")
 
+    for needle in (
+        "StructuredBuffer<float> SurfaceBeams",
+        "StructuredBuffer<SurfaceProbe> SurfaceProbes",
+        "surface_probe_irradiance(",
+        "static_beam_visibility(",
+        "dynamic_cache_valid",
+        "surface_probe_irradiance(input.world_position, geometric_normal) / PI",
+        "cached_sun_visibility = static_beam_visibility(input.world_position)",
+        "sun_visibility = cached_sun_visibility * dynamic_visibility",
+    ):
+        if needle not in fragment:
+            raise AssertionError(f"dynamic baked-context fallback missing: {needle}")
+
+    for needle in (
+        "dynamic_lighting_find_const(",
+        "allocation->transform_revision == object->transform_revision",
+        "allocation->lighting_revision == object->lighting_revision",
+    ):
+        if needle not in render:
+            raise AssertionError(f"stale dynamic cache rejection missing: {needle}")
+
     cache = text("cache.c")
     for needle in ("DM_CACHE_VERSION 11u", "direct_pixels", "hash_bytes(hash, out->direct_pixels", "fwrite(data->direct_pixels"):
         if needle not in cache:
