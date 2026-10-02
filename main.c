@@ -206,13 +206,15 @@ int main(int argc, char **argv) {
     }
 
     OBJECT_ID animated_dynamic_id = 0u;
-    float animated_dynamic_base_z = 0.0f;
 
     for (uint32_t i = 0; i < scene.object_count; ++i) {
         if (scene.objects[i].type != MODEL || scene.objects[i].state != DYNAMIC) continue;
 
         animated_dynamic_id = scene.objects[i].id;
-        animated_dynamic_base_z = scene.objects[i].transform.position.z;
+
+        TRANSFORM animated_start = scene.objects[i].transform;
+        animated_start.position.z = 0.0f;
+        object_set_transform(&scene.objects[i], animated_start);
         break;
     }
 
@@ -301,7 +303,7 @@ int main(int argc, char **argv) {
            lightmap.chart_count, lightmap.texel_density, lightmap.sample_count);
     printf("Lighting: %s. Press B to rebake this scene in the renderer.\n", cached ? "loaded saved bake" : "unbaked fallback");
     printf("Runtime: PBR + sun beams + volume probes -> HDR -> bloom -> ACES + GPU LUT\n");
-    printf("Extra models are DYNAMIC by default; prefix static: to bake one permanently | first dynamic model auto-oscillates Z by +/-1 | arrows: move/offset first dynamic model | LMB drag: orbit | wheel: zoom | B: rebake | F2: reference lighting | F5: fog on/off | F6: cache validity | F7: signed correction | Tab: wireframe | F11: fullscreen | Esc: quit\n");
+    printf("Extra models are DYNAMIC by default; prefix static: to bake one permanently | first dynamic model auto-oscillates Z from -1 to +1 | left/right: move first dynamic model on X | LMB drag: orbit | wheel: zoom | B: rebake | F2: reference lighting | F5: fog on/off | F6: cache validity | F7: signed correction | Tab: wireframe | F11: fullscreen | Esc: quit\n");
 
     bool running = true;
     Uint64 last_frame_print = SDL_GetTicks();
@@ -344,15 +346,10 @@ int main(int argc, char **argv) {
                         moved.position.x -= 0.25f;
                     else if (event.key.key == SDLK_RIGHT)
                         moved.position.x += 0.25f;
-                    else if (event.key.key == SDLK_UP)
-                        animated_dynamic_base_z -= 0.25f;
-                    else if (event.key.key == SDLK_DOWN)
-                        animated_dynamic_base_z += 0.25f;
                     else
                         changed = false;
 
-                    if (changed && (event.key.key == SDLK_LEFT || event.key.key == SDLK_RIGHT))
-                        object_set_transform(dynamic, moved);
+                    if (changed) object_set_transform(dynamic, moved);
                 }
             }
 
@@ -372,7 +369,7 @@ int main(int argc, char **argv) {
                 if (animated && animated->state == DYNAMIC && animated->type == MODEL) {
                     const float seconds = (float)(now - dynamic_animation_start) * 0.001f;
                     const float phase = seconds * (6.28318530717958647692f / DYNAMIC_Z_PERIOD_SECONDS);
-                    const float z = animated_dynamic_base_z + sinf(phase) * DYNAMIC_Z_AMPLITUDE;
+                    const float z = sinf(phase) * DYNAMIC_Z_AMPLITUDE;
 
                     if (fabsf(animated->transform.position.z - z) > 1.0e-5f) {
                         TRANSFORM moved = animated->transform;
