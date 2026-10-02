@@ -403,7 +403,7 @@ def main() -> None:
     dynamic_surface = text("shaders/dynamic_surface.hlsl")
     dynamic_receiver = text("shaders/dynamic_receiver.hlsl")
     for needle in (
-        "DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u",
+        "DYNAMIC_SURFACE_SAMPLES_PER_FRAME 512u",
         "DYNAMIC_SURFACE_CONVERGENCE_PASSES 4u",
         "model_surface_layout(struct MODEL *model, uint32_t target_samples)",
         "lmap_build_density(",
@@ -534,7 +534,9 @@ def main() -> None:
         "DYNAMIC_RECEIVER_IRRADIANCE_FLOOR 0.00075f",
         "DYNAMIC_RECEIVER_GRID_TARGET_AXIS 48.0f",
         "DYNAMIC_RECEIVER_GRID_MAX_CELLS 262144u",
-        "DYNAMIC_RECEIVER_SAMPLE_BUDGET 12288u",
+        "dynamic_receiver_cell_visible(",
+        "DYNAMIC_SHADOW_SIZE 1024u",
+        "DYNAMIC_RECEIVER_SAMPLE_BUDGET 4096u",
         "renderer_build_dynamic_receiver_cache(",
         "dynamic_receiver_grid_index(",
         "dynamic_receiver_grid_offsets",
@@ -587,7 +589,7 @@ def main() -> None:
         "Texture2D<float4> DynamicReceiver",
         "dynamic_influence_meta.z != 0u",
         "dynamic_receiver_sample(",
-        "if (age > 12u) continue",
+        "if (age > 48u) continue",
         "freshness = age <= 8u",
         "baked + dynamic_correction",
     ):
