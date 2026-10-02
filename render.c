@@ -15,7 +15,6 @@
 #define DYNAMIC_LIGHTING_MAX_SIZE 4096u
 #define DYNAMIC_INFLUENCE_LIMIT 8u
 #define DYNAMIC_TRACE_INSTANCE_LIMIT 8u
-#define DYNAMIC_EMISSIVE_SAMPLES_PER_OBJECT 4u
 #define DYNAMIC_SURFACE_SAMPLES_PER_FRAME 2048u
 #define DYNAMIC_SURFACE_CONVERGENCE_PASSES 4u
 #define DYNAMIC_RECEIVER_DILATION_PASSES 3u
@@ -353,11 +352,6 @@ typedef struct MATERIAL_UNIFORMS {
     float dynamic_influence_axis_z[DYNAMIC_INFLUENCE_LIMIT][4];
     float dynamic_influence_diffuse[DYNAMIC_INFLUENCE_LIMIT][4];
     float dynamic_influence_emissive[DYNAMIC_INFLUENCE_LIMIT][4];
-
-    float dynamic_instance_inverse[DYNAMIC_INFLUENCE_LIMIT][16];
-    Uint32 dynamic_instance_meta[DYNAMIC_INFLUENCE_LIMIT][4];
-    float dynamic_emissive_sample_position[DYNAMIC_INFLUENCE_LIMIT * DYNAMIC_EMISSIVE_SAMPLES_PER_OBJECT][4];
-    float dynamic_emissive_sample_power[DYNAMIC_INFLUENCE_LIMIT * DYNAMIC_EMISSIVE_SAMPLES_PER_OBJECT][4];
 } MATERIAL_UNIFORMS;
 
 typedef struct DYNAMIC_SHADOW_UNIFORMS {
@@ -463,9 +457,6 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     VEC3 average_diffuse;
     VEC3 average_emissive;
     float emissive_weight;
-    uint32_t emissive_sample_count;
-    VEC3 emissive_sample_position[DYNAMIC_EMISSIVE_SAMPLES_PER_OBJECT];
-    VEC3 emissive_sample_power[DYNAMIC_EMISSIVE_SAMPLES_PER_OBJECT];
     uint32_t transform_revision;
     uint32_t lighting_revision;
     uint32_t scene_lighting_revision;
@@ -2232,7 +2223,6 @@ static uint32_t dynamic_influences(const RENDERER *r, MATERIAL_UNIFORMS *uniform
         if (!object || object->state != DYNAMIC || object->type != MODEL || allocation->local_radius <= 0.0f) continue;
 
         const MAT4 model = m4_transform(object->transform, false);
-        const MAT4 inverse = m4_inverse_transform(object->transform);
         const VEC3 center = m4_point(model, allocation->local_center);
         const VEC3 axis_x =
             v3(model.m[0] * allocation->local_extents.x, model.m[1] * allocation->local_extents.x, model.m[2] * allocation->local_extents.x);
@@ -2268,35 +2258,6 @@ static uint32_t dynamic_influences(const RENDERER *r, MATERIAL_UNIFORMS *uniform
         uniforms->dynamic_influence_emissive[count][1] = allocation->average_emissive.y;
         uniforms->dynamic_influence_emissive[count][2] = allocation->average_emissive.z;
         uniforms->dynamic_influence_emissive[count][3] = 0.0f;
-
-        memcpy(uniforms->dynamic_instance_inverse[count], inverse.m, sizeof(inverse.m));
-        uniforms->dynamic_instance_meta[count][0] = allocation->dynamic_node_offset;
-        uniforms->dynamic_instance_meta[count][1] = allocation->dynamic_node_count;
-        uniforms->dynamic_instance_meta[count][2] = allocation->dynamic_triangle_offset;
-        uniforms->dynamic_instance_meta[count][3] = allocation->dynamic_triangle_count;
-
-        const float scale_x = sqrtf(model.m[0] * model.m[0] + model.m[1] * model.m[1] + model.m[2] * model.m[2]);
-        const float scale_y = sqrtf(model.m[4] * model.m[4] + model.m[5] * model.m[5] + model.m[6] * model.m[6]);
-        const float scale_z = sqrtf(model.m[8] * model.m[8] + model.m[9] * model.m[9] + model.m[10] * model.m[10]);
-        const float area_scale = fmaxf((scale_x * scale_y + scale_x * scale_z + scale_y * scale_z) / 3.0f, 1.0e-6f);
-
-        for (uint32_t sample = 0u; sample < DYNAMIC_EMISSIVE_SAMPLES_PER_OBJECT; ++sample) {
-            const uint32_t index = count * DYNAMIC_EMISSIVE_SAMPLES_PER_OBJECT + sample;
-
-            if (sample < allocation->emissive_sample_count) {
-                const VEC3 position = m4_point(model, allocation->emissive_sample_position[sample]);
-                const VEC3 power = v3_scale(allocation->emissive_sample_power[sample], area_scale);
-
-                uniforms->dynamic_emissive_sample_position[index][0] = position.x;
-                uniforms->dynamic_emissive_sample_position[index][1] = position.y;
-                uniforms->dynamic_emissive_sample_position[index][2] = position.z;
-                uniforms->dynamic_emissive_sample_position[index][3] = 1.0f;
-                uniforms->dynamic_emissive_sample_power[index][0] = power.x;
-                uniforms->dynamic_emissive_sample_power[index][1] = power.y;
-                uniforms->dynamic_emissive_sample_power[index][2] = power.z;
-                uniforms->dynamic_emissive_sample_power[index][3] = 1.0f;
-            }
-        }
 
         if (allocation->object_id == current_object) current = count;
         ++count;
@@ -2938,44 +2899,6 @@ static void model_lighting_summary(const struct MODEL *model, VEC3 *diffuse, VEC
     if (emissive) *emissive = v3_scale(emissive_sum, 1.0f / (float)count);
 }
 
-static void dynamic_emissive_samples(const BVH *tree, DYNAMIC_LIGHTING_ALLOCATION *allocation) {
-    if (!allocation) return;
-
-    allocation->emissive_sample_count = 0u;
-    memset(allocation->emissive_sample_position, 0, sizeof(allocation->emissive_sample_position));
-    memset(allocation->emissive_sample_power, 0, sizeof(allocation->emissive_sample_power));
-
-    if (!tree || !tree->triangles || !tree->triangle_count || tree->emissive_weight <= 1.0e-8f) return;
-
-    for (uint32_t sample = 0u; sample < DYNAMIC_EMISSIVE_SAMPLES_PER_OBJECT; ++sample) {
-        const float target = tree->emissive_weight * ((float)sample + 0.5f) / (float)DYNAMIC_EMISSIVE_SAMPLES_PER_OBJECT;
-        const BVH_TRIANGLE *tri = NULL;
-
-        for (uint32_t triangle = 0u; triangle < tree->triangle_count; ++triangle) {
-            if (tree->triangles[triangle].emissive[3] >= target) {
-                tri = &tree->triangles[triangle];
-                break;
-            }
-        }
-
-        if (!tri) continue;
-
-        const VEC3 emission = v3(fmaxf(tri->emissive[0], 0.0f), fmaxf(tri->emissive[1], 0.0f), fmaxf(tri->emissive[2], 0.0f));
-        const float luminance = 0.2126f * emission.x + 0.7152f * emission.y + 0.0722f * emission.z;
-        if (luminance <= 1.0e-8f) continue;
-
-        const VEC3 a = v3(tri->a[0], tri->a[1], tri->a[2]);
-        const VEC3 b = v3(tri->b[0], tri->b[1], tri->b[2]);
-        const VEC3 c = v3(tri->c[0], tri->c[1], tri->c[2]);
-        const float estimator_area =
-            tree->emissive_weight / (luminance * (float)DYNAMIC_EMISSIVE_SAMPLES_PER_OBJECT);
-
-        allocation->emissive_sample_position[sample] = v3_scale(v3_add(v3_add(a, b), c), 1.0f / 3.0f);
-        allocation->emissive_sample_power[sample] = v3_scale(emission, estimator_area);
-        allocation->emissive_sample_count = sample + 1u;
-    }
-}
-
 static bool renderer_build_dynamic_static_transport(RENDERER *renderer, const SCENE *scene) {
     if (!renderer || !scene || !scene->lightmap || !scene->lightmap->uvs || !scene->static_geometry.faces.count ||
         !scene->static_surface_refs || scene->static_surface_ref_count != scene->static_geometry.faces.count)
@@ -3196,7 +3119,6 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
 
         if (good) {
             allocation->emissive_weight = tree.emissive_weight;
-            dynamic_emissive_samples(&tree, allocation);
             good = append_dynamic_bvh(&packed_nodes, &packed_node_count, &packed_triangles, &packed_triangle_count, &tree, allocation);
         }
 
