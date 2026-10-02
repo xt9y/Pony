@@ -427,6 +427,7 @@ typedef struct DRAW_RANGE {
     uint32_t first;
     uint32_t count;
     uint32_t material;
+    VEC3 center;
 } DRAW_RANGE;
 
 typedef struct RENDER_FRAME {
@@ -510,6 +511,8 @@ struct RENDERER {
     bool has_transmission;
     DRAW_RANGE *draws;
     uint32_t draw_count;
+    DRAW_RANGE *transmission_draws;
+    uint32_t transmission_draw_count;
 
     RENDER_VERTEX *vertices;
     uint32_t vertex_count;
