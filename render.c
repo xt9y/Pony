@@ -392,6 +392,7 @@ typedef struct DYNAMIC_RECEIVER_UNIFORMS {
     Uint32 dispatch_data[4];
     Uint32 dynamic_instance_data[4];
     float receiver_params[4];
+    float temporal_params[4];
 
     float dynamic_instance_model[DYNAMIC_TRACE_INSTANCE_LIMIT][16];
     float dynamic_instance_inverse[DYNAMIC_TRACE_INSTANCE_LIMIT][16];
@@ -457,6 +458,8 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     VEC3 average_diffuse;
     VEC3 average_emissive;
     float emissive_weight;
+    VEC3 receiver_previous_center;
+    bool receiver_previous_center_valid;
     uint32_t transform_revision;
     uint32_t lighting_revision;
     uint32_t scene_lighting_revision;
@@ -1936,14 +1939,16 @@ static uint32_t dynamic_trace_instances(const RENDERER *r, DYNAMIC_SURFACE_UNIFO
     return count;
 }
 
-static uint32_t dynamic_receiver_instances(const RENDERER *r, DYNAMIC_RECEIVER_UNIFORMS *uniforms) {
+static uint32_t dynamic_receiver_instances(RENDERER *r, DYNAMIC_RECEIVER_UNIFORMS *uniforms) {
     if (!r || !r->scene || !uniforms) return 0u;
 
     uint32_t count = 0u;
     float cumulative_weight = 0.0f;
+    float max_motion_ratio = 0.0f;
+    bool history_valid = true;
 
     for (uint32_t i = 0; i < r->dynamic_lighting_count && count < DYNAMIC_TRACE_INSTANCE_LIMIT; ++i) {
-        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
         const OBJECT *object = scene_object_by_id_const(r->scene, allocation->object_id);
 
         if (!object || object->state != DYNAMIC || object->type != MODEL ||
@@ -1987,11 +1992,27 @@ static uint32_t dynamic_receiver_instances(const RENDERER *r, DYNAMIC_RECEIVER_U
         uniforms->dynamic_instance_center_radius[count][2] = center.z;
         uniforms->dynamic_instance_center_radius[count][3] = radius;
 
+        if (world_weight > 0.0f) {
+            if (allocation->receiver_previous_center_valid) {
+                const float motion = sqrtf(v3_len_sq(v3_sub(center, allocation->receiver_previous_center)));
+                max_motion_ratio = fmaxf(max_motion_ratio, motion / radius);
+            } else {
+                history_valid = false;
+            }
+
+            allocation->receiver_previous_center = center;
+            allocation->receiver_previous_center_valid = true;
+        }
+
         ++count;
     }
 
     uniforms->dynamic_instance_data[0] = count;
     uniforms->receiver_params[2] = cumulative_weight;
+
+    float history_weight = history_valid ? 0.62f * fmaxf(1.0f - max_motion_ratio * 4.0f, 0.0f) : 0.0f;
+    uniforms->temporal_params[0] = fminf(fmaxf(history_weight, 0.0f), 0.62f);
+    uniforms->temporal_params[1] = max_motion_ratio;
     return count;
 }
 
@@ -2019,20 +2040,18 @@ static bool update_dynamic_receiver_cache(RENDERER *r, NriCommandBuffer *cmd) {
 
     (void)dynamic_receiver_instances(r, &uniforms);
 
-    if (!bind_dynamic_receiver_resources(r, cmd, r->dynamic_receiver_scratch, r->dynamic_receiver_texture, &uniforms)) return false;
+    if (uniforms.receiver_params[2] <= 0.0f) return true;
+
+    if (!bind_dynamic_receiver_resources(r, cmd, r->dynamic_receiver_texture, r->dynamic_receiver_scratch, &uniforms)) return false;
     r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
     r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (lightmap->sample_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
 
     uniforms.dispatch_data[0] = 1u;
     uniforms.dispatch_data[1] = lightmap->sample_count;
 
-    if (!bind_dynamic_receiver_resources(r, cmd, r->dynamic_receiver_texture, r->dynamic_receiver_scratch, &uniforms)) return false;
+    if (!bind_dynamic_receiver_resources(r, cmd, r->dynamic_receiver_scratch, r->dynamic_receiver_texture, &uniforms)) return false;
     r->gpu->core.CmdSetPipeline(cmd, r->dynamic_receiver_pipeline);
     r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){.workGroupNumX = (lightmap->sample_count + 63u) / 64u, .workGroupNumY = 1u, .workGroupNumZ = 1u});
-
-    NriTexture *swap = r->dynamic_receiver_texture;
-    r->dynamic_receiver_texture = r->dynamic_receiver_scratch;
-    r->dynamic_receiver_scratch = swap;
 
     if (!gpu_transition_texture(r, cmd, r->dynamic_receiver_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
                                 NriStageBits_FRAGMENT_SHADER))
