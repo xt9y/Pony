@@ -535,6 +535,7 @@ struct RENDERER {
     NriPipelineLayout *surface_layout;
     NriPipelineLayout *dynamic_shadow_layout;
     NriPipelineLayout *dynamic_surface_layout;
+    NriPipelineLayout *dynamic_receiver_layout;
     NriPipelineLayout *line_layout;
     NriPipelineLayout *sky_layout;
     NriPipelineLayout *bake_layout;
@@ -555,6 +556,7 @@ struct RENDERER {
     NriPipeline *transmission_pipeline;
     NriPipeline *dynamic_shadow_pipeline;
     NriPipeline *dynamic_surface_pipeline;
+    NriPipeline *dynamic_receiver_pipeline;
     NriPipeline *line_pipeline;
     NriPipeline *bake_pipeline;
     NriPipeline *lightmap_queue_reset_pipeline;
@@ -579,6 +581,12 @@ struct RENDERER {
     NriBuffer *dynamic_object_triangle_buffer;
     uint32_t dynamic_object_node_count;
     uint32_t dynamic_object_triangle_count;
+
+    /* Static receiver atlas updated from moving emissive geometry with the bake estimator. */
+    NriBuffer *dynamic_receiver_sample_buffer;
+    NriTexture *dynamic_receiver_texture;
+    NriTexture *dynamic_receiver_scratch;
+    bool dynamic_receiver_ready;
 
     NriBuffer *lightmap_sample_buffer;
     NriBuffer *lightmap_full_sample_buffer;
