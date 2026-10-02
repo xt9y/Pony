@@ -66,6 +66,9 @@ GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3) {
 
     uint4 dynamic_influence_meta;
     float4 dynamic_influence_center_radius[8];
+    float4 dynamic_influence_axis_x[8];
+    float4 dynamic_influence_axis_y[8];
+    float4 dynamic_influence_axis_z[8];
     float4 dynamic_influence_diffuse[8];
     float4 dynamic_influence_emissive[8];
 };
@@ -385,28 +388,51 @@ float3 signed_dynamic_near_field(float3 position, float3 normal) {
     [loop] for (uint i = 0u; i < count; ++i) {
         float3 center = dynamic_influence_center_radius[i].xyz;
         float radius = max(dynamic_influence_center_radius[i].w, 1.0e-3f);
-        float3 delta = center - position;
-        float distance2 = dot(delta, delta);
+        float3 axis_x = dynamic_influence_axis_x[i].xyz;
+        float3 axis_y = dynamic_influence_axis_y[i].xyz;
+        float3 axis_z = dynamic_influence_axis_z[i].xyz;
+        float3 from_center = position - center;
 
-        if (distance2 <= radius * radius * 1.0001f) continue;
+        float axis_x_len2 = max(dot(axis_x, axis_x), 1.0e-8f);
+        float axis_y_len2 = max(dot(axis_y, axis_y), 1.0e-8f);
+        float axis_z_len2 = max(dot(axis_z, axis_z), 1.0e-8f);
 
-        float distance = sqrt(distance2);
+        float3 closest = center;
+        closest += axis_x * clamp(dot(from_center, axis_x) / axis_x_len2, -1.0f, 1.0f);
+        closest += axis_y * clamp(dot(from_center, axis_y) / axis_y_len2, -1.0f, 1.0f);
+        closest += axis_z * clamp(dot(from_center, axis_z) / axis_z_len2, -1.0f, 1.0f);
+
+        float3 delta = closest - position;
+        float surface_distance = length(delta);
+        if (surface_distance <= 1.0e-4f) continue;
+
         float influence_distance = max(radius * 5.0f, 0.5f);
-        float surface_distance = max(distance - radius, 0.0f);
         if (surface_distance >= influence_distance) continue;
 
-        float3 direction = delta / distance;
+        float3 direction = delta / surface_distance;
         float receiver_cosine = saturate(dot(normal, direction));
         if (receiver_cosine <= 0.0f) continue;
 
-        float projected = saturate((radius * radius) / max(distance2, 1.0e-6f));
+        float extent_x = sqrt(axis_x_len2);
+        float extent_y = sqrt(axis_y_len2);
+        float extent_z = sqrt(axis_z_len2);
+        float3 box_x = axis_x / extent_x;
+        float3 box_y = axis_y / extent_y;
+        float3 box_z = axis_z / extent_z;
+        float projected_area =
+            4.0f * (extent_x * extent_y * abs(dot(direction, box_z)) +
+                    extent_x * extent_z * abs(dot(direction, box_y)) +
+                    extent_y * extent_z * abs(dot(direction, box_x)));
+        float projected_radius = sqrt(max(projected_area, 1.0e-8f) / PI);
+        float projected_distance = surface_distance + projected_radius;
+        float projected = saturate((projected_radius * projected_radius) / max(projected_distance * projected_distance, 1.0e-6f));
         float falloff = saturate(1.0f - surface_distance / influence_distance);
         float weight = receiver_cosine * projected * falloff * falloff;
         if (weight <= 1.0e-4f) continue;
 
         float3 object_normal = -direction;
-        float3 object_indirect = surface_probe_irradiance(center, object_normal) / PI;
-        float object_sun_visibility = static_beam_visibility(center);
+        float3 object_indirect = surface_probe_irradiance(closest, object_normal) / PI;
+        float object_sun_visibility = static_beam_visibility(closest);
         float object_n_dot_l = saturate(dot(object_normal, sun));
         float3 object_direct =
             sun_color.rgb * roughness_normal_ao_sun.w * object_n_dot_l * object_sun_visibility;
