@@ -96,6 +96,8 @@ for marker in (
     gpu, block = extract_braced(gpu, marker, True)
     moved.append(block)
 
+gpu = gpu.replace("static bool create_pipeline_layouts(RENDERER *r);\\n\\n", "")
+
 # Keep moved renderer functions in their original conceptual order.
 functions = (
     "static void free_probe_grid(",
