@@ -762,12 +762,12 @@ float3 direct_sun(float3 position, float3 normal, inout uint seed) {
 
     return sun_color_radius.rgb * (sun_direction_intensity.w * n_dot_l);
 }
-float3 direct_emissive(float3 position, float3 normal, inout uint seed) {
+float3 direct_emissive_target(float3 position, float3 normal, inout uint seed, float target01) {
     const float total_weight = emissive_data.x;
     const uint count = (uint)emissive_data.y;
     if (total_weight <= 0.0f || count == 0u) return 0.0f;
 
-    const float target = random01(seed) * total_weight;
+    const float target = saturate(target01) * total_weight;
     uint lo = 0u;
     uint hi = count;
     while (lo < hi) {
@@ -813,6 +813,17 @@ float3 direct_emissive(float3 position, float3 normal, inout uint seed) {
     emissive_scale = max(emissive_data.z, 0.0f);
 #endif
     return max(tri.emissive.rgb, 0.0f) * emissive_scale * (receiver_cosine * emitter_cosine / max(distance2 * pdf_area, 1.0e-8f));
+}
+
+float3 direct_emissive(float3 position, float3 normal, inout uint seed) {
+    return direct_emissive_target(position, normal, seed, random01(seed));
+}
+
+float3 direct_emissive_stratified(float3 position, float3 normal, inout uint seed, uint sample_index, uint sample_count) {
+    if (sample_count == 0u) return 0.0f;
+
+    const float target01 = ((float)sample_index + random01(seed)) / (float)sample_count;
+    return direct_emissive_target(position, normal, seed, target01);
 }
 
 float3 direct_lighting(float3 position, float3 normal, inout uint seed) {
@@ -941,19 +952,33 @@ float4 dilated_pixel(int2 p) {
         BakeSample sample = Samples[index];
         uint pixel = asuint(sample.position.w);
         float3 normal = normalize(sample.normal.xyz);
-        uint seed = hash_u32(pixel ^ 0x4f03d2b1u);
-        float3 a = direct_lighting(sample.position.xyz, normal, seed);
-        float3 b = direct_lighting(sample.position.xyz, normal, seed);
-        float3 c = direct_lighting(sample.position.xyz, normal, seed);
-        float3 d = direct_lighting(sample.position.xyz, normal, seed);
-        float3 sum = a + b + c + d;
-        uint count = 4u;
-        float3 mean = sum * 0.25f;
-        if (length(a - mean) + length(b - mean) + length(c - mean) + length(d - mean) > 0.02f) {
-            for (uint i = 0u; i < 12u; ++i) sum += direct_lighting(sample.position.xyz, normal, seed);
-            count = 16u;
+
+        uint sun_seed = hash_u32(pixel ^ 0x4f03d2b1u);
+        float3 sun_a = direct_sun(sample.position.xyz, normal, sun_seed);
+        float3 sun_b = direct_sun(sample.position.xyz, normal, sun_seed);
+        float3 sun_c = direct_sun(sample.position.xyz, normal, sun_seed);
+        float3 sun_d = direct_sun(sample.position.xyz, normal, sun_seed);
+        float3 sun_sum = sun_a + sun_b + sun_c + sun_d;
+        uint sun_count = 4u;
+        float3 sun_mean = sun_sum * 0.25f;
+
+        if (length(sun_a - sun_mean) + length(sun_b - sun_mean) + length(sun_c - sun_mean) + length(sun_d - sun_mean) > 0.02f) {
+            for (uint i = 0u; i < 12u; ++i) sun_sum += direct_sun(sample.position.xyz, normal, sun_seed);
+            sun_count = 16u;
         }
-        Output[uint2(pixel % lightmap_width, pixel / lightmap_width)] = float4(sum / (float)count, 1.0f);
+
+        uint emissive_count = emissive_data.x > 0.0f ? min((uint)emissive_data.w, 64u) : 0u;
+        uint emissive_seed = hash_u32(pixel ^ 0xb5297a4du);
+        float3 emissive_sum = 0.0f;
+
+        for (uint i = 0u; i < emissive_count; ++i)
+            emissive_sum += direct_emissive_stratified(sample.position.xyz, normal, emissive_seed, i, emissive_count);
+
+        float3 direct = sun_sum / (float)sun_count;
+
+        if (emissive_count > 0u) direct += emissive_sum / (float)emissive_count;
+
+        Output[uint2(pixel % lightmap_width, pixel / lightmap_width)] = float4(direct, 1.0f);
         return;
     }
 
