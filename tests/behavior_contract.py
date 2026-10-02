@@ -316,7 +316,7 @@ def main() -> None:
         if needle not in render:
             raise AssertionError(f"dynamic reference path missing: {needle}")
 
-    if "probe_dims_mode.w == 0u" not in compute_base:
+    if "bake_params.y >= 0.0f" not in compute_base:
         raise AssertionError("reference full-transport mode does not disable secondary probe reuse")
 
     for needle in (
