@@ -189,8 +189,8 @@ struct MODEL {
     GLTF_SCENE *visual;
 
     /*
-     * Reusable object-space surface parameterization. Multiple instances share
-     * this layout, but each DYNAMIC OBJECT owns a separate lighting cache.
+     * Reusable object-space surface parameterization used only by F2 reference
+     * baking. Normal DYNAMIC rendering receives the static scene through probes.
      */
     LIGHTMAP *surface_layout;
 };
