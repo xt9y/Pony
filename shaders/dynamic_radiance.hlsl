@@ -166,7 +166,7 @@ void dynamic_radiance_cs(uint3 id : SV_DispatchThreadID) {
 
     if (emissive_weight > 0.0f) {
         [loop] for (uint sample = 0u; sample < sample_count; ++sample) {
-            float target = random01(seed) * emissive_weight;
+            float target = (((float)sample + random01(seed)) / (float)sample_count) * emissive_weight;
             uint lo = bvh_meta.z;
             uint hi = bvh_meta.z + bvh_meta.w;
 
