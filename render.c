@@ -591,7 +591,7 @@ static bool create_dynamic_visibility_layout(RENDERER *r) {
         NriDescriptorType_STRUCTURED_BUFFER,
     };
 
-    return gpu_create_compute_layout(r, &r->dynamic_visibility_layout, sources, 2, NriDescriptorType_STORAGE_STRUCTURED_BUFFER, true);
+    return gpu_create_compute_layout(r, &r->dynamic_visibility_layout, sources, 2, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_surface_layout(RENDERER *r) {
@@ -600,14 +600,16 @@ static bool create_surface_layout(RENDERER *r) {
     static const NriDescriptorType material[] = {
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
-        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
         NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
-        NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
+        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
+        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
+        NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
 
     const NriDescriptorType *sets[4] = {NULL, camera, material, uniform};
-    const uint8_t counts[4] = {0, 1, 20, 1};
+    const uint8_t counts[4] = {0, 1, 27, 1};
 
     return gpu_create_pipeline_layout(r, &r->surface_layout, sets, counts, NriStageBits_VERTEX_SHADER | NriStageBits_FRAGMENT_SHADER);
 }
@@ -646,11 +648,15 @@ static bool create_grade_layout(RENDERER *r) {
 }
 
 static bool create_volume_layout(RENDERER *r) {
-    static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_STRUCTURED_BUFFER,
-                                            NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_TEXTURE, NriDescriptorType_STRUCTURED_BUFFER,
-                                            NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_SAMPLER};
+    static const NriDescriptorType src[] = {
+        NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER,
+        NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_TEXTURE,
+        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
+        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
+        NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
-    return gpu_create_compute_layout(r, &r->volume_layout, src, 8, NriDescriptorType_STORAGE_TEXTURE, true);
+    return gpu_create_compute_layout(r, &r->volume_layout, src, 15, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_volume_compose_layout(RENDERER *r) {
@@ -695,31 +701,40 @@ static bool bind_fx_resources(RENDERER *r, NriCommandBuffer *cmd, NriPipeline *p
 static bool bind_volume_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *normal, NriDescriptor *sampler_desc, NriBuffer *probes, NriBuffer *beams,
                                   NriTexture *output, const void *uniforms, uint32_t size) {
     NriTexture *shadow = r->dynamic_shadow_ready && r->dynamic_shadow_texture ? r->dynamic_shadow_texture : r->default_white;
+    NriTexture *visibility = r->dynamic_radiance_visibility_texture ? r->dynamic_radiance_visibility_texture
+                                                                    : r->dynamic_radiance_visibility_fallback_texture;
 
     if (!gpu_transition_texture(r, cmd, normal, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
         !gpu_transition_texture(r, cmd, shadow, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
         !gpu_transition_texture(r, cmd, output, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER))
         return false;
 
-    NriDescriptor *src[] = {gpu_create_texture_view(r, normal, NriTextureView_TEXTURE), sampler_desc,
-                            gpu_create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
-                            gpu_create_buffer_view(r, beams, NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
-                            gpu_create_texture_view(r, shadow, NriTextureView_TEXTURE),
-                            gpu_create_buffer_view(r, r->dynamic_radiance_buffer ? r->dynamic_radiance_buffer : r->dynamic_radiance_fallback_buffer,
-                                                   NriBufferView_STRUCTURED_BUFFER, sizeof(float[4])),
-                            gpu_create_buffer_view(r, r->dynamic_radiance_visibility_buffer ? r->dynamic_radiance_visibility_buffer
-                                                                                          : r->dynamic_radiance_visibility_fallback_buffer,
-                                                   NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
-                            r->dynamic_shadow_sampler ? r->dynamic_shadow_sampler : sampler_desc};
+    NriDescriptor *radiance_views[7];
+    for (uint32_t i = 0u; i < 7u; ++i) {
+        NriTexture *texture = r->dynamic_radiance_textures[i] ? r->dynamic_radiance_textures[i] : r->dynamic_radiance_fallback_texture;
+        radiance_views[i] = gpu_create_texture_view(r, texture, NriTextureView_TEXTURE);
+    }
+
+    NriDescriptor *src[] = {
+        gpu_create_texture_view(r, normal, NriTextureView_TEXTURE),
+        sampler_desc,
+        gpu_create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
+        gpu_create_buffer_view(r, beams, NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
+        gpu_create_texture_view(r, shadow, NriTextureView_TEXTURE),
+        radiance_views[0], radiance_views[1], radiance_views[2], radiance_views[3],
+        radiance_views[4], radiance_views[5], radiance_views[6],
+        gpu_create_texture_view(r, visibility, NriTextureView_TEXTURE),
+        r->dynamic_shadow_sampler ? r->dynamic_shadow_sampler : sampler_desc,
+        r->dynamic_radiance_sampler ? r->dynamic_radiance_sampler : sampler_desc};
 
     NriDescriptor *dst = gpu_create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
 
-    return gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 0, src, 8) &&
+    return gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 0, src, 15) &&
            gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
            gpu_bind_uniform_data(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
 }
 
-static bool bind_volume_compose_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *hdr, NriTexture *volume, NriTexture *normal,
+static bool bind_volume_compose_resourcesstatic bool bind_volume_compose_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *hdr, NriTexture *volume, NriTexture *normal,
                                           NriDescriptor *sampler_desc, NriDescriptor *depth_sampler, NriTexture *output, const void *uniforms, uint32_t size) {
     NriTexture *sources[] = {hdr, volume, normal};
 
@@ -754,38 +769,47 @@ static bool bind_camera_resources(RENDERER *r, NriCommandBuffer *cmd, const void
 static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const RENDER_MATERIAL *material, NriTexture *lightmap, NriTexture *scene_color,
                                    NriDescriptor *material_sampler, NriDescriptor *lightmap_sampler, NriDescriptor *scene_sampler, const void *uniforms,
                                    size_t size) {
-    NriDescriptor *src[] = {gpu_create_texture_view(r, material->base_color, NriTextureView_TEXTURE),
-                            gpu_create_texture_view(r, material->metallic_roughness, NriTextureView_TEXTURE),
-                            gpu_create_texture_view(r, material->normal, NriTextureView_TEXTURE),
-                            gpu_create_texture_view(r, material->occlusion, NriTextureView_TEXTURE),
-                            gpu_create_texture_view(r, material->emissive, NriTextureView_TEXTURE),
-                            gpu_create_texture_view(r, lightmap, NriTextureView_TEXTURE),
-                            gpu_create_texture_view(r, material->transmission, NriTextureView_TEXTURE),
-                            gpu_create_texture_view(r, material->thickness, NriTextureView_TEXTURE),
-                            gpu_create_texture_view(r, material->iridescence, NriTextureView_TEXTURE),
-                            gpu_create_texture_view(r, material->iridescence_thickness, NriTextureView_TEXTURE),
-                            gpu_create_texture_view(r, scene_color, NriTextureView_TEXTURE),
-                            gpu_create_texture_view(r, r->dynamic_shadow_ready && r->dynamic_shadow_texture ? r->dynamic_shadow_texture : r->default_white,
-                                                    NriTextureView_TEXTURE),
-                            gpu_create_buffer_view(r, r->beam_buffer ? r->beam_buffer : r->surface_beam_fallback_buffer,
-                                                   NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
-                            gpu_create_buffer_view(r, r->volume_probe_buffer ? r->volume_probe_buffer : r->surface_probe_fallback_buffer,
-                                                   NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
-                            gpu_create_buffer_view(r, r->dynamic_radiance_buffer ? r->dynamic_radiance_buffer : r->dynamic_radiance_fallback_buffer,
-                                                   NriBufferView_STRUCTURED_BUFFER, sizeof(float[4])),
-                            gpu_create_buffer_view(r, r->dynamic_radiance_visibility_buffer ? r->dynamic_radiance_visibility_buffer
-                                                                                          : r->dynamic_radiance_visibility_fallback_buffer,
-                                                   NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
-                            material_sampler,
-                            lightmap_sampler,
-                            scene_sampler,
-                            r->dynamic_shadow_sampler ? r->dynamic_shadow_sampler : material_sampler};
+    NriTexture *visibility = r->dynamic_radiance_visibility_texture ? r->dynamic_radiance_visibility_texture
+                                                                    : r->dynamic_radiance_visibility_fallback_texture;
+    NriDescriptor *radiance_views[7];
 
-    return gpu_bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 20) &&
+    for (uint32_t i = 0u; i < 7u; ++i) {
+        NriTexture *texture = r->dynamic_radiance_textures[i] ? r->dynamic_radiance_textures[i] : r->dynamic_radiance_fallback_texture;
+        radiance_views[i] = gpu_create_texture_view(r, texture, NriTextureView_TEXTURE);
+    }
+
+    NriDescriptor *src[] = {
+        gpu_create_texture_view(r, material->base_color, NriTextureView_TEXTURE),
+        gpu_create_texture_view(r, material->metallic_roughness, NriTextureView_TEXTURE),
+        gpu_create_texture_view(r, material->normal, NriTextureView_TEXTURE),
+        gpu_create_texture_view(r, material->occlusion, NriTextureView_TEXTURE),
+        gpu_create_texture_view(r, material->emissive, NriTextureView_TEXTURE),
+        gpu_create_texture_view(r, lightmap, NriTextureView_TEXTURE),
+        gpu_create_texture_view(r, material->transmission, NriTextureView_TEXTURE),
+        gpu_create_texture_view(r, material->thickness, NriTextureView_TEXTURE),
+        gpu_create_texture_view(r, material->iridescence, NriTextureView_TEXTURE),
+        gpu_create_texture_view(r, material->iridescence_thickness, NriTextureView_TEXTURE),
+        gpu_create_texture_view(r, scene_color, NriTextureView_TEXTURE),
+        gpu_create_texture_view(r, r->dynamic_shadow_ready && r->dynamic_shadow_texture ? r->dynamic_shadow_texture : r->default_white,
+                                NriTextureView_TEXTURE),
+        gpu_create_buffer_view(r, r->beam_buffer ? r->beam_buffer : r->surface_beam_fallback_buffer,
+                               NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
+        gpu_create_buffer_view(r, r->volume_probe_buffer ? r->volume_probe_buffer : r->surface_probe_fallback_buffer,
+                               NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
+        radiance_views[0], radiance_views[1], radiance_views[2], radiance_views[3],
+        radiance_views[4], radiance_views[5], radiance_views[6],
+        gpu_create_texture_view(r, visibility, NriTextureView_TEXTURE),
+        material_sampler,
+        lightmap_sampler,
+        scene_sampler,
+        r->dynamic_shadow_sampler ? r->dynamic_shadow_sampler : material_sampler,
+        r->dynamic_radiance_sampler ? r->dynamic_radiance_sampler : material_sampler};
+
+    return gpu_bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 27) &&
            gpu_bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
 }
 
-static bool bind_dynamic_radiance_resources(RENDERER *r, NriCommandBuffer *cmd, const DYNAMIC_RADIANCE_UNIFORMS *uniforms) {
+static bool bind_dynamic_radiance_resourcesstatic bool bind_dynamic_radiance_resources(RENDERER *r, NriCommandBuffer *cmd, const DYNAMIC_RADIANCE_UNIFORMS *uniforms) {
     if (!r || !cmd || !uniforms || !r->dynamic_radiance_layout || !r->dynamic_radiance_buffer ||
         !r->dynamic_object_node_buffer || !r->dynamic_object_triangle_buffer)
         return false;
@@ -804,7 +828,7 @@ static bool bind_dynamic_radiance_resources(RENDERER *r, NriCommandBuffer *cmd, 
 }
 
 static bool bind_dynamic_visibility_resources(RENDERER *r, NriCommandBuffer *cmd, const DYNAMIC_VISIBILITY_UNIFORMS *uniforms) {
-    if (!r || !cmd || !uniforms || !r->dynamic_visibility_layout || !r->dynamic_radiance_visibility_buffer ||
+    if (!r || !cmd || !uniforms || !r->dynamic_visibility_layout || !r->dynamic_radiance_visibility_texture ||
         !r->radiance_visibility_node_buffer || !r->radiance_visibility_triangle_buffer)
         return false;
 
@@ -812,8 +836,7 @@ static bool bind_dynamic_visibility_resources(RENDERER *r, NriCommandBuffer *cmd
         gpu_create_buffer_view(r, r->radiance_visibility_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
         gpu_create_buffer_view(r, r->radiance_visibility_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
     };
-    NriDescriptor *dst =
-        gpu_create_buffer_view(r, r->dynamic_radiance_visibility_buffer, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(float));
+    NriDescriptor *dst = gpu_create_texture_view(r, r->dynamic_radiance_visibility_texture, NriTextureView_STORAGE_TEXTURE);
 
     return src[0] && src[1] && dst &&
            gpu_bind_descriptor_set(r, cmd, r->dynamic_visibility_layout, NriBindPoint_COMPUTE, 0, src, 2) &&
@@ -821,7 +844,7 @@ static bool bind_dynamic_visibility_resources(RENDERER *r, NriCommandBuffer *cmd
            gpu_bind_uniform_data(r, cmd, r->dynamic_visibility_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
 }
 
-static bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
+static bool bind_line_resourcesstatic bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
     return gpu_bind_uniform_data(r, cmd, r->line_layout, NriBindPoint_GRAPHICS, 1, data, size);
 }
 
@@ -1122,7 +1145,8 @@ static void release_dynamic_lighting(RENDERER *r) {
     release_buffer(r, r->dynamic_object_node_buffer);
     release_buffer(r, r->dynamic_object_triangle_buffer);
     release_buffer(r, r->dynamic_radiance_buffer);
-    release_buffer(r, r->dynamic_radiance_visibility_buffer);
+    for (uint32_t i = 0u; i < 7u; ++i) release_texture(r, r->dynamic_radiance_textures[i]);
+    release_texture(r, r->dynamic_radiance_visibility_texture);
     release_buffer(r, r->radiance_visibility_node_buffer);
     release_buffer(r, r->radiance_visibility_triangle_buffer);
 
@@ -1131,7 +1155,9 @@ static void release_dynamic_lighting(RENDERER *r) {
     r->dynamic_object_node_count = 0u;
     r->dynamic_object_triangle_count = 0u;
     r->dynamic_radiance_buffer = NULL;
-    r->dynamic_radiance_visibility_buffer = NULL;
+    for (uint32_t i = 0u; i < 7u; ++i) r->dynamic_radiance_textures[i] = NULL;
+    r->dynamic_radiance_visibility_texture = NULL;
+    r->dynamic_radiance_field_count = 0u;
     r->radiance_visibility_node_buffer = NULL;
     r->radiance_visibility_triangle_buffer = NULL;
     r->radiance_visibility_node_count = 0u;
