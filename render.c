@@ -1828,11 +1828,61 @@ static bool build_transmission_draws(RENDERER *r) {
     return true;
 }
 
+static bool dynamic_shadow_caster_bounds(const RENDERER *r, VEC3 u, VEC3 v,
+                                         float *min_u, float *max_u, float *min_v, float *max_v) {
+    if (!r || !r->scene || !min_u || !max_u || !min_v || !max_v) return false;
+
+    bool found = false;
+    float u0 = FLT_MAX, u1 = -FLT_MAX;
+    float v0 = FLT_MAX, v1 = -FLT_MAX;
+
+    for (uint32_t object_index = 0u; object_index < r->scene->object_count; ++object_index) {
+        const OBJECT *object = &r->scene->objects[object_index];
+        if (object->state != DYNAMIC || object->type != MODEL || !object->data) continue;
+
+        const struct MODEL *asset = object->data;
+        if (!asset->geometry) continue;
+
+        const AABB bounds = asset->geometry->bounds;
+        const MAT4 model = m4_transform(object->transform, false);
+
+        for (uint32_t corner = 0u; corner < 8u; ++corner) {
+            const VEC3 local = v3(
+                bounds.center.x + ((corner & 1u) ? bounds.extents.x : -bounds.extents.x),
+                bounds.center.y + ((corner & 2u) ? bounds.extents.y : -bounds.extents.y),
+                bounds.center.z + ((corner & 4u) ? bounds.extents.z : -bounds.extents.z));
+            const VEC3 world = m4_point(model, local);
+            const float pu = v3_dot(world, u);
+            const float pv = v3_dot(world, v);
+
+            u0 = fminf(u0, pu);
+            u1 = fmaxf(u1, pu);
+            v0 = fminf(v0, pv);
+            v1 = fmaxf(v1, pv);
+            found = true;
+        }
+    }
+
+    if (!found) return false;
+
+    const float width = fmaxf(u1 - u0, 1.0e-4f);
+    const float height = fmaxf(v1 - v0, 1.0e-4f);
+    const float base_span = fmaxf(width, height);
+    const float guard = fmaxf(base_span * 0.06f, r->scene_radius * 1.0e-5f);
+    const float span = base_span + 2.0f * guard;
+    const float center_u = 0.5f * (u0 + u1);
+    const float center_v = 0.5f * (v0 + v1);
+
+    *min_u = center_u - 0.5f * span;
+    *max_u = center_u + 0.5f * span;
+    *min_v = center_v - 0.5f * span;
+    *max_v = center_v + 0.5f * span;
+    return true;
+}
+
 static bool dynamic_shadow_projection(const RENDERER *r, const RENDER_FRAME *frame, float shadow_u_min[4], float shadow_v_min[4],
                                       float shadow_sun_max[4], float shadow_extent_bias[4]) {
-    if (!r || !frame || !r->beams.width || !r->beams.height || !r->beams.depth || r->beams.step.x <= 0.0f || r->beams.step.y <= 0.0f ||
-        r->beams.step.z <= 0.0f)
-        return false;
+    if (!r || !frame || !r->beams.depth || r->beams.step.z <= 0.0f) return false;
 
     const VEC3 sun = v3_normalize(frame->sun.direction);
     VEC3 u = v3_normalize(v3_cross(v3(0.0f, 1.0f, 0.0f), sun));
@@ -1841,20 +1891,24 @@ static bool dynamic_shadow_projection(const RENDERER *r, const RENDER_FRAME *fra
     if (v3_len_sq(u) < 0.5f) return false;
 
     const VEC3 v = v3_cross(sun, u);
-    const float span_x = r->beams.step.x * (float)r->beams.width;
-    const float span_y = r->beams.step.y * (float)r->beams.height;
     const float span_z = r->beams.step.z * (float)r->beams.depth;
+    if (span_z <= 0.0f) return false;
 
-    if (span_x <= 0.0f || span_y <= 0.0f || span_z <= 0.0f) return false;
+    float min_u, max_u, min_v, max_v;
+    if (!dynamic_shadow_caster_bounds(r, u, v, &min_u, &max_u, &min_v, &max_v)) return false;
+
+    const float span_x = max_u - min_u;
+    const float span_y = max_v - min_v;
+    if (span_x <= 0.0f || span_y <= 0.0f) return false;
 
     shadow_u_min[0] = u.x;
     shadow_u_min[1] = u.y;
     shadow_u_min[2] = u.z;
-    shadow_u_min[3] = r->beams.origin.x;
+    shadow_u_min[3] = min_u;
     shadow_v_min[0] = v.x;
     shadow_v_min[1] = v.y;
     shadow_v_min[2] = v.z;
-    shadow_v_min[3] = r->beams.origin.y;
+    shadow_v_min[3] = min_v;
     shadow_sun_max[0] = sun.x;
     shadow_sun_max[1] = sun.y;
     shadow_sun_max[2] = sun.z;
@@ -1862,7 +1916,9 @@ static bool dynamic_shadow_projection(const RENDERER *r, const RENDER_FRAME *fra
     shadow_extent_bias[0] = span_x;
     shadow_extent_bias[1] = span_y;
     shadow_extent_bias[2] = span_z;
-    shadow_extent_bias[3] = 2.0f / (float)DYNAMIC_SHADOW_SIZE;
+
+    const float world_texel = fmaxf(span_x, span_y) / (float)DYNAMIC_SHADOW_SIZE;
+    shadow_extent_bias[3] = fmaxf((1.25f * world_texel) / span_z, 1.0e-7f);
     return true;
 }
 
