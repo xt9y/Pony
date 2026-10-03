@@ -410,6 +410,7 @@ def main() -> None:
 
     for needle in (
         "DYNAMIC_RADIANCE_FIELD_DIM 32u",
+        "DYNAMIC_VISIBILITY_FIELD_DIM 8u",
         "DYNAMIC_RADIANCE_FIELD_SAMPLES 64u",
         "DYNAMIC_RADIANCE_IRRADIANCE_FLOOR 0.00075f",
         "DYNAMIC_RADIANCE_CACHE_MAGIC",
@@ -464,11 +465,14 @@ def main() -> None:
         "StructuredBuffer<float> DynamicRadianceVisibility",
         "dynamic_radiance_origin_spacing",
         "dynamic_radiance_dims_offset",
+        "dynamic_visibility_origin_spacing",
+        "dynamic_visibility_dims_offset",
         "dynamic_radiance_inverse",
         "dynamic_radiance_probe_value(",
         "dynamic_radiance_field(",
         "dynamic_radiance_lighting(",
-        "visibility += saturate(DynamicRadianceVisibility[probe]) * weight",
+        "dynamic_radiance_static_visibility(",
+        "DynamicRadianceVisibility[probe]",
         "meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z)",
         "smoothstep(0.0f, 2.0f, edge)",
         "dynamic_correction = dynamic_radiance_lighting(input.world_position, geometric_normal)",
@@ -487,6 +491,8 @@ def main() -> None:
         "dynamic_influences(",
         "dynamic_radiance_origin_spacing",
         "dynamic_radiance_dims_offset",
+        "dynamic_visibility_origin_spacing",
+        "dynamic_visibility_dims_offset",
         "dynamic_radiance_inverse",
         "m4_inverse_transform(object->transform)",
         "result.dynamic_influence_meta[2] = r->dynamic_radiance_buffer ? 1u : 0u",
@@ -495,6 +501,7 @@ def main() -> None:
         "visibility_pending_revision",
         "finish_dynamic_visibility_updates(",
         "updated_fields < DYNAMIC_INFLUENCE_LIMIT",
+        "allocation->visibility_dims[0] * allocation->visibility_dims[1] * allocation->visibility_dims[2]",
         "src, 20",
     ):
         if needle not in render:
@@ -529,6 +536,9 @@ def main() -> None:
         "volume_dynamic_shadow_visibility(",
         "StructuredBuffer<float4> DynamicRadiance",
         "dynamic_volume_probe_value(",
+        "dynamic_volume_static_visibility(",
+        "dynamic_visibility_origin_spacing",
+        "dynamic_visibility_dims_offset",
         "dynamic_volume_radiance(",
         "radiance += dynamic_volume_radiance(p, scattering_direction)",
     ):
