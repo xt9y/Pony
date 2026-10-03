@@ -369,10 +369,46 @@ def main() -> None:
         "dynamic_reference_valid",
         "surface_probe_irradiance(input.world_position, geometric_normal) / PI",
         "cached_sun_visibility = static_beam_visibility(input.world_position)",
-        "reference_mode > 0.5f ? cached_sun_visibility : cached_sun_visibility * dynamic_visibility",
+        "float dynamic_baked_valid = max(dynamic_reference_valid, pose_lightmap_valid)",
     ):
         if needle not in fragment:
             raise AssertionError(f"dynamic baked-context fallback missing: {needle}")
+
+    for needle in (
+        "DYNAMIC_POSE_LIGHTMAP_MAX_STATES 33u",
+        "DYNAMIC_POSE_LIGHTMAP_BUDGET_BYTES",
+        "DYNAMIC_POSE_CACHE_VERSION 1u",
+        "pose_atlas_texture",
+        "dynamic_pose_atlas_layout(",
+        "dynamic_pose_cache_hash(",
+        "dynamic_pose_cache_read(",
+        "dynamic_pose_cache_write(",
+        ".pony-pose-%016",
+        "renderer_build_dynamic_pose_lightmap(",
+        "renderer_update_dynamic_pose_lightmaps(",
+        "download_rgba16f_texture(",
+        "reference_bake_surface(r, &tree, &world_layout, &candidate)",
+        "pose_source_lightmap != r->lightmap_texture",
+        "renderer_configure_dynamic_pose_lightmap_path(",
+    ):
+        if needle not in render + game:
+            raise AssertionError(f"pose-baked dynamic receiver path missing: {needle}")
+
+    for needle in (
+        "float4 pose_lightmap;",
+        "float4 pose_atlas;",
+        "valid_lightmap_region_sample(",
+        "pose_lightmap_state_sample(",
+        "pose_dynamic_lightmap_sample(",
+        "pose_lightmap_valid",
+        "dynamic_baked_valid",
+        "pose_lightmap_valid < 0.5f",
+    ):
+        if needle not in fragment:
+            raise AssertionError(f"pose-baked shader interpolation missing: {needle}")
+
+    if "renderer_configure_dynamic_pose_lightmap_path(&renderer, animated_dynamic_id" not in text("main.c"):
+        raise AssertionError("demo motion is not wired to the pose-baked path")
 
     if "if (!scene_compile(renderer->scene)) return false;" in render:
         raise AssertionError("normal dynamic motion must not rebuild the full flattened CPU scene")

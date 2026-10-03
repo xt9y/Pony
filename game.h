@@ -696,6 +696,8 @@ struct RENDERER {
 
 bool renderer_init(RENDERER *renderer, GPU *gpu);
 bool renderer_set_scene(RENDERER *renderer, SCENE *scene);
+bool renderer_configure_dynamic_pose_lightmap_path(RENDERER *renderer, OBJECT_ID object_id, VEC3 axis,
+                                                    float min_offset, float max_offset, uint32_t pose_count);
 void renderer_event(RENDERER *renderer, const SDL_Event *event);
 bool renderer_frame(RENDERER *renderer);
 void renderer_deinit(RENDERER *renderer);
