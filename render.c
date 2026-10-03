@@ -3666,23 +3666,17 @@ static bool dynamic_pose_atlas_layout(const LIGHTMAP *layout, uint32_t requested
 static uint64_t dynamic_pose_environment_hash(const RENDERER *r, const struct LIGHT *light) {
     if (!r || !r->scene || !light || light->type != LIGHT_DIRECTIONAL) return 0u;
 
+    /*
+     * This runs every frame, so keep it deliberately tiny. A completed rebake
+     * is detected separately by pose_source_lightmap changing; the expensive
+     * probe payload is hashed only when constructing the disk-cache key.
+     */
     uint64_t hash = 0u;
     const uint32_t version = DYNAMIC_POSE_CACHE_VERSION;
     hash = hash_bytes(hash, &version, sizeof(version));
     hash = hash_bytes(hash, &light->directional, sizeof(light->directional));
     hash = hash_bytes(hash, &r->scene->sky, sizeof(r->scene->sky));
     hash = hash_bytes(hash, &r->scene->volumetrics, sizeof(r->scene->volumetrics));
-    hash = hash_bytes(hash, &r->volume_probes.origin, sizeof(r->volume_probes.origin));
-    hash = hash_bytes(hash, &r->volume_probes.spacing, sizeof(r->volume_probes.spacing));
-    hash = hash_bytes(hash, &r->volume_probes.count_x, sizeof(r->volume_probes.count_x));
-    hash = hash_bytes(hash, &r->volume_probes.count_y, sizeof(r->volume_probes.count_y));
-    hash = hash_bytes(hash, &r->volume_probes.count_z, sizeof(r->volume_probes.count_z));
-
-    const uint64_t probe_count =
-        (uint64_t)r->volume_probes.count_x * r->volume_probes.count_y * r->volume_probes.count_z;
-    if (r->volume_probes.probes && probe_count && probe_count <= SIZE_MAX / sizeof(PROBE))
-        hash = hash_bytes(hash, r->volume_probes.probes, (size_t)probe_count * sizeof(PROBE));
-
     return hash;
 }
 
@@ -3724,6 +3718,17 @@ static uint64_t dynamic_pose_cache_hash(RENDERER *r, const DYNAMIC_LIGHTING_ALLO
         hash = hash_bytes(hash, model->visual->materials, (size_t)model->visual->material_count * sizeof(*model->visual->materials));
 
     hash = hash_bytes(hash, &allocation->pose_environment_hash, sizeof(allocation->pose_environment_hash));
+    hash = hash_bytes(hash, &r->volume_probes.origin, sizeof(r->volume_probes.origin));
+    hash = hash_bytes(hash, &r->volume_probes.spacing, sizeof(r->volume_probes.spacing));
+    hash = hash_bytes(hash, &r->volume_probes.count_x, sizeof(r->volume_probes.count_x));
+    hash = hash_bytes(hash, &r->volume_probes.count_y, sizeof(r->volume_probes.count_y));
+    hash = hash_bytes(hash, &r->volume_probes.count_z, sizeof(r->volume_probes.count_z));
+
+    const uint64_t probe_count =
+        (uint64_t)r->volume_probes.count_x * r->volume_probes.count_y * r->volume_probes.count_z;
+    if (r->volume_probes.probes && probe_count && probe_count <= SIZE_MAX / sizeof(PROBE))
+        hash = hash_bytes(hash, r->volume_probes.probes, (size_t)probe_count * sizeof(PROBE));
+
     return hash;
 }
 
