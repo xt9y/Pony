@@ -837,7 +837,7 @@ static bool bind_dynamic_visibility_resources(RENDERER *r, NriCommandBuffer *cmd
            gpu_bind_uniform_data(r, cmd, r->dynamic_visibility_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
 }
 
-static bool bind_line_resourcesstatic bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
+static bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
     return gpu_bind_uniform_data(r, cmd, r->line_layout, NriBindPoint_GRAPHICS, 1, data, size);
 }
 
@@ -2008,7 +2008,7 @@ static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cm
     return true;
 }
 
-static bool write_dynamic_influencestatic bool write_dynamic_influence(const RENDERER *r, MATERIAL_UNIFORMS *uniforms, uint32_t slot,
+static bool write_dynamic_influence(const RENDERER *r, MATERIAL_UNIFORMS *uniforms, uint32_t slot,
                                     const DYNAMIC_LIGHTING_ALLOCATION *allocation) {
     if (!r || !uniforms || !allocation || slot >= DYNAMIC_INFLUENCE_LIMIT) return false;
 

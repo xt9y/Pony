@@ -574,7 +574,7 @@ def main() -> None:
     for needle in (
         "dynamic_radiance_meta",
         "dynamic_shadow_projection(r, frame, u.shadow_u_min",
-        "gpu_create_texture_view(r, texture, NriTextureView_TEXTURE)",
+        "r->dynamic_radiance_views[i] ? r->dynamic_radiance_views[i] : r->dynamic_radiance_fallback_view",
         "r->dynamic_radiance_sampler ? r->dynamic_radiance_sampler : sampler_desc",
         "u.dynamic_radiance_meta[2] = r->dynamic_radiance_field_count",
     ):
