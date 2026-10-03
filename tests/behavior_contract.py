@@ -370,6 +370,9 @@ def main() -> None:
     if "if (!scene_compile(r->scene)) return false;" not in render:
         raise AssertionError("F2 reference mode must rebuild the full current scene before oracle baking")
 
+    if "if (frame->sun.intensity <= 0.0f) return true;" not in render:
+        raise AssertionError("disabled sun must skip the dynamic shadow-map pass")
+
     for needle in (
         "GPU_FRAME_QUEUE_DEPTH",
         "DYNAMIC_TIMESTAMP_BASE",

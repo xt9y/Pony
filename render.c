@@ -1833,6 +1833,8 @@ static bool render_dynamic_shadow_map(RENDERER *r, NriCommandBuffer *cmd, const 
 
     r->dynamic_shadow_ready = false;
 
+    if (frame->sun.intensity <= 0.0f) return true;
+
     bool has_dynamic = false;
     for (uint32_t i = 0; i < r->draw_count; ++i) {
         if (r->draws[i].object_id && !material_transmissive(&r->materials[r->draws[i].material])) {
