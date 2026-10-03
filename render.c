@@ -24,8 +24,6 @@
 #define DYNAMIC_POSE_LIGHTMAP_MAX_STATES 33u
 #define DYNAMIC_POSE_LIGHTMAP_BUDGET_BYTES (64ull * 1024ull * 1024ull)
 #define DYNAMIC_POSE_ATLAS_MAX_SIZE 16384u
-#define DYNAMIC_POSE_CACHE_MAGIC 0x45534f50u
-#define DYNAMIC_POSE_CACHE_VERSION 1u
 
 typedef struct MAT4 {
     float m[16];
@@ -479,6 +477,7 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     /* Exact baked receiver states packed into one HDR atlas for cheap runtime interpolation. */
     NriTexture *pose_atlas_texture;
     NriTexture *pose_source_lightmap;
+    DYNAMIC_POSE_BAKE_JOB *pose_job;
     uint32_t pose_requested_count;
     uint32_t pose_count;
     uint32_t pose_columns;
@@ -495,20 +494,6 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     bool pose_ready;
     bool pose_failed;
 };
-
-typedef struct DYNAMIC_POSE_CACHE_HEADER {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t width;
-    uint32_t height;
-    uint32_t pose_count;
-    uint32_t columns;
-    uint32_t rows;
-    uint32_t reserved;
-    uint64_t cache_hash;
-    uint64_t payload_bytes;
-    uint64_t payload_hash;
-} DYNAMIC_POSE_CACHE_HEADER;
 
 static bool dynamic_pose_lightmap_state(const DYNAMIC_LIGHTING_ALLOCATION *allocation, const OBJECT *object,
                                         uint32_t *pose_a, uint32_t *pose_b, float *blend);
@@ -1210,6 +1195,10 @@ static void release_dynamic_lighting(RENDERER *r) {
 
     for (uint32_t i = 0; i < r->dynamic_lighting_count; ++i) {
         DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        if (allocation->pose_job) {
+            dynamic_pose_bake_cancel(allocation->pose_job);
+            allocation->pose_job = NULL;
+        }
         release_texture(r, allocation->reference_texture);
         release_texture(r, allocation->pose_atlas_texture);
         allocation->pose_atlas_texture = NULL;
@@ -3801,96 +3790,8 @@ static bool dynamic_pose_cache_read(RENDERER *r, DYNAMIC_LIGHTING_ALLOCATION *al
     return true;
 }
 
-static bool dynamic_pose_cache_write(const DYNAMIC_LIGHTING_ALLOCATION *allocation, uint32_t atlas_width, uint32_t atlas_height,
-                                     const unsigned char *pixels, uint64_t atlas_bytes) {
-    if (!allocation || !allocation->pose_cache_hash || !pixels || !atlas_bytes || atlas_bytes > SIZE_MAX) return false;
-
-    char path[96];
-    char temporary[112];
-    dynamic_pose_cache_path(path, sizeof(path), allocation->pose_cache_hash);
-    snprintf(temporary, sizeof(temporary), "%s.tmp", path);
-
-    DYNAMIC_POSE_CACHE_HEADER header = {
-        .magic = DYNAMIC_POSE_CACHE_MAGIC,
-        .version = DYNAMIC_POSE_CACHE_VERSION,
-        .width = atlas_width,
-        .height = atlas_height,
-        .pose_count = allocation->pose_count,
-        .columns = allocation->pose_columns,
-        .rows = allocation->pose_rows,
-        .cache_hash = allocation->pose_cache_hash,
-        .payload_bytes = atlas_bytes,
-        .payload_hash = hash_bytes(0u, pixels, (size_t)atlas_bytes),
-    };
-
-    FILE *file = fopen(temporary, "wb");
-    if (!file) return false;
-
-    bool good = fwrite(&header, sizeof(header), 1, file) == 1 &&
-                fwrite(pixels, (size_t)atlas_bytes, 1, file) == 1;
-    if (fclose(file) != 0) good = false;
-
-    if (!good) {
-        remove(temporary);
-        return false;
-    }
-
-    remove(path);
-    if (rename(temporary, path) != 0) {
-        remove(temporary);
-        return false;
-    }
-
-    return true;
-}
-
 static bool reference_bake_surface(RENDERER *r, const BVH *tree, const LIGHTMAP *layout, NriTexture **out_texture) {
-    if (!r || !tree || !layout || !out_texture || !r->volume_probes.probes) return false;
-
-    NriTexture *base_texture = r->lightmap_texture;
-    const uint32_t base_width = r->lightmap_width;
-    const uint32_t base_height = r->lightmap_height;
-    const uint32_t base_sample_count = r->lightmap_sample_count;
-    const uint32_t base_trace_count = r->lightmap_trace_count;
-    const uint32_t base_target_samples = r->bake_target_samples;
-    const uint32_t base_min_samples = r->lightmap_min_samples;
-    const VEC3 base_probe_origin = r->lightmap_probe_origin;
-    const float base_probe_spacing = r->lightmap_probe_spacing;
-    const uint32_t base_probe_count_x = r->lightmap_probe_count_x;
-    const uint32_t base_probe_count_y = r->lightmap_probe_count_y;
-    const uint32_t base_probe_count_z = r->lightmap_probe_count_z;
-    const float base_epsilon = r->bake_epsilon;
-    const bool base_full_transport = r->bake_full_transport;
-
-    r->lightmap_texture = NULL;
-    r->bake_full_transport = true;
-
-    const bool good = bake_lightmap(r, tree, layout, &r->volume_probes);
-    NriTexture *candidate = r->lightmap_texture;
-
-    r->lightmap_texture = base_texture;
-    release_bake_resources(r);
-    r->lightmap_width = base_width;
-    r->lightmap_height = base_height;
-    r->lightmap_sample_count = base_sample_count;
-    r->lightmap_trace_count = base_trace_count;
-    r->bake_target_samples = base_target_samples;
-    r->lightmap_min_samples = base_min_samples;
-    r->lightmap_probe_origin = base_probe_origin;
-    r->lightmap_probe_spacing = base_probe_spacing;
-    r->lightmap_probe_count_x = base_probe_count_x;
-    r->lightmap_probe_count_y = base_probe_count_y;
-    r->lightmap_probe_count_z = base_probe_count_z;
-    r->bake_epsilon = base_epsilon;
-    r->bake_full_transport = base_full_transport;
-
-    if (!good || !candidate) {
-        release_texture(r, candidate);
-        return false;
-    }
-
-    *out_texture = candidate;
-    return true;
+    return bake_reference_lightmap(r, tree, layout, out_texture);
 }
 
 
@@ -3899,11 +3800,9 @@ static bool renderer_build_dynamic_pose_lightmap(RENDERER *r, DYNAMIC_LIGHTING_A
         !allocation->layout || !r->has_bake || !r->volume_probes.probes)
         return false;
 
-    SCENE *scene = r->scene;
-    OBJECT *object = scene_object_by_id(scene, allocation->object_id);
+    OBJECT *object = scene_object_by_id(r->scene, allocation->object_id);
     if (!object || object->type != MODEL || object->state != DYNAMIC || !object->data) return false;
-
-    if (!scene_compile(scene)) return false;
+    if (!scene_compile(r->scene)) return false;
 
     uint32_t pose_count = 0u;
     uint32_t columns = 0u;
@@ -3929,94 +3828,84 @@ static bool renderer_build_dynamic_pose_lightmap(RENDERER *r, DYNAMIC_LIGHTING_A
 
     if (!allocation->pose_cache_hash) return false;
     if (dynamic_pose_cache_read(r, allocation, atlas_width, atlas_height, atlas_bytes)) return true;
+    if (allocation->pose_job) return true;
 
-    const TRANSFORM live_transform = object->transform;
-    unsigned char *atlas_pixels = calloc(1u, (size_t)atlas_bytes);
-    bool good = atlas_pixels != NULL;
-    const Uint64 started = SDL_GetPerformanceCounter();
+    DIRECTIONAL_LIGHT sun = light->directional;
+    sun.direction = v3_normalize(sun.direction);
+    if (v3_len_sq(sun.direction) <= 0.0f) return false;
 
-    r->sun = light->directional;
-    r->sun.direction = v3_normalize(r->sun.direction);
-    r->sky = scene->sky;
-    r->volumetrics = scene->volumetrics;
+    const DYNAMIC_POSE_BAKE_DESC desc = {
+        .scene = r->scene,
+        .object_id = allocation->object_id,
+        .layout = allocation->layout,
+        .probes = &r->volume_probes,
+        .sun = sun,
+        .sky = r->scene->sky,
+        .volumetrics = r->scene->volumetrics,
+        .base_transform = allocation->pose_base_transform,
+        .axis = allocation->pose_axis,
+        .min_offset = allocation->pose_min_offset,
+        .max_offset = allocation->pose_max_offset,
+        .pose_count = pose_count,
+        .columns = columns,
+        .rows = rows,
+        .atlas_width = atlas_width,
+        .atlas_height = atlas_height,
+        .atlas_bytes = atlas_bytes,
+        .cache_hash = allocation->pose_cache_hash,
+    };
 
-    if (v3_len_sq(r->sun.direction) <= 0.0f) good = false;
+    allocation->pose_source_lightmap = r->lightmap_texture;
+    allocation->pose_job = dynamic_pose_bake_start(&desc);
+    if (!allocation->pose_job) return false;
 
-    for (uint32_t pose = 0u; good && pose < pose_count; ++pose) {
-        const float t = pose_count > 1u ? (float)pose / (float)(pose_count - 1u) : 0.0f;
-        const float offset = allocation->pose_min_offset + (allocation->pose_max_offset - allocation->pose_min_offset) * t;
-        TRANSFORM state = allocation->pose_base_transform;
-        state.position = v3_add(state.position, v3_scale(allocation->pose_axis, offset));
+    SDL_Log("dynamic pose lightmap object %" PRIu64
+            ": background bake started | %u/%u requested states | %ux%u atlas | %.2f MiB | realtime fallback remains active",
+            allocation->object_id, pose_count, allocation->pose_requested_count, atlas_width, atlas_height,
+            (double)atlas_bytes / (1024.0 * 1024.0));
+    return true;
+}
 
-        object->transform = state;
-        scene->compiled = false;
-        good = scene_compile(scene);
+static bool renderer_finish_dynamic_pose_lightmap(RENDERER *r, DYNAMIC_LIGHTING_ALLOCATION *allocation) {
+    if (!r || !allocation || !allocation->pose_job || !dynamic_pose_bake_done(allocation->pose_job)) return true;
 
-        BVH tree = {0};
-        LIGHTMAP world_layout = {0};
-        NriTexture *candidate = NULL;
-        Uint8 *pixels = NULL;
+    bool success = false;
+    Uint8 *pixels = NULL;
+    char error[192] = {0};
+    DYNAMIC_POSE_BAKE_JOB *job = allocation->pose_job;
+    allocation->pose_job = NULL;
 
-        if (good)
-            good = bvh_build_with_surfaces(&tree, &scene->geometry, &scene->visual, scene->surface_refs, scene->surface_ref_count);
-        if (good) good = reference_world_layout(allocation->layout, state, &world_layout);
-        if (good) good = reference_bake_surface(r, &tree, &world_layout, &candidate);
-        if (good)
-            good = download_rgba16f_texture(r, candidate, allocation->layout->width, allocation->layout->height, &pixels);
+    if (!dynamic_pose_bake_take(job, &success, &pixels, error, sizeof(error))) return true;
 
-        if (good) {
-            const uint32_t cell_x = pose % columns;
-            const uint32_t cell_y = pose / columns;
-            const size_t source_row_bytes = (size_t)allocation->layout->width * 8u;
-            const size_t atlas_row_bytes = (size_t)atlas_width * 8u;
-            const size_t x_bytes = (size_t)cell_x * source_row_bytes;
-
-            for (uint32_t y = 0u; y < allocation->layout->height; ++y) {
-                const size_t destination_y = (size_t)cell_y * allocation->layout->height + y;
-                memcpy(atlas_pixels + destination_y * atlas_row_bytes + x_bytes,
-                       pixels + (size_t)y * source_row_bytes, source_row_bytes);
-            }
-        }
-
+    if (!success || !pixels) {
         free(pixels);
-        release_texture(r, candidate);
-        free(world_layout.samples);
-        bvh_free(&tree);
-
-        if (good)
-            SDL_Log("dynamic pose lightmap object %" PRIu64 ": baked state %u/%u at offset %.3f",
-                    allocation->object_id, pose + 1u, pose_count, offset);
+        allocation->pose_failed = true;
+        SDL_Log("dynamic pose lightmap object %" PRIu64 ": background bake failed; realtime probe fallback retained: %s",
+                allocation->object_id, error[0] ? error : "unknown error");
+        return true;
     }
 
-    object->transform = live_transform;
-    scene->compiled = false;
-    if (!scene_compile(scene)) good = false;
+    const uint32_t atlas_width = allocation->pose_state_width * allocation->pose_columns;
+    const uint32_t atlas_height = allocation->pose_state_height * allocation->pose_rows;
+    NriTexture *atlas = dynamic_pose_upload_atlas(r, atlas_width, atlas_height, pixels);
+    free(pixels);
 
-    NriTexture *atlas = good ? dynamic_pose_upload_atlas(r, atlas_width, atlas_height, atlas_pixels) : NULL;
-    if (good && !atlas) good = false;
-
-    if (good) {
-        release_texture(r, allocation->pose_atlas_texture);
-        allocation->pose_atlas_texture = atlas;
-        allocation->pose_source_lightmap = r->lightmap_texture;
-        allocation->pose_ready = true;
-        allocation->pose_failed = false;
-
-        const double elapsed = (double)(SDL_GetPerformanceCounter() - started) * 1000.0 /
-                               (double)SDL_GetPerformanceFrequency();
-
-        SDL_Log("dynamic pose lightmap object %" PRIu64 ": ready %u/%u requested states | %ux%u atlas | %.2f MiB | %.2f ms",
-                allocation->object_id, pose_count, allocation->pose_requested_count, atlas_width, atlas_height,
-                (double)atlas_bytes / (1024.0 * 1024.0), elapsed);
-
-        if (!dynamic_pose_cache_write(allocation, atlas_width, atlas_height, atlas_pixels, atlas_bytes))
-            SDL_Log("dynamic pose lightmap object %" PRIu64 ": cache write skipped", allocation->object_id);
-    } else {
-        release_texture(r, atlas);
+    if (!atlas) {
+        allocation->pose_failed = true;
+        SDL_Log("dynamic pose lightmap object %" PRIu64 ": final atlas upload failed; realtime probe fallback retained",
+                allocation->object_id);
+        return true;
     }
 
-    free(atlas_pixels);
-    return good;
+    release_texture(r, allocation->pose_atlas_texture);
+    allocation->pose_atlas_texture = atlas;
+    allocation->pose_source_lightmap = r->lightmap_texture;
+    allocation->pose_ready = true;
+    allocation->pose_failed = false;
+
+    SDL_Log("dynamic pose lightmap object %" PRIu64 ": background atlas ready; runtime path switched to baked-state interpolation",
+            allocation->object_id);
+    return true;
 }
 
 static bool dynamic_pose_lightmap_state(const DYNAMIC_LIGHTING_ALLOCATION *allocation, const OBJECT *object,
@@ -4074,27 +3963,36 @@ static bool renderer_update_dynamic_pose_lightmaps(RENDERER *r, const struct LIG
         DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
         if (!allocation->pose_configured) continue;
 
-        if ((allocation->pose_ready || allocation->pose_failed) &&
+        const bool stale =
+            allocation->pose_source_lightmap &&
             (allocation->pose_source_lightmap != r->lightmap_texture ||
-             allocation->pose_environment_hash != environment_hash)) {
+             allocation->pose_environment_hash != environment_hash);
+
+        if (stale) {
+            if (allocation->pose_job) {
+                dynamic_pose_bake_cancel(allocation->pose_job);
+                allocation->pose_job = NULL;
+            }
+
             release_texture(r, allocation->pose_atlas_texture);
             allocation->pose_atlas_texture = NULL;
+            allocation->pose_source_lightmap = NULL;
             allocation->pose_ready = false;
             allocation->pose_failed = false;
+        }
+
+        if (allocation->pose_job) {
+            if (!renderer_finish_dynamic_pose_lightmap(r, allocation)) return false;
+            if (allocation->pose_job || allocation->pose_ready || allocation->pose_failed) continue;
         }
 
         if (allocation->pose_ready || allocation->pose_failed) continue;
 
         if (!renderer_build_dynamic_pose_lightmap(r, allocation, light)) {
-            /*
-             * Remember the environment that failed so we do not retry the same
-             * expensive bake every frame. A new base bake or lighting state
-             * clears this latch and gives the path another chance.
-             */
             allocation->pose_source_lightmap = r->lightmap_texture;
             allocation->pose_environment_hash = environment_hash;
             allocation->pose_failed = true;
-            SDL_Log("dynamic pose lightmap object %" PRIu64 ": build failed; using realtime probe fallback",
+            SDL_Log("dynamic pose lightmap object %" PRIu64 ": could not start background bake; realtime probe fallback retained",
                     allocation->object_id);
         }
     }
@@ -4501,6 +4399,11 @@ bool renderer_configure_dynamic_pose_lightmap_path(RENDERER *renderer, OBJECT_ID
 
     if (!allocation || !object || object->type != MODEL || object->state != DYNAMIC || axis_length_sq <= 1.0e-12f)
         return false;
+
+    if (allocation->pose_job) {
+        dynamic_pose_bake_cancel(allocation->pose_job);
+        allocation->pose_job = NULL;
+    }
 
     release_texture(renderer, allocation->pose_atlas_texture);
     allocation->pose_atlas_texture = NULL;
