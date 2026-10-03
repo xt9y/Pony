@@ -715,13 +715,13 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     }
 
     if (dynamic_flags.w > 4.5f && dynamic_flags.w < 5.5f) {
-        float3 cache_debug = is_dynamic > 0.5f
+        float3 receive_debug = is_dynamic > 0.5f
                                  ? (dynamic_reference_valid > 0.5f ? float3(0.05f, 0.25f, 1.0f) : float3(0.05f, 1.0f, 0.05f))
                                  : float3(0.04f, 0.04f, 0.04f);
 
-        if (reference_mode > 0.5f) cache_debug = lerp(cache_debug, float3(0.05f, 0.25f, 1.0f), 0.55f);
+        if (reference_mode > 0.5f) receive_debug = lerp(receive_debug, float3(0.05f, 0.25f, 1.0f), 0.55f);
 
-        output.hdr = float4(cache_debug, 1.0f);
+        output.hdr = float4(receive_debug, 1.0f);
         output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f, max(input.view_depth, 0.0f));
         return output;
     }
