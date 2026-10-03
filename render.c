@@ -14,21 +14,13 @@
 #define DYNAMIC_LIGHTING_MIN_TEXELS_PER_UNIT 0.001f
 #define DYNAMIC_LIGHTING_MAX_SIZE 4096u
 #define DYNAMIC_INFLUENCE_LIMIT 8u
-#define DYNAMIC_TRACE_INSTANCE_LIMIT 8u
-#define DYNAMIC_SURFACE_SAMPLES_PER_FRAME 512u
-#define DYNAMIC_SURFACE_CONVERGENCE_PASSES 4u
-#define DYNAMIC_RECEIVER_IRRADIANCE_FLOOR 0.00075f
-#define DYNAMIC_RECEIVER_GRID_MIN_CELL_SIZE 0.5f
-#define DYNAMIC_RECEIVER_GRID_TARGET_AXIS 48.0f
-#define DYNAMIC_RECEIVER_GRID_MAX_CELLS 262144u
-#define DYNAMIC_RECEIVER_SAMPLE_BUDGET 4096u
-#define DYNAMIC_SHADOW_SIZE 1024u
-#define DYNAMIC_TIMESTAMP_BASE 4u
-#define DYNAMIC_TIMESTAMP_STRIDE 6u
-#define DYNAMIC_TIMING_LOG_INTERVAL 30u
-#define DYNAMIC_ACCEPTANCE_MIN_COVERAGE_PERCENT 99.0
-#define DYNAMIC_ACCEPTANCE_MAX_RGB_MAE 0.03
-#define DYNAMIC_ACCEPTANCE_MAX_NRMSE 0.10
+#define DYNAMIC_RADIANCE_FIELD_DIM 32u
+#define DYNAMIC_RADIANCE_FIELD_SAMPLES 64u
+#define DYNAMIC_RADIANCE_IRRADIANCE_FLOOR 0.00075f
+#define DYNAMIC_SHADOW_SIZE 512u
+#define DYNAMIC_TIMESTAMP_BASE 8u
+#define DYNAMIC_TIMESTAMP_STRIDE 2u
+#define DYNAMIC_TIMING_LOG_INTERVAL 120u
 
 typedef struct MAT4 {
     float m[16];
@@ -356,6 +348,10 @@ typedef struct MATERIAL_UNIFORMS {
     float dynamic_influence_axis_z[DYNAMIC_INFLUENCE_LIMIT][4];
     float dynamic_influence_diffuse[DYNAMIC_INFLUENCE_LIMIT][4];
     float dynamic_influence_emissive[DYNAMIC_INFLUENCE_LIMIT][4];
+
+    float dynamic_radiance_origin_spacing[DYNAMIC_INFLUENCE_LIMIT][4];
+    Uint32 dynamic_radiance_dims_offset[DYNAMIC_INFLUENCE_LIMIT][4];
+    float dynamic_radiance_inverse[DYNAMIC_INFLUENCE_LIMIT][16];
 } MATERIAL_UNIFORMS;
 
 typedef struct DYNAMIC_SHADOW_UNIFORMS {
@@ -366,45 +362,12 @@ typedef struct DYNAMIC_SHADOW_UNIFORMS {
     float shadow_extent[4];
 } DYNAMIC_SHADOW_UNIFORMS;
 
-typedef struct DYNAMIC_SURFACE_UNIFORMS {
-    float model[16];
-    float inverse_model[16];
-    float normal_model[16];
-
-    Uint32 sample_offset;
-    Uint32 sample_count;
-    Uint32 texture_width;
-    Uint32 texture_height;
-
-    float beam_origin[4];
-    float beam_step[4];
-    Uint32 beam_dims[4];
-
-    float sun_direction_intensity[4];
-    float sun_color_visibility_floor[4];
-    float sky_zenith[4];
-    float sky_horizon[4];
-    float trace_params[4];
-
-    Uint32 dynamic_instance_data[4];
-    float dynamic_instance_inverse[DYNAMIC_TRACE_INSTANCE_LIMIT][16];
-    float dynamic_instance_normal[DYNAMIC_TRACE_INSTANCE_LIMIT][16];
-    Uint32 dynamic_instance_meta[DYNAMIC_TRACE_INSTANCE_LIMIT][4];
-} DYNAMIC_SURFACE_UNIFORMS;
-
-typedef struct DYNAMIC_RECEIVER_UNIFORMS {
-    Uint32 dispatch_data[4];
-    Uint32 dynamic_instance_data[4];
-    float receiver_params[4];
-    float temporal_params[4];
-    float view_projection[16];
-
-    float dynamic_instance_model[DYNAMIC_TRACE_INSTANCE_LIMIT][16];
-    float dynamic_instance_inverse[DYNAMIC_TRACE_INSTANCE_LIMIT][16];
-    Uint32 dynamic_instance_meta[DYNAMIC_TRACE_INSTANCE_LIMIT][4];
-    float dynamic_instance_emissive[DYNAMIC_TRACE_INSTANCE_LIMIT][4];
-    float dynamic_instance_center_radius[DYNAMIC_TRACE_INSTANCE_LIMIT][4];
-} DYNAMIC_RECEIVER_UNIFORMS;
+typedef struct DYNAMIC_RADIANCE_UNIFORMS {
+    Uint32 bvh_meta[4];
+    Uint32 field_meta[4];
+    float field_origin_spacing[4];
+    float field_params[4];
+} DYNAMIC_RADIANCE_UNIFORMS;
 
 typedef struct SSAO_UNIFORMS {
     Uint32 width, height, ao_width, ao_height;
@@ -450,43 +413,33 @@ typedef struct VOLUME_COMPOSE_UNIFORMS {
 struct DYNAMIC_LIGHTING_ALLOCATION {
     OBJECT_ID object_id;
     const LIGHTMAP *layout;
-    NriTexture *texture;
     NriTexture *reference_texture;
-    NriBuffer *sample_buffer;
+
     uint32_t dynamic_node_offset;
     uint32_t dynamic_node_count;
     uint32_t dynamic_triangle_offset;
     uint32_t dynamic_triangle_count;
+
     VEC3 local_center;
     VEC3 local_extents;
     float local_radius;
+
     VEC3 local_emissive_center;
     VEC3 local_emissive_extents;
     float local_emissive_radius;
+
     VEC3 average_diffuse;
     VEC3 average_emissive;
     float emissive_weight;
-    VEC3 receiver_previous_center;
-    bool receiver_previous_center_valid;
-    uint32_t transform_revision;
-    uint32_t lighting_revision;
-    uint32_t scene_lighting_revision;
+
+    uint32_t radiance_probe_offset;
+    uint32_t radiance_dims[3];
+    VEC3 radiance_origin;
+    float radiance_spacing;
+
     uint32_t reference_transform_revision;
     uint32_t reference_lighting_revision;
-    uint32_t pending_transform_revision;
-    uint32_t pending_lighting_revision;
-    uint32_t pending_scene_lighting_revision;
-    uint32_t sample_cursor;
-    uint32_t sample_pass;
-    uint32_t acceptance_transform_revision;
-    uint32_t acceptance_scene_lighting_revision;
-    bool cache_needs_clear;
 };
-
-typedef struct DYNAMIC_STATIC_SURFACE_GPU {
-    Uint32 source_triangle;
-    Uint32 _pad[3];
-} DYNAMIC_STATIC_SURFACE_GPU;
 
 struct RENDER_MATERIAL {
     GLTF_MATERIAL data;
