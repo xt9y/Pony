@@ -43,7 +43,7 @@ def main() -> None:
         "#defineBAKE_IDLE_SLEEP_MS2u",
         ".direction={0.38f,0.30f,0.32f}",
         ".color={1.00f,0.94f,0.84f}",
-        ".intensity=0.0f",
+        ".intensity=1.0f",
         ".angular_radius=0.00465f",
         ".zenith={0.22f,0.42f,0.78f}",
         ".horizon={0.68f,0.76f,0.88f}",
