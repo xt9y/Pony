@@ -1820,6 +1820,17 @@ static uint32_t dynamic_influences(const RENDERER *r, MATERIAL_UNIFORMS *uniform
         uniforms->dynamic_influence_emissive[count][2] = allocation->average_emissive.z;
         uniforms->dynamic_influence_emissive[count][3] = 0.0f;
 
+        const MAT4 inverse = m4_inverse_transform(object->transform);
+        memcpy(uniforms->dynamic_radiance_inverse[count], inverse.m, sizeof(inverse.m));
+        uniforms->dynamic_radiance_origin_spacing[count][0] = allocation->radiance_origin.x;
+        uniforms->dynamic_radiance_origin_spacing[count][1] = allocation->radiance_origin.y;
+        uniforms->dynamic_radiance_origin_spacing[count][2] = allocation->radiance_origin.z;
+        uniforms->dynamic_radiance_origin_spacing[count][3] = allocation->radiance_spacing;
+        uniforms->dynamic_radiance_dims_offset[count][0] = allocation->radiance_dims[0];
+        uniforms->dynamic_radiance_dims_offset[count][1] = allocation->radiance_dims[1];
+        uniforms->dynamic_radiance_dims_offset[count][2] = allocation->radiance_dims[2];
+        uniforms->dynamic_radiance_dims_offset[count][3] = allocation->radiance_probe_offset;
+
         if (allocation->object_id == current_object) current = count;
         ++count;
     }
@@ -1830,23 +1841,16 @@ static uint32_t dynamic_influences(const RENDERER *r, MATERIAL_UNIFORMS *uniform
 }
 
 static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATERIAL *material, const RENDER_FRAME *frame, const DRAW_RANGE *draw) {
-    float dynamic_cache_valid = 0.0f;
+    float dynamic_reference_valid = 0.0f;
 
-    if (r && r->scene && draw && draw->object_id) {
+    if (r && r->reference_lighting_enabled && r->scene && draw && draw->object_id) {
         const DYNAMIC_LIGHTING_ALLOCATION *allocation = dynamic_lighting_find_const(r, draw->object_id);
         const OBJECT *object = scene_object_by_id_const(r->scene, draw->object_id);
 
-        if (allocation && object) {
-            if (r->reference_lighting_enabled) {
-                if (allocation->reference_texture && allocation->reference_transform_revision == object->transform_revision &&
-                    allocation->reference_lighting_revision == object->lighting_revision)
-                    dynamic_cache_valid = 1.0f;
-            } else if (allocation->texture && allocation->transform_revision == object->transform_revision &&
-                       allocation->lighting_revision == object->lighting_revision &&
-                       allocation->scene_lighting_revision == r->scene->lighting_revision) {
-                dynamic_cache_valid = 1.0f;
-            }
-        }
+        if (allocation && object && allocation->reference_texture &&
+            allocation->reference_transform_revision == object->transform_revision &&
+            allocation->reference_lighting_revision == object->lighting_revision)
+            dynamic_reference_valid = 1.0f;
     }
 
     MATERIAL_UNIFORMS result = (MATERIAL_UNIFORMS){
@@ -1868,7 +1872,7 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
         .shadow_texel_enabled = {r->dynamic_shadow_size ? 1.0f / (float)r->dynamic_shadow_size : 1.0f,
                                  r->dynamic_shadow_size ? 1.0f / (float)r->dynamic_shadow_size : 1.0f,
                                  r->dynamic_shadow_ready ? 1.0f : 0.0f, 0.0f},
-        .dynamic_flags = {draw && draw->object_id ? 1.0f : 0.0f, dynamic_cache_valid, r->reference_lighting_enabled ? 1.0f : 0.0f,
+        .dynamic_flags = {draw && draw->object_id ? 1.0f : 0.0f, dynamic_reference_valid, r->reference_lighting_enabled ? 1.0f : 0.0f,
                           (float)r->debug_view},
         .probe_origin_spacing = {r->volume_probes.origin.x, r->volume_probes.origin.y, r->volume_probes.origin.z, r->volume_probes.spacing},
         .probe_dims = {r->volume_probes.count_x, r->volume_probes.count_y, r->volume_probes.count_z, r->volume_probe_buffer ? 1u : 0u},
@@ -1878,8 +1882,8 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
 
     (void)dynamic_shadow_projection(r, frame, result.shadow_u_min, result.shadow_v_min, result.shadow_sun_max, result.shadow_extent_bias);
     (void)dynamic_influences(r, &result, draw ? draw->object_id : 0u);
-    result.dynamic_influence_meta[2] = r->dynamic_receiver_ready ? 1u : 0u;
-    result.dynamic_influence_meta[3] = (uint32_t)(r->gpu->frame_index % 1024u) + 1u;
+    result.dynamic_influence_meta[2] = r->dynamic_radiance_buffer ? 1u : 0u;
+    result.dynamic_influence_meta[3] = 0u;
     return result;
 }
 
@@ -1915,14 +1919,10 @@ static bool draw_surface_range(RENDERER *r, NriCommandBuffer *cmd, const RENDER_
     if (draw->object_id) {
         DYNAMIC_LIGHTING_ALLOCATION *allocation = dynamic_lighting_find(r, draw->object_id);
 
-        if (uniforms.dynamic_flags[1] > 0.5f && allocation) {
-            if (r->reference_lighting_enabled && allocation->reference_texture)
-                lighting = allocation->reference_texture;
-            else if (!r->reference_lighting_enabled && allocation->texture)
-                lighting = allocation->texture;
-        } else {
+        if (uniforms.dynamic_flags[1] > 0.5f && allocation && allocation->reference_texture)
+            lighting = allocation->reference_texture;
+        else
             lighting = r->default_white;
-        }
     }
 
     if (!bind_camera_resources(r, cmd, &camera, sizeof(camera)) ||
