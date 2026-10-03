@@ -497,7 +497,24 @@ float3 dynamic_radiance_field(uint index, float3 world_position, float3 world_no
     float3 edge_distance = min(coord, maximum - coord);
     float edge = min(edge_distance.x, min(edge_distance.y, edge_distance.z));
     float fade = smoothstep(0.0f, 2.0f, edge);
-    float visibility = dynamic_radiance_static_visibility(index, local_position);
+
+    float sampled_visibility = dynamic_radiance_static_visibility(index, local_position);
+    float emitter_radius = max(dynamic_influence_emissive[index].w, spacing);
+    float3 emitter_center =
+        dynamic_radiance_origin_spacing[index].xyz + 0.5f * spacing * float3(meta.xyz - 1u);
+    float emitter_distance = length(local_position - emitter_center);
+
+    /*
+     * The 8^3 visibility field is intentionally coarse. Around a mounted area
+     * emitter its neighboring probes can fall inside/behind the mounting wall,
+     * which can interpolate to zero exactly where direct light should be
+     * strongest. The SH field already contains the emitter's own geometric
+     * visibility, so trust it close to the emissive bounds and phase in static
+     * scene visibility over the next few emitter radii.
+     */
+    float visibility_blend =
+        smoothstep(emitter_radius * 1.25f, emitter_radius * 3.0f, emitter_distance);
+    float visibility = lerp(1.0f, sampled_visibility, visibility_blend);
 
     return irradiance * (fade * visibility / PI);
 }
@@ -800,8 +817,30 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     }
 
     if (dynamic_flags.w > 5.5f && dynamic_flags.w < 6.5f) {
-        float positive = length(max(dynamic_correction, 0.0f));
-        float3 correction_debug = saturate(float3(0.0f, positive, 0.0f) * 6.0f);
+        float raw_energy = 0.0f;
+        uint count = min(dynamic_influence_meta.x, 8u);
+
+        [loop] for (uint i = 0u; i < count; ++i) {
+            if (i == dynamic_influence_meta.y) continue;
+
+            uint4 meta = dynamic_radiance_dims_offset[i];
+            float spacing = dynamic_radiance_origin_spacing[i].w;
+            if (any(meta.xyz < 2u) || spacing <= 0.0f) continue;
+
+            float3 local_position = mul(dynamic_radiance_inverse[i], float4(input.world_position, 1.0f)).xyz;
+            float3 coord = (local_position - dynamic_radiance_origin_spacing[i].xyz) / spacing;
+            float3 maximum = float3(meta.xyz - 1u);
+            if (any(coord < 0.0f) || any(coord > maximum)) continue;
+
+            float3 local_normal = normalize(mul(transpose((float3x3)dynamic_radiance_model[i]), geometric_normal));
+            DynamicIrradianceWeights weights = dynamic_radiance_irradiance_weights(local_normal);
+            float3 uvw = dynamic_field_uvw(meta, coord, max(dynamic_influence_meta.w, 1u));
+            raw_energy += length(dynamic_radiance_filtered(uvw, weights) / PI);
+        }
+
+        float corrected_energy = length(max(dynamic_correction, 0.0f));
+        float3 correction_debug =
+            saturate(float3(raw_energy * 8.0f, corrected_energy * 8.0f, 0.0f));
 
         output.hdr = float4(correction_debug, 1.0f);
         output.normal_depth = float4(normalize(input.view_normal) * (front_face ? 0.5f : -0.5f) + 0.5f, max(input.view_depth, 0.0f));

@@ -1971,6 +1971,12 @@ static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cm
         if (allocation->visibility_transform_revision == object->transform_revision) continue;
 
         const MAT4 model = m4_transform(object->transform, false);
+        const float scale_x = sqrtf(model.m[0] * model.m[0] + model.m[1] * model.m[1] + model.m[2] * model.m[2]);
+        const float scale_y = sqrtf(model.m[4] * model.m[4] + model.m[5] * model.m[5] + model.m[6] * model.m[6]);
+        const float scale_z = sqrtf(model.m[8] * model.m[8] + model.m[9] * model.m[9] + model.m[10] * model.m[10]);
+        const float emitter_world_radius =
+            allocation->local_emissive_radius * fmaxf(scale_x, fmaxf(scale_y, scale_z));
+
         DYNAMIC_VISIBILITY_UNIFORMS uniforms = {
             .bvh_meta = {r->radiance_visibility_node_count, r->radiance_visibility_triangle_count, 0u, 0u},
             .field_meta = {allocation->visibility_probe_offset, allocation->visibility_dims[0],
@@ -1978,7 +1984,7 @@ static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cm
             .field_origin_spacing = {allocation->visibility_origin.x, allocation->visibility_origin.y,
                                      allocation->visibility_origin.z, allocation->visibility_spacing},
             .emitter_center_radius = {allocation->local_emissive_center.x, allocation->local_emissive_center.y,
-                                      allocation->local_emissive_center.z, allocation->local_emissive_radius},
+                                      allocation->local_emissive_center.z, emitter_world_radius},
             .params = {epsilon, 0.0f, 0.0f, 0.0f},
         };
         memcpy(uniforms.model, model.m, sizeof(uniforms.model));
@@ -2050,7 +2056,7 @@ static bool write_dynamic_influence(const RENDERER *r, MATERIAL_UNIFORMS *unifor
     uniforms->dynamic_influence_emissive[slot][0] = allocation->average_emissive.x;
     uniforms->dynamic_influence_emissive[slot][1] = allocation->average_emissive.y;
     uniforms->dynamic_influence_emissive[slot][2] = allocation->average_emissive.z;
-    uniforms->dynamic_influence_emissive[slot][3] = 0.0f;
+    uniforms->dynamic_influence_emissive[slot][3] = allocation->local_emissive_radius;
 
     const MAT4 inverse = m4_inverse_transform(object->transform);
     memcpy(uniforms->dynamic_radiance_inverse[slot], inverse.m, sizeof(inverse.m));
