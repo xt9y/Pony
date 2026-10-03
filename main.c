@@ -177,8 +177,15 @@ int main(int argc, char **argv) {
     };
     
     transform_rotate_y(&cornell, -90.0f);
+
+    TRANSFORM cube = {
+        .position = {0.0f, 0.0f, 0.0f},
+        .scale = {1.0f, 2.0f, 1.0f},
+        .rotation = {0.0f, 0.0f, 0.0f}
+    };
     
-    TRANSFORM transform = barn_lamp;
+    // TRANSFORM transform = barn_lamp;
+    TRANSFORM transform = cube;
     // TRANSFORM transform = cornell;
 
     if (!load_scene_model(&scene, &models[0], BASE_MODEL_PATH, STATIC, transform_identity(), &total_bin_size)) {
