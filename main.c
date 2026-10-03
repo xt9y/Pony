@@ -303,7 +303,7 @@ int main(int argc, char **argv) {
            lightmap.chart_count, lightmap.texel_density, lightmap.sample_count);
     printf("Lighting: %s. Press B to rebake this scene in the renderer.\n", cached ? "loaded saved bake" : "unbaked fallback");
     printf("Runtime: PBR + sun beams + volume probes -> HDR -> bloom -> ACES + GPU LUT\n");
-    printf("Extra models are DYNAMIC by default; prefix static: to bake one permanently | first dynamic model auto-oscillates Z from -1 to +1 | left/right: move first dynamic model on X | LMB drag: orbit | wheel: zoom | B: rebake | F2: reference lighting | F5: fog on/off | F6: cache validity | F7: dynamic emissive contribution | Tab: wireframe | F11: fullscreen | Esc: quit\n");
+    printf("Extra models are DYNAMIC by default; prefix static: to bake one permanently | first dynamic model auto-oscillates Z from -1 to +1 | left/right: move first dynamic model on X | LMB drag: orbit | wheel: zoom | B: rebake | F2: reference lighting | F5: fog on/off | F6: dynamic receive path | F7: dynamic radiance contribution | Tab: wireframe | F11: fullscreen | Esc: quit\n");
 
     bool running = true;
     Uint64 last_frame_print = SDL_GetTicks();
