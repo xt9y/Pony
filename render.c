@@ -2914,6 +2914,18 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         if (good) {
             allocation->emissive_weight = tree.emissive_weight;
 
+            uint64_t field_hash = hash_bytes(DYNAMIC_RADIANCE_CACHE_VERSION, tree.nodes,
+                                             (size_t)tree.node_count * sizeof(*tree.nodes));
+            field_hash = hash_bytes(field_hash, tree.triangles,
+                                    (size_t)tree.triangle_count * sizeof(*tree.triangles));
+            const uint32_t field_settings[] = {
+                DYNAMIC_RADIANCE_FIELD_DIM,
+                DYNAMIC_RADIANCE_FIELD_SAMPLES,
+            };
+            field_hash = hash_bytes(field_hash, field_settings, sizeof(field_settings));
+            field_hash = hash_bytes(field_hash, &((float){DYNAMIC_RADIANCE_IRRADIANCE_FLOOR}), sizeof(float));
+            allocation->radiance_cache_hash = field_hash;
+
             if (!dynamic_emissive_bounds(&tree, &allocation->local_emissive_center,
                                          &allocation->local_emissive_extents, &allocation->local_emissive_radius)) {
                 allocation->local_emissive_center = allocation->local_center;
