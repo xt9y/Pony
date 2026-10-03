@@ -86,6 +86,12 @@ def main() -> None:
         raise AssertionError("Apple Silicon runtime prefix missing")
     if '-Wl,-rpath,/usr/local/lib' in build:
         raise AssertionError("macOS must not embed the duplicate /usr/local MoltenVK runtime path")
+    for needle in (
+        "-DVulkan_INCLUDE_DIR=/opt/homebrew/include",
+        "-DVulkan_LIBRARY=/opt/homebrew/lib/libMoltenVK.dylib",
+    ):
+        if needle not in build:
+            raise AssertionError(f"NRI MoltenVK selection is not pinned on macOS: {needle}")
     jobs = re.findall(
         r'\{"([^"]+\.hlsl)",\s*"([^"]+)",\s*"([^"]+)",\s*(NULL|"[^"]+"),\s*"([^"]+)",\s*([01])\}',
         build,
