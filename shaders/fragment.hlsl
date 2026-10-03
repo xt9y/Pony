@@ -77,6 +77,8 @@ GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3) {
 
     float4 dynamic_radiance_origin_spacing[8];
     uint4 dynamic_radiance_dims_offset[8];
+    float4 dynamic_visibility_origin_spacing[8];
+    uint4 dynamic_visibility_dims_offset[8];
     float4x4 dynamic_radiance_inverse[8];
 };
 
@@ -398,6 +400,34 @@ float3 dynamic_radiance_probe_value(uint probe_index, float3 normal) {
     return max(irradiance, 0.0f);
 }
 
+float dynamic_radiance_static_visibility(uint index, float3 local_position) {
+    uint4 meta = dynamic_visibility_dims_offset[index];
+    float spacing = dynamic_visibility_origin_spacing[index].w;
+
+    if (any(meta.xyz < 2u) || spacing <= 0.0f) return 1.0f;
+
+    float3 coord = (local_position - dynamic_visibility_origin_spacing[index].xyz) / spacing;
+    float3 maximum = float3(meta.xyz - 1u);
+
+    if (any(coord < 0.0f) || any(coord > maximum)) return 1.0f;
+
+    uint3 base = min(uint3(floor(coord)), meta.xyz - 2u);
+    float3 fraction = saturate(coord - float3(base));
+    float visibility = 0.0f;
+
+    [unroll] for (uint z = 0u; z < 2u; ++z)
+    [unroll] for (uint y = 0u; y < 2u; ++y)
+    [unroll] for (uint x = 0u; x < 2u; ++x) {
+        uint3 cell = base + uint3(x, y, z);
+        float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
+        float weight = axis_weight.x * axis_weight.y * axis_weight.z;
+        uint probe = meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z);
+        visibility += saturate(DynamicRadianceVisibility[probe]) * weight;
+    }
+
+    return saturate(visibility);
+}
+
 float3 dynamic_radiance_field(uint index, float3 world_position, float3 world_normal) {
     uint4 meta = dynamic_radiance_dims_offset[index];
     if (any(meta.xyz < 2u) || dynamic_radiance_origin_spacing[index].w <= 0.0f) return 0.0f;
@@ -412,7 +442,6 @@ float3 dynamic_radiance_field(uint index, float3 world_position, float3 world_no
     float3 fraction = saturate(coord - float3(base));
     float3 local_normal = normalize(mul((float3x3)dynamic_radiance_inverse[index], world_normal));
     float3 irradiance = 0.0f;
-    float visibility = 0.0f;
 
     [unroll] for (uint z = 0u; z < 2u; ++z)
     [unroll] for (uint y = 0u; y < 2u; ++y)
@@ -421,16 +450,15 @@ float3 dynamic_radiance_field(uint index, float3 world_position, float3 world_no
         float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
         float weight = axis_weight.x * axis_weight.y * axis_weight.z;
         uint probe = meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z);
-
         irradiance += dynamic_radiance_probe_value(probe, local_normal) * weight;
-        visibility += saturate(DynamicRadianceVisibility[probe]) * weight;
     }
 
     float3 edge_distance = min(coord, maximum - coord);
     float edge = min(edge_distance.x, min(edge_distance.y, edge_distance.z));
     float fade = smoothstep(0.0f, 2.0f, edge);
+    float visibility = dynamic_radiance_static_visibility(index, local_position);
 
-    return irradiance * (fade * saturate(visibility) / PI);
+    return irradiance * (fade * visibility / PI);
 }
 
 float3 dynamic_radiance_lighting(float3 world_position, float3 world_normal) {
