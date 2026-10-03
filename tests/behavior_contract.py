@@ -429,6 +429,9 @@ def main() -> None:
         "dynamic_radiance_pipeline",
         "dynamic_radiance_buffer",
         "dynamic_radiance_fallback_buffer",
+        "radiance_visibility_node_buffer",
+        "radiance_visibility_triangle_buffer",
+        "renderer_build_radiance_visibility(",
         "create_dynamic_radiance_buffer(",
         "generate_dynamic_radiance_fields(",
         "dynamic_emissive_bounds(",
@@ -465,6 +468,12 @@ def main() -> None:
         "dynamic_radiance_probe_value(",
         "dynamic_radiance_field(",
         "dynamic_radiance_lighting(",
+        "RadianceVisibilityNodes",
+        "RadianceVisibilityTriangles",
+        "radiance_visibility_any(",
+        "dynamic_radiance_static_visibility(",
+        "dynamic_radiance_emitter_center_radius",
+        "if (max(contribution.r, max(contribution.g, contribution.b)) <= 1.0e-6f) continue",
         "meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z)",
         "smoothstep(0.0f, 2.0f, edge)",
         "dynamic_correction = dynamic_radiance_lighting(input.world_position, geometric_normal)",
@@ -486,6 +495,10 @@ def main() -> None:
         "dynamic_radiance_inverse",
         "m4_inverse_transform(object->transform)",
         "result.dynamic_influence_meta[2] = r->dynamic_radiance_buffer ? 1u : 0u",
+        "dynamic_radiance_emitter_center_radius",
+        "dynamic_visibility_meta",
+        "dynamic_visibility_params",
+        "src, 21",
     ):
         if needle not in render:
             raise AssertionError(f"moving radiance-field transform metadata missing: {needle}")
