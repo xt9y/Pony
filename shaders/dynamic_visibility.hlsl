@@ -131,19 +131,32 @@ void dynamic_visibility_cs(uint3 id : SV_DispatchThreadID) {
     float3 delta = emitter_center - world_position;
     float distance2 = dot(delta, delta);
     float epsilon = max(params.x, 1.0e-5f);
+    float emitter_radius = max(emitter_center_radius.w, 0.0f);
     float visibility = 1.0f;
 
     if (distance2 > epsilon * epsilon && bvh_meta.x != 0u) {
         float distance = sqrt(distance2);
         float3 direction = delta / distance;
 
+        /*
+         * Visibility is to the emissive region, not to its center. The center
+         * of a wall/ceiling-mounted area emitter may lie on or behind static
+         * mounting geometry; tracing all the way there incorrectly marks the
+         * receiver as occluded by the mounting surface itself.
+         *
+         * Stop at the near surface of the emissive bounding sphere. The
+         * object-local radiance field already accounts for self-occlusion by
+         * the dynamic object's own geometry.
+         */
+        float target_distance = max(epsilon, distance - emitter_radius);
+
         TraceRay ray;
         ray.origin = world_position + direction * epsilon;
         ray.tmin = epsilon;
         ray.direction = direction;
-        ray.tmax = max(epsilon, distance - epsilon * 2.0f);
+        ray.tmax = max(epsilon, target_distance - epsilon);
 
-        visibility = trace_any(ray) ? 0.0f : 1.0f;
+        visibility = target_distance <= epsilon * 2.0f || !trace_any(ray) ? 1.0f : 0.0f;
     }
 
     Visibility[field_meta.x + probe_index] = visibility;

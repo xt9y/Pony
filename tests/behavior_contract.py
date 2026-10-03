@@ -546,6 +546,8 @@ def main() -> None:
         "RWStructuredBuffer<float> Visibility",
         "trace_any(",
         "world_position = mul(model, float4(local_position, 1.0f)).xyz",
+        "emitter_radius = max(emitter_center_radius.w, 0.0f)",
+        "target_distance = max(epsilon, distance - emitter_radius)",
         "Visibility[field_meta.x + probe_index] = visibility",
     ):
         if needle not in dynamic_visibility:
