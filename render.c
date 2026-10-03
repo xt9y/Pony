@@ -15,6 +15,7 @@
 #define REFERENCE_SURFACE_MAX_SIZE 4096u
 #define DYNAMIC_INFLUENCE_LIMIT 8u
 #define DYNAMIC_RADIANCE_FIELD_DIM 32u
+#define DYNAMIC_VISIBILITY_FIELD_DIM 8u
 #define DYNAMIC_RADIANCE_FIELD_SAMPLES 64u
 #define DYNAMIC_RADIANCE_IRRADIANCE_FLOOR 0.00075f
 #define DYNAMIC_RADIANCE_CACHE_MAGIC 0x52464450u
@@ -353,6 +354,8 @@ typedef struct MATERIAL_UNIFORMS {
 
     float dynamic_radiance_origin_spacing[DYNAMIC_INFLUENCE_LIMIT][4];
     Uint32 dynamic_radiance_dims_offset[DYNAMIC_INFLUENCE_LIMIT][4];
+    float dynamic_visibility_origin_spacing[DYNAMIC_INFLUENCE_LIMIT][4];
+    Uint32 dynamic_visibility_dims_offset[DYNAMIC_INFLUENCE_LIMIT][4];
     float dynamic_radiance_inverse[DYNAMIC_INFLUENCE_LIMIT][16];
 } MATERIAL_UNIFORMS;
 
@@ -415,6 +418,8 @@ typedef struct VOLUME_UNIFORMS {
     Uint32 dynamic_radiance_meta[4];
     float dynamic_radiance_origin_spacing[DYNAMIC_INFLUENCE_LIMIT][4];
     Uint32 dynamic_radiance_dims_offset[DYNAMIC_INFLUENCE_LIMIT][4];
+    float dynamic_visibility_origin_spacing[DYNAMIC_INFLUENCE_LIMIT][4];
+    Uint32 dynamic_visibility_dims_offset[DYNAMIC_INFLUENCE_LIMIT][4];
     float dynamic_radiance_inverse[DYNAMIC_INFLUENCE_LIMIT][16];
 } VOLUME_UNIFORMS;
 
@@ -452,6 +457,12 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     uint32_t radiance_dims[3];
     VEC3 radiance_origin;
     float radiance_spacing;
+
+    uint32_t visibility_probe_offset;
+    uint32_t visibility_dims[3];
+    VEC3 visibility_origin;
+    float visibility_spacing;
+
     uint64_t radiance_cache_hash;
     uint32_t visibility_transform_revision;
     uint32_t visibility_pending_revision;
