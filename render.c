@@ -2933,7 +2933,6 @@ static bool renderer_build_scene(RENDERER *renderer, SCENE *scene, const LIGHTMA
     renderer->distance = renderer->scene_radius * 2.15f;
 
     uint32_t draw_capacity = visual->material_count;
-    uint32_t dynamic_model_count = 0u;
 
     for (uint32_t i = 0; i < scene->object_count; ++i) {
         const OBJECT *object = &scene->objects[i];
@@ -2943,12 +2942,7 @@ static bool renderer_build_scene(RENDERER *renderer, SCENE *scene, const LIGHTMA
         const struct MODEL *model = object->data;
         if (UINT32_MAX - draw_capacity < model->visual->material_count) return false;
         draw_capacity += model->visual->material_count;
-        ++dynamic_model_count;
     }
-
-    const uint32_t dynamic_surface_target =
-        dynamic_model_count ? (DYNAMIC_SURFACE_SAMPLES_PER_FRAME / dynamic_model_count ? DYNAMIC_SURFACE_SAMPLES_PER_FRAME / dynamic_model_count : 1u)
-                            : DYNAMIC_SURFACE_SAMPLES_PER_FRAME;
 
     free(renderer->draws);
     renderer->draws = calloc(draw_capacity ? draw_capacity : 1u, sizeof(*renderer->draws));
@@ -2994,7 +2988,7 @@ static bool renderer_build_scene(RENDERER *renderer, SCENE *scene, const LIGHTMA
 
         struct MODEL *model = object->data;
 
-        if (!model_surface_layout(model, dynamic_surface_target)) return false;
+        if (!model_surface_layout(model, 2048u)) return false;
 
         const LIGHTMAP *layout = model->surface_layout;
         const size_t triangle_count = model->visual->vertex_count / 3u;
