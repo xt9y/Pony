@@ -86,8 +86,8 @@ def main() -> None:
         r'\{"([^"]+\.hlsl)",\s*"([^"]+)",\s*"([^"]+)",\s*(NULL|"[^"]+"),\s*"([^"]+)",\s*([01])\}',
         build,
     )
-    if len(jobs) != 29:
-        raise AssertionError(f"expected 29 shader jobs, found {len(jobs)}")
+    if len(jobs) != 30:
+        raise AssertionError(f"expected 30 shader jobs, found {len(jobs)}")
 
     for path, entry, define, fallback, stage, wave in jobs:
         source = shader_source(path)
@@ -403,8 +403,8 @@ def main() -> None:
     if (ROOT / "shaders/dynamic_receiver.hlsl").exists():
         raise AssertionError("obsolete dynamic receiver mini-baker shader still exists")
 
-    if len(jobs) != 29:
-        raise AssertionError(f"expected 29 shader jobs after mini-baker removal, found {len(jobs)}")
+    if len(jobs) != 30:
+        raise AssertionError(f"expected 30 shader jobs after mini-baker removal, found {len(jobs)}")
 
     dynamic_radiance = text("shaders/dynamic_radiance.hlsl")
 
