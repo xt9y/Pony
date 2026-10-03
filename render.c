@@ -21,9 +21,6 @@
 #define DYNAMIC_RADIANCE_CACHE_MAGIC 0x52464450u
 #define DYNAMIC_RADIANCE_CACHE_VERSION 2u
 #define DYNAMIC_SHADOW_SIZE 512u
-#define DYNAMIC_TIMESTAMP_BASE 8u
-#define DYNAMIC_TIMESTAMP_STRIDE 4u
-#define DYNAMIC_TIMING_LOG_INTERVAL 120u
 
 typedef struct MAT4 {
     float m[16];
@@ -2237,21 +2234,12 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
 
     if (!gpu_begin_render_frame(r, &queued_frame, &cmd, &swap, &swap_index)) goto failed_frame;
 
-    const uint32_t timing_base =
-        DYNAMIC_TIMESTAMP_BASE + (uint32_t)(r->gpu->frame_index % GPU_FRAME_QUEUE_DEPTH) * DYNAMIC_TIMESTAMP_STRIDE;
-
-    if (r->gpu->frame_index >= GPU_FRAME_QUEUE_DEPTH && r->gpu->frame_index % DYNAMIC_TIMING_LOG_INTERVAL == 0u) {
-        gpu_timestamp_log(r, timing_base, "dynamic field visibility");
-        gpu_timestamp_log(r, timing_base + 2u, "dynamic shadow map");
-    }
-
-    if (!gpu_timestamp_begin(r, cmd, timing_base)) goto failed_frame;
+    /*
+     * Keep GPU timing readback out of the realtime frame. Mapping the
+     * timestamp readback buffer can serialize MoltenVK/Metal for seconds.
+     */
     if (!update_dynamic_radiance_visibility(r, cmd)) goto failed_frame;
-    if (!gpu_timestamp_end(r, cmd, timing_base)) goto failed_frame;
-
-    if (!gpu_timestamp_begin(r, cmd, timing_base + 2u)) goto failed_frame;
     if (!render_dynamic_shadow_map(r, cmd, frame)) goto failed_frame;
-    if (!gpu_timestamp_end(r, cmd, timing_base + 2u)) goto failed_frame;
 
     CAMERA_UNIFORMS camera = {0};
 

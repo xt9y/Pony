@@ -373,19 +373,18 @@ def main() -> None:
     if "if (frame->sun.intensity <= 0.0f) return true;" not in render:
         raise AssertionError("disabled sun must skip the dynamic shadow-map pass")
 
-    for needle in (
-        "GPU_FRAME_QUEUE_DEPTH",
+    if "GPU_FRAME_QUEUE_DEPTH" not in text("render_internal.h"):
+        raise AssertionError("frame queue depth contract missing")
+
+    for forbidden in (
         "DYNAMIC_TIMESTAMP_BASE",
         "DYNAMIC_TIMESTAMP_STRIDE",
+        "DYNAMIC_TIMING_LOG_INTERVAL",
         'gpu_timestamp_log(r, timing_base, "dynamic field visibility")',
         'gpu_timestamp_log(r, timing_base + 2u, "dynamic shadow map")',
-        "gpu_timestamp_begin(r, cmd, timing_base)",
-        "gpu_timestamp_end(r, cmd, timing_base)",
-        "gpu_timestamp_begin(r, cmd, timing_base + 2u)",
-        "gpu_timestamp_end(r, cmd, timing_base + 2u)",
     ):
-        if needle not in render + text("render_internal.h"):
-            raise AssertionError(f"dynamic GPU cost instrumentation missing: {needle}")
+        if forbidden in render:
+            raise AssertionError(f"blocking realtime GPU timing instrumentation returned: {forbidden}")
 
     for forbidden in (
         'gpu_timestamp_log(r, timing_base, "dynamic object cache")',
