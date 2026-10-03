@@ -1803,68 +1803,87 @@ static bool render_dynamic_shadow_map(RENDERER *r, NriCommandBuffer *cmd, const 
     return true;
 }
 
+static bool write_dynamic_influence(const RENDERER *r, MATERIAL_UNIFORMS *uniforms, uint32_t slot,
+                                    const DYNAMIC_LIGHTING_ALLOCATION *allocation) {
+    if (!r || !uniforms || !allocation || slot >= DYNAMIC_INFLUENCE_LIMIT) return false;
+
+    const OBJECT *object = scene_object_by_id_const(r->scene, allocation->object_id);
+    if (!object || object->state != DYNAMIC || object->type != MODEL || allocation->local_radius <= 0.0f) return false;
+
+    const MAT4 model = m4_transform(object->transform, false);
+    const VEC3 center = m4_point(model, allocation->local_center);
+    const VEC3 axis_x =
+        v3(model.m[0] * allocation->local_extents.x, model.m[1] * allocation->local_extents.x, model.m[2] * allocation->local_extents.x);
+    const VEC3 axis_y =
+        v3(model.m[4] * allocation->local_extents.y, model.m[5] * allocation->local_extents.y, model.m[6] * allocation->local_extents.y);
+    const VEC3 axis_z =
+        v3(model.m[8] * allocation->local_extents.z, model.m[9] * allocation->local_extents.z, model.m[10] * allocation->local_extents.z);
+    const float radius = fmaxf(sqrtf(v3_len_sq(axis_x) + v3_len_sq(axis_y) + v3_len_sq(axis_z)), 1.0e-3f);
+
+    uniforms->dynamic_influence_center_radius[slot][0] = center.x;
+    uniforms->dynamic_influence_center_radius[slot][1] = center.y;
+    uniforms->dynamic_influence_center_radius[slot][2] = center.z;
+    uniforms->dynamic_influence_center_radius[slot][3] = radius;
+
+    uniforms->dynamic_influence_axis_x[slot][0] = axis_x.x;
+    uniforms->dynamic_influence_axis_x[slot][1] = axis_x.y;
+    uniforms->dynamic_influence_axis_x[slot][2] = axis_x.z;
+
+    uniforms->dynamic_influence_axis_y[slot][0] = axis_y.x;
+    uniforms->dynamic_influence_axis_y[slot][1] = axis_y.y;
+    uniforms->dynamic_influence_axis_y[slot][2] = axis_y.z;
+
+    uniforms->dynamic_influence_axis_z[slot][0] = axis_z.x;
+    uniforms->dynamic_influence_axis_z[slot][1] = axis_z.y;
+    uniforms->dynamic_influence_axis_z[slot][2] = axis_z.z;
+
+    uniforms->dynamic_influence_diffuse[slot][0] = allocation->average_diffuse.x;
+    uniforms->dynamic_influence_diffuse[slot][1] = allocation->average_diffuse.y;
+    uniforms->dynamic_influence_diffuse[slot][2] = allocation->average_diffuse.z;
+    uniforms->dynamic_influence_diffuse[slot][3] = 1.0f;
+
+    uniforms->dynamic_influence_emissive[slot][0] = allocation->average_emissive.x;
+    uniforms->dynamic_influence_emissive[slot][1] = allocation->average_emissive.y;
+    uniforms->dynamic_influence_emissive[slot][2] = allocation->average_emissive.z;
+    uniforms->dynamic_influence_emissive[slot][3] = 0.0f;
+
+    const MAT4 inverse = m4_inverse_transform(object->transform);
+    memcpy(uniforms->dynamic_radiance_inverse[slot], inverse.m, sizeof(inverse.m));
+    uniforms->dynamic_radiance_origin_spacing[slot][0] = allocation->radiance_origin.x;
+    uniforms->dynamic_radiance_origin_spacing[slot][1] = allocation->radiance_origin.y;
+    uniforms->dynamic_radiance_origin_spacing[slot][2] = allocation->radiance_origin.z;
+    uniforms->dynamic_radiance_origin_spacing[slot][3] = allocation->radiance_spacing;
+    uniforms->dynamic_radiance_dims_offset[slot][0] = allocation->radiance_dims[0];
+    uniforms->dynamic_radiance_dims_offset[slot][1] = allocation->radiance_dims[1];
+    uniforms->dynamic_radiance_dims_offset[slot][2] = allocation->radiance_dims[2];
+    uniforms->dynamic_radiance_dims_offset[slot][3] = allocation->radiance_probe_offset;
+    return true;
+}
+
 static uint32_t dynamic_influences(const RENDERER *r, MATERIAL_UNIFORMS *uniforms, OBJECT_ID current_object) {
     if (!r || !r->scene || !uniforms) return 0u;
 
     uint32_t count = 0u;
     uint32_t current = UINT32_MAX;
 
-    for (uint32_t i = 0; i < r->dynamic_lighting_count && count < DYNAMIC_INFLUENCE_LIMIT; ++i) {
+    if (current_object) {
+        const DYNAMIC_LIGHTING_ALLOCATION *self = dynamic_lighting_find_const(r, current_object);
+        if (self && write_dynamic_influence(r, uniforms, count, self)) {
+            current = count;
+            ++count;
+        }
+    }
+
+    for (uint32_t i = 0u; i < r->dynamic_lighting_count && count < DYNAMIC_INFLUENCE_LIMIT; ++i) {
         const DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
-        const OBJECT *object = scene_object_by_id_const(r->scene, allocation->object_id);
+        if (allocation->object_id == current_object || !allocation->radiance_dims[0]) continue;
+        if (write_dynamic_influence(r, uniforms, count, allocation)) ++count;
+    }
 
-        if (!object || object->state != DYNAMIC || object->type != MODEL || allocation->local_radius <= 0.0f) continue;
-
-        const MAT4 model = m4_transform(object->transform, false);
-        const VEC3 center = m4_point(model, allocation->local_center);
-        const VEC3 axis_x =
-            v3(model.m[0] * allocation->local_extents.x, model.m[1] * allocation->local_extents.x, model.m[2] * allocation->local_extents.x);
-        const VEC3 axis_y =
-            v3(model.m[4] * allocation->local_extents.y, model.m[5] * allocation->local_extents.y, model.m[6] * allocation->local_extents.y);
-        const VEC3 axis_z =
-            v3(model.m[8] * allocation->local_extents.z, model.m[9] * allocation->local_extents.z, model.m[10] * allocation->local_extents.z);
-        const float radius = fmaxf(sqrtf(v3_len_sq(axis_x) + v3_len_sq(axis_y) + v3_len_sq(axis_z)), 1.0e-3f);
-
-        uniforms->dynamic_influence_center_radius[count][0] = center.x;
-        uniforms->dynamic_influence_center_radius[count][1] = center.y;
-        uniforms->dynamic_influence_center_radius[count][2] = center.z;
-        uniforms->dynamic_influence_center_radius[count][3] = radius;
-
-        uniforms->dynamic_influence_axis_x[count][0] = axis_x.x;
-        uniforms->dynamic_influence_axis_x[count][1] = axis_x.y;
-        uniforms->dynamic_influence_axis_x[count][2] = axis_x.z;
-
-        uniforms->dynamic_influence_axis_y[count][0] = axis_y.x;
-        uniforms->dynamic_influence_axis_y[count][1] = axis_y.y;
-        uniforms->dynamic_influence_axis_y[count][2] = axis_y.z;
-
-        uniforms->dynamic_influence_axis_z[count][0] = axis_z.x;
-        uniforms->dynamic_influence_axis_z[count][1] = axis_z.y;
-        uniforms->dynamic_influence_axis_z[count][2] = axis_z.z;
-
-        uniforms->dynamic_influence_diffuse[count][0] = allocation->average_diffuse.x;
-        uniforms->dynamic_influence_diffuse[count][1] = allocation->average_diffuse.y;
-        uniforms->dynamic_influence_diffuse[count][2] = allocation->average_diffuse.z;
-        uniforms->dynamic_influence_diffuse[count][3] = 1.0f;
-
-        uniforms->dynamic_influence_emissive[count][0] = allocation->average_emissive.x;
-        uniforms->dynamic_influence_emissive[count][1] = allocation->average_emissive.y;
-        uniforms->dynamic_influence_emissive[count][2] = allocation->average_emissive.z;
-        uniforms->dynamic_influence_emissive[count][3] = 0.0f;
-
-        const MAT4 inverse = m4_inverse_transform(object->transform);
-        memcpy(uniforms->dynamic_radiance_inverse[count], inverse.m, sizeof(inverse.m));
-        uniforms->dynamic_radiance_origin_spacing[count][0] = allocation->radiance_origin.x;
-        uniforms->dynamic_radiance_origin_spacing[count][1] = allocation->radiance_origin.y;
-        uniforms->dynamic_radiance_origin_spacing[count][2] = allocation->radiance_origin.z;
-        uniforms->dynamic_radiance_origin_spacing[count][3] = allocation->radiance_spacing;
-        uniforms->dynamic_radiance_dims_offset[count][0] = allocation->radiance_dims[0];
-        uniforms->dynamic_radiance_dims_offset[count][1] = allocation->radiance_dims[1];
-        uniforms->dynamic_radiance_dims_offset[count][2] = allocation->radiance_dims[2];
-        uniforms->dynamic_radiance_dims_offset[count][3] = allocation->radiance_probe_offset;
-
-        if (allocation->object_id == current_object) current = count;
-        ++count;
+    for (uint32_t i = 0u; i < r->dynamic_lighting_count && count < DYNAMIC_INFLUENCE_LIMIT; ++i) {
+        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        if (allocation->object_id == current_object || allocation->radiance_dims[0]) continue;
+        if (write_dynamic_influence(r, uniforms, count, allocation)) ++count;
     }
 
     uniforms->dynamic_influence_meta[0] = count;
