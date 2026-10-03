@@ -258,21 +258,45 @@ float3 volume_sh_radiance(VolumeProbe probe, float3 direction) {
     return max(radiance, 0.0f);
 }
 
-float3 dynamic_volume_probe_value(uint probe_index, float3 direction) {
-    uint base = probe_index * 9u;
+struct DynamicVolumeSHWeights {
+    float4 low;
+    float4 high;
+    float last;
+};
+
+DynamicVolumeSHWeights dynamic_volume_sh_weights(float3 direction) {
     direction = normalize(direction);
     float x = direction.x, y = direction.y, z = direction.z;
     float g = clamp(volume_params.y, -0.99f, 0.99f);
     float g2 = g * g;
-    float3 radiance = DynamicRadiance[base + 0u].rgb * 0.2820947918f;
-    radiance += g * (DynamicRadiance[base + 1u].rgb * (0.4886025119f * y) +
-                     DynamicRadiance[base + 2u].rgb * (0.4886025119f * z) +
-                     DynamicRadiance[base + 3u].rgb * (0.4886025119f * x));
-    radiance += g2 * (DynamicRadiance[base + 4u].rgb * (1.0925484306f * x * y) +
-                      DynamicRadiance[base + 5u].rgb * (1.0925484306f * y * z) +
-                      DynamicRadiance[base + 6u].rgb * (0.3153915653f * (3.0f * z * z - 1.0f)) +
-                      DynamicRadiance[base + 7u].rgb * (1.0925484306f * x * z) +
-                      DynamicRadiance[base + 8u].rgb * (0.5462742153f * (x * x - y * y)));
+
+    DynamicVolumeSHWeights weights;
+    weights.low = float4(
+        0.2820947918f,
+        g * 0.4886025119f * y,
+        g * 0.4886025119f * z,
+        g * 0.4886025119f * x);
+    weights.high = float4(
+        g2 * 1.0925484306f * x * y,
+        g2 * 1.0925484306f * y * z,
+        g2 * 0.3153915653f * (3.0f * z * z - 1.0f),
+        g2 * 1.0925484306f * x * z);
+    weights.last = g2 * 0.5462742153f * (x * x - y * y);
+    return weights;
+}
+
+float3 dynamic_volume_probe_value(uint probe_index, DynamicVolumeSHWeights weights) {
+    uint base = probe_index * 9u;
+    float3 radiance =
+        DynamicRadiance[base + 0u].rgb * weights.low.x +
+        DynamicRadiance[base + 1u].rgb * weights.low.y +
+        DynamicRadiance[base + 2u].rgb * weights.low.z +
+        DynamicRadiance[base + 3u].rgb * weights.low.w +
+        DynamicRadiance[base + 4u].rgb * weights.high.x +
+        DynamicRadiance[base + 5u].rgb * weights.high.y +
+        DynamicRadiance[base + 6u].rgb * weights.high.z +
+        DynamicRadiance[base + 7u].rgb * weights.high.w +
+        DynamicRadiance[base + 8u].rgb * weights.last;
     return max(radiance, 0.0f);
 }
 
@@ -321,6 +345,7 @@ float3 dynamic_volume_radiance(float3 world_position, float3 scattering_directio
         uint3 base = min(uint3(floor(coord)), meta.xyz - 2u);
         float3 fraction = saturate(coord - float3(base));
         float3 local_direction = normalize(mul((float3x3)dynamic_radiance_inverse[i], scattering_direction));
+        DynamicVolumeSHWeights sh_weights = dynamic_volume_sh_weights(local_direction);
         float3 field = 0.0f;
 
         [unroll] for (uint z = 0u; z < 2u; ++z)
@@ -330,7 +355,7 @@ float3 dynamic_volume_radiance(float3 world_position, float3 scattering_directio
             float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
             float weight = axis_weight.x * axis_weight.y * axis_weight.z;
             uint probe = meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z);
-            field += dynamic_volume_probe_value(probe, local_direction) * weight;
+            field += dynamic_volume_probe_value(probe, sh_weights) * weight;
         }
 
         float3 edge_distance = min(coord, maximum - coord);

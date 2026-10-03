@@ -386,18 +386,45 @@ float4 reference_dynamic_lightmap_sample(float2 uv) {
     return weight_sum > 1.0e-6f ? sum / weight_sum : 0.0f;
 }
 
-float3 dynamic_radiance_probe_value(uint probe_index, float3 normal) {
-    uint base = probe_index * 9u;
+struct DynamicIrradianceWeights {
+    float4 low;
+    float4 high;
+    float last;
+};
+
+DynamicIrradianceWeights dynamic_radiance_irradiance_weights(float3 normal) {
+    normal = normalize(normal);
     const float nx = normal.x, ny = normal.y, nz = normal.z;
-    float3 irradiance = DynamicRadiance[base + 0u].rgb * (0.2820947918f * PI);
-    irradiance += (DynamicRadiance[base + 1u].rgb * (0.4886025119f * ny) +
-                   DynamicRadiance[base + 2u].rgb * (0.4886025119f * nz) +
-                   DynamicRadiance[base + 3u].rgb * (0.4886025119f * nx)) * (2.0f * PI / 3.0f);
-    irradiance += (DynamicRadiance[base + 4u].rgb * (1.0925484306f * nx * ny) +
-                   DynamicRadiance[base + 5u].rgb * (1.0925484306f * ny * nz) +
-                   DynamicRadiance[base + 6u].rgb * (0.3153915653f * (3.0f * nz * nz - 1.0f)) +
-                   DynamicRadiance[base + 7u].rgb * (1.0925484306f * nx * nz) +
-                   DynamicRadiance[base + 8u].rgb * (0.5462742153f * (nx * nx - ny * ny))) * (PI * 0.25f);
+    const float l1 = 2.0f * PI / 3.0f;
+    const float l2 = PI * 0.25f;
+
+    DynamicIrradianceWeights weights;
+    weights.low = float4(
+        0.2820947918f * PI,
+        0.4886025119f * ny * l1,
+        0.4886025119f * nz * l1,
+        0.4886025119f * nx * l1);
+    weights.high = float4(
+        1.0925484306f * nx * ny * l2,
+        1.0925484306f * ny * nz * l2,
+        0.3153915653f * (3.0f * nz * nz - 1.0f) * l2,
+        1.0925484306f * nx * nz * l2);
+    weights.last = 0.5462742153f * (nx * nx - ny * ny) * l2;
+    return weights;
+}
+
+float3 dynamic_radiance_probe_value(uint probe_index, DynamicIrradianceWeights weights) {
+    uint base = probe_index * 9u;
+    float3 irradiance =
+        DynamicRadiance[base + 0u].rgb * weights.low.x +
+        DynamicRadiance[base + 1u].rgb * weights.low.y +
+        DynamicRadiance[base + 2u].rgb * weights.low.z +
+        DynamicRadiance[base + 3u].rgb * weights.low.w +
+        DynamicRadiance[base + 4u].rgb * weights.high.x +
+        DynamicRadiance[base + 5u].rgb * weights.high.y +
+        DynamicRadiance[base + 6u].rgb * weights.high.z +
+        DynamicRadiance[base + 7u].rgb * weights.high.w +
+        DynamicRadiance[base + 8u].rgb * weights.last;
     return max(irradiance, 0.0f);
 }
 
@@ -442,6 +469,7 @@ float3 dynamic_radiance_field(uint index, float3 world_position, float3 world_no
     uint3 base = min(uint3(floor(coord)), meta.xyz - 2u);
     float3 fraction = saturate(coord - float3(base));
     float3 local_normal = normalize(mul(transpose((float3x3)dynamic_radiance_model[index]), world_normal));
+    DynamicIrradianceWeights sh_weights = dynamic_radiance_irradiance_weights(local_normal);
     float3 irradiance = 0.0f;
 
     [unroll] for (uint z = 0u; z < 2u; ++z)
@@ -451,7 +479,7 @@ float3 dynamic_radiance_field(uint index, float3 world_position, float3 world_no
         float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
         float weight = axis_weight.x * axis_weight.y * axis_weight.z;
         uint probe = meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z);
-        irradiance += dynamic_radiance_probe_value(probe, local_normal) * weight;
+        irradiance += dynamic_radiance_probe_value(probe, sh_weights) * weight;
     }
 
     float3 edge_distance = min(coord, maximum - coord);
