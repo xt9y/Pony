@@ -535,6 +535,7 @@ struct RENDERER {
     NriPipelineLayout *surface_layout;
     NriPipelineLayout *dynamic_shadow_layout;
     NriPipelineLayout *dynamic_radiance_layout;
+    NriPipelineLayout *dynamic_visibility_layout;
     NriPipelineLayout *line_layout;
     NriPipelineLayout *sky_layout;
     NriPipelineLayout *bake_layout;
@@ -555,6 +556,7 @@ struct RENDERER {
     NriPipeline *transmission_pipeline;
     NriPipeline *dynamic_shadow_pipeline;
     NriPipeline *dynamic_radiance_pipeline;
+    NriPipeline *dynamic_visibility_pipeline;
     NriPipeline *line_pipeline;
     NriPipeline *bake_pipeline;
     NriPipeline *lightmap_queue_reset_pipeline;
@@ -575,6 +577,8 @@ struct RENDERER {
     /* One packed 9-SH object-local radiance field buffer shared by dynamic models. */
     NriBuffer *dynamic_radiance_buffer;
     NriBuffer *dynamic_radiance_fallback_buffer;
+    NriBuffer *dynamic_radiance_visibility_buffer;
+    NriBuffer *dynamic_radiance_visibility_fallback_buffer;
 
     /* Read-only STATIC BVH used only to block moving radiance fields at runtime. */
     NriBuffer *radiance_visibility_node_buffer;
