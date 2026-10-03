@@ -648,6 +648,11 @@ struct RENDERER {
     bool reference_lighting_enabled;
     bool bake_full_transport;
 
+    /* Optional low-priority bake controls used by offscreen pose workers. */
+    uint32_t bake_batch_samples_override;
+    uint32_t bake_yield_ms;
+    SDL_AtomicInt *bake_cancel_flag;
+
     RENDER_VERTEX *vertices;
     uint32_t vertex_count;
     uint32_t vertex_capacity;
