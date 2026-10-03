@@ -247,10 +247,6 @@ bool gpu_submit_commands(RENDERER *r, NriCommandAllocator *allocator, NriCommand
     return submit_work_commands(r, allocator, command_buffer, true);
 }
 
-static bool submit_commands_async(RENDERER *r, NriCommandAllocator *allocator, NriCommandBuffer *command_buffer) {
-    return submit_work_commands(r, allocator, command_buffer, false);
-}
-
 void gpu_abort_commands(RENDERER *r, NriCommandAllocator *allocator, NriCommandBuffer *cmd) {
     abort_work_commands(r, allocator, cmd);
 }
