@@ -86,8 +86,8 @@ def main() -> None:
         r'\{"([^"]+\.hlsl)",\s*"([^"]+)",\s*"([^"]+)",\s*(NULL|"[^"]+"),\s*"([^"]+)",\s*([01])\}',
         build,
     )
-    if len(jobs) != 30:
-        raise AssertionError(f"expected 30 shader jobs, found {len(jobs)}")
+    if len(jobs) != 29:
+        raise AssertionError(f"expected 29 shader jobs, found {len(jobs)}")
 
     for path, entry, define, fallback, stage, wave in jobs:
         source = shader_source(path)
@@ -365,142 +365,118 @@ def main() -> None:
         if needle not in fragment:
             raise AssertionError(f"dynamic baked-context fallback missing: {needle}")
 
-    for needle in (
-        "dynamic_lighting_find_const(",
-        "allocation->transform_revision == object->transform_revision",
-        "allocation->lighting_revision == object->lighting_revision",
-        "allocation->scene_lighting_revision == r->scene->lighting_revision",
-        "pending_scene_lighting_revision",
-    ):
-        if needle not in render:
-            raise AssertionError(f"stale dynamic cache rejection missing: {needle}")
-
     if "if (!scene_compile(renderer->scene)) return false;" in render:
         raise AssertionError("normal dynamic motion must not rebuild the full flattened CPU scene")
     if "if (!scene_compile(r->scene)) return false;" not in render:
         raise AssertionError("F2 reference mode must rebuild the full current scene before oracle baking")
-    if "if (r->reference_lighting_enabled || !r->has_bake" in render:
-        raise AssertionError("reference mode must not freeze runtime cache convergence")
-    for needle in ("acceptance_transform_revision", "acceptance_scene_lighting_revision"):
-        if needle not in render:
-            raise AssertionError(f"one-shot acceptance logging state missing: {needle}")
 
     for needle in (
         "GPU_FRAME_QUEUE_DEPTH",
         "DYNAMIC_TIMESTAMP_BASE",
-        'gpu_timestamp_log(r, timing_base, "dynamic object cache")',
-        'gpu_timestamp_log(r, timing_base + 2u, "dynamic receiver cache")',
-        'gpu_timestamp_log(r, timing_base + 4u, "dynamic shadow map")',
+        'gpu_timestamp_log(r, timing_base, "dynamic shadow map")',
         "gpu_timestamp_begin(r, cmd, timing_base)",
-        "gpu_timestamp_end(r, cmd, timing_base + 4u)",
+        "gpu_timestamp_end(r, cmd, timing_base)",
     ):
         if needle not in render + text("render_internal.h"):
             raise AssertionError(f"dynamic GPU cost instrumentation missing: {needle}")
 
-    if "bool lmap_build_density(" not in text("lmap.c") or "lmap_build_density" not in game:
-        raise AssertionError("fractional lightmap density API missing for bounded dynamic atlases")
-
-    dynamic_surface = text("shaders/dynamic_surface.hlsl")
-    dynamic_receiver = text("shaders/dynamic_receiver.hlsl")
-    for needle in (
-        "DYNAMIC_SURFACE_SAMPLES_PER_FRAME 512u",
-        "DYNAMIC_SURFACE_CONVERGENCE_PASSES 4u",
-        "model_surface_layout(struct MODEL *model, uint32_t target_samples)",
-        "lmap_build_density(",
-        "DYNAMIC_LIGHTING_MIN_TEXELS_PER_UNIT",
-        "model->surface_layout->sample_count <= target_samples",
-        "DYNAMIC_SURFACE_SAMPLES_PER_FRAME / count",
-        "dynamic_surface_target",
+    for forbidden in (
+        'gpu_timestamp_log(r, timing_base, "dynamic object cache")',
+        'gpu_timestamp_log(r, timing_base + 2u, "dynamic receiver cache")',
+        "update_dynamic_surface_caches(",
+        "update_dynamic_receiver_cache(",
+        "renderer_build_dynamic_receiver_cache(",
         "renderer_build_dynamic_static_transport(",
-        "dynamic_static_node_buffer",
+        "dynamic_receiver_texture",
+        "dynamic_receiver_sample_buffer",
+        "dynamic_receiver_grid_offsets",
         "dynamic_static_surface_buffer",
         "dynamic_static_uv_buffer",
-        "dynamic_object_node_buffer",
-        "dynamic_object_triangle_buffer",
-        "dynamic_trace_instance_write(",
-        "dynamic_trace_instances(",
-        "m4_inverse_transform(",
-        "gpu_clear_texture_zero(",
-        "update_dynamic_surface_caches(",
-        "pending_transform_revision",
-        "pending_lighting_revision",
-        "pending_scene_lighting_revision",
-        "allocation->sample_cursor = 0u",
-        "allocation->sample_pass = 0u",
-        "cache_needs_clear",
-        "clear.sample_count = total",
-        "clear.trace_params[1] = 1.0f",
-        "gpu_texture_barrier(r, cmd, allocation->texture, storage, storage)",
-        "allocation->transform_revision = object->transform_revision",
-        "allocation->scene_lighting_revision = r->scene->lighting_revision",
-        "allocation->sample_pass++",
-        "allocation->sample_pass < DYNAMIC_SURFACE_CONVERGENCE_PASSES",
-        "gpu_transition_texture(r, cmd, allocation->texture, NriAccessBits_SHADER_RESOURCE",
+        "DYNAMIC_SURFACE_SAMPLES_PER_FRAME",
+        "DYNAMIC_RECEIVER_SAMPLE_BUDGET",
     ):
-        if needle not in render:
-            raise AssertionError(f"fixed-budget dynamic cache scheduling missing: {needle}")
+        if forbidden in render + game:
+            raise AssertionError(f"deleted runtime mini-baker returned: {forbidden}")
+
+    if (ROOT / "shaders/dynamic_surface.hlsl").exists():
+        raise AssertionError("obsolete dynamic surface mini-baker shader still exists")
+    if (ROOT / "shaders/dynamic_receiver.hlsl").exists():
+        raise AssertionError("obsolete dynamic receiver mini-baker shader still exists")
+
+    if len(jobs) != 29:
+        raise AssertionError(f"expected 29 shader jobs after mini-baker removal, found {len(jobs)}")
+
+    dynamic_radiance = text("shaders/dynamic_radiance.hlsl")
 
     for needle in (
-        "BUILD_DYNAMIC_SURFACE_CS",
-        "DYNAMIC_RAYS_PER_SAMPLE = 8u",
-        "StructuredBuffer<SurfaceSample> Samples",
+        "DYNAMIC_RADIANCE_FIELD_DIM 32u",
+        "DYNAMIC_RADIANCE_FIELD_SAMPLES 64u",
+        "DYNAMIC_RADIANCE_IRRADIANCE_FLOOR 0.00075f",
+        "DYNAMIC_SHADOW_SIZE 512u",
+        "create_dynamic_radiance_layout(",
+        "dynamic_radiance_pipeline",
+        "dynamic_radiance_buffer",
+        "dynamic_radiance_fallback_buffer",
+        "create_dynamic_radiance_buffer(",
+        "generate_dynamic_radiance_fields(",
+        "dynamic_emissive_bounds(",
+        "radiance_probe_offset",
+        "radiance_origin",
+        "radiance_spacing",
+        "allocation->emissive_weight",
+        "gpu_submit_commands(renderer, allocator, cmd)",
+        "dynamic radiance fields: %u probes",
+    ):
+        if needle not in render + game:
+            raise AssertionError(f"object-local radiance field infrastructure missing: {needle}")
+
+    for needle in (
+        "BUILD_DYNAMIC_RADIANCE_CS",
         "StructuredBuffer<BvhNode> Nodes",
         "StructuredBuffer<BvhTriangle> Triangles",
-        "StructuredBuffer<StaticSurfaceRef> SurfaceRefs",
-        "StructuredBuffer<float2> StaticUVs",
-        "StructuredBuffer<BvhNode> SelfNodes",
-        "StructuredBuffer<BvhTriangle> SelfTriangles",
-        "dynamic_instance_inverse",
-        "dynamic_instance_normal",
-        "dynamic_instance_meta",
-        "Texture2D<float4> StaticLightmap",
-        "static_closest(",
-        "instance_closest(",
-        "dynamic_closest(",
-        "dynamic_any(",
-        "self_closest(",
-        "self_any(",
-        "static_lightmap_uv(",
-        "static_outgoing(",
-        "trace_static_indirect(",
-        "beam_visibility(",
-        "encoded_visibility",
-        "trace_params.y > 0.5f",
-        "SurfaceSample clear_sample = Samples[sample_offset + id.x]",
-        "Output[uint2(clear_pixel % texture_width, clear_pixel / texture_width)] = 0.0f",
-        "pass_index = (uint)max(trace_params.w, 0.0f)",
-        "float blend = saturate(trace_params.z)",
-        "Output[output_pixel] = lerp(Output[output_pixel], current, blend)",
+        "RWStructuredBuffer<float4> Coefficients",
+        "sh_basis(",
+        "trace_any(",
+        "float target = random01(seed) * emissive_weight",
+        "pdf_solid_angle",
+        "contribution * basis[coefficient]",
+        "Coefficients[coefficient_base + coefficient]",
     ):
-        if needle not in dynamic_surface:
-            raise AssertionError(f"dynamic surface cache shader missing: {needle}")
+        if needle not in dynamic_radiance:
+            raise AssertionError(f"object-local radiance field generator missing: {needle}")
 
     for needle in (
-        "reference_mode",
-        "dynamic_lightmap_sample(",
-        "Lightmap.Load(int3(pixel, 0))",
-        "sample.a < validity_floor",
-        "baked_sample.a < visibility_floor * 0.5f",
-        "reference_mode < 0.5f",
+        "StructuredBuffer<float4> DynamicRadiance",
+        "dynamic_radiance_origin_spacing",
+        "dynamic_radiance_dims_offset",
+        "dynamic_radiance_inverse",
+        "dynamic_radiance_probe_value(",
+        "dynamic_radiance_field(",
+        "dynamic_radiance_lighting(",
+        "meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z)",
+        "smoothstep(0.0f, 2.0f, edge)",
+        "dynamic_correction = dynamic_radiance_lighting(input.world_position, geometric_normal)",
     ):
         if needle not in fragment:
-            raise AssertionError(f"runtime/reference cache separation missing: {needle}")
+            raise AssertionError(f"surface radiance-field sampling missing: {needle}")
 
     for needle in (
-        "DYNAMIC_INFLUENCE_LIMIT",
-        "model_lighting_summary(",
+        "surface_probe_irradiance(input.world_position, geometric_normal) / PI",
+        "cached_sun_visibility = static_beam_visibility(input.world_position)",
+    ):
+        if needle not in fragment:
+            raise AssertionError(f"dynamic object static-probe receive path missing: {needle}")
+
+    for needle in (
         "dynamic_influences(",
-        "dynamic_influence_center_radius",
-        "dynamic_influence_axis_x",
-        "dynamic_influence_axis_y",
-        "dynamic_influence_axis_z",
-        "dynamic_influence_diffuse",
-        "dynamic_influence_emissive",
-        "uniforms->dynamic_influence_meta[1] = current",
-        "dynamic_influences(r, &result, draw ? draw->object_id : 0u)",
+        "dynamic_radiance_origin_spacing",
+        "dynamic_radiance_dims_offset",
+        "dynamic_radiance_inverse",
+        "m4_inverse_transform(object->transform)",
+        "result.dynamic_influence_meta[2] = r->dynamic_radiance_buffer ? 1u : 0u",
     ):
         if needle not in render:
-            raise AssertionError(f"dynamic near-field influence descriptor missing: {needle}")
+            raise AssertionError(f"moving radiance-field transform metadata missing: {needle}")
 
     for needle in (
         "dynamic_proxy_reflection_hit(",
@@ -512,126 +488,40 @@ def main() -> None:
         if needle not in fragment:
             raise AssertionError(f"bounded dynamic reflection integration missing: {needle}")
 
-    for needle in (
-        "event->key.key == SDLK_F6",
-        "event->key.key == SDLK_F7",
-        "(float)r->debug_view",
-    ):
-        if needle not in render:
-            raise AssertionError(f"dynamic lighting debug control missing: {needle}")
-
-    for needle in (
-        "dynamic_flags.w > 4.5f",
-        "dynamic_cache_valid > 0.5f",
-        "dynamic_flags.w > 5.5f",
-        "float positive = length(max(dynamic_correction, 0.0f))",
-        "float3 correction_debug = saturate(float3(0.0f, positive, 0.0f) * 6.0f)",
-    ):
-        if needle not in fragment:
-            raise AssertionError(f"dynamic lighting debug visualization missing: {needle}")
-
-    for needle in (
-        "DYNAMIC_RECEIVER_IRRADIANCE_FLOOR 0.00075f",
-        "DYNAMIC_RECEIVER_GRID_TARGET_AXIS 48.0f",
-        "DYNAMIC_RECEIVER_GRID_MAX_CELLS 262144u",
-        "dynamic_receiver_cell_visible(",
-        "DYNAMIC_SHADOW_SIZE 1024u",
-        "DYNAMIC_RECEIVER_SAMPLE_BUDGET 4096u",
-        "renderer_build_dynamic_receiver_cache(",
-        "dynamic_receiver_grid_index(",
-        "dynamic_receiver_grid_offsets",
-        "dynamic_receiver_grid_marks",
-        "dynamic_receiver_sample_buffer",
-        "dynamic_receiver_texture",
-        "dynamic_receiver_scratch",
-        "dynamic_receiver_instances(",
-        "dynamic_receiver_mark_active_cells(",
-        "dynamic_receiver_dispatch_budgeted(",
-        "dynamic_receiver_dispatch_range(",
-        "receiver_previous_center_valid",
-        "history_weight",
-        "dynamic_emissive_bounds(",
-        "local_emissive_center",
-        "local_emissive_extents",
-        "allocation->emissive_weight = tree.emissive_weight",
-        "update_dynamic_receiver_cache(",
-        "dynamic receiver active: %u/%u samples | %u merged ranges | %u updated",
-        "src, 19",
-        "result.dynamic_influence_meta[2] = r->dynamic_receiver_ready ? 1u : 0u",
-        "result.dynamic_influence_meta[3] = (uint32_t)(r->gpu->frame_index % 1024u) + 1u",
-    ):
-        if needle not in render:
-            raise AssertionError(f"bake-equivalent dynamic receiver cache missing: {needle}")
-
-    for needle in (
-        "EMISSIVE_SAMPLES = 8u",
-        "direct_emissive_target(",
-        "direct_emissive_stratified(",
-        "receiver_cosine",
-        "emitter_cosine",
-        "triangle_probability",
-        "pdf_area",
-        "dynamic_any(shadow) || static_any(shadow)",
-        "filtered_pixel(",
-        "PHASE_FILTER",
-        "irradiance_floor",
-        "screen_margin = 1.25f",
-        "Samples[dynamic_instance_data.y + id.x]",
-        "hash_u32(generation * 0x68bc21ebu)",
-        "generation_age(",
-        "history_age",
-        "history_weight",
-    ):
-        if needle not in dynamic_receiver:
-            raise AssertionError(f"bake-equivalent dynamic receiver shader missing: {needle}")
-
-    for needle in (
-        "Texture2D<float4> DynamicReceiver",
-        "dynamic_influence_meta.z != 0u",
-        "dynamic_receiver_sample(",
-        "if (age > 48u) continue",
-        "freshness = age <= 8u",
-        "baked + dynamic_correction",
-    ):
-        if needle not in fragment:
-            raise AssertionError(f"filtered dynamic receiver atlas consumption missing: {needle}")
-
-    for forbidden in (
-        "signed_dynamic_near_field(",
-        "outgoing - baseline",
-        "dynamic_emissive_direct(",
-        "StructuredBuffer<BvhNode> DynamicNodes",
-        "StructuredBuffer<BvhTriangle> DynamicTriangles",
-    ):
-        if forbidden in fragment:
-            raise AssertionError(f"separate per-fragment dynamic lighting path returned: {forbidden}")
-
     compute = text("shaders/compute.hlsl")
     for needle in (
         "Texture2D<float> DynamicShadow",
         "volume_dynamic_shadow_visibility(",
-        "dynamic_visibility = volume_dynamic_shadow_visibility(world_midpoint)",
-        "visibility_shape * dynamic_visibility",
+        "StructuredBuffer<float4> DynamicRadiance",
+        "dynamic_volume_probe_value(",
+        "dynamic_volume_radiance(",
+        "radiance += dynamic_volume_radiance(p, scattering_direction)",
     ):
         if needle not in compute:
-            raise AssertionError(f"dynamic volumetric shadowing missing: {needle}")
+            raise AssertionError(f"dynamic volumetric field integration missing: {needle}")
 
     for needle in (
-        "NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER",
-        "shadow_texel_enabled",
+        "NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_SAMPLER",
+        "dynamic_radiance_meta",
         "dynamic_shadow_projection(r, frame, u.shadow_u_min",
+        "gpu_create_buffer_view(r, r->dynamic_radiance_buffer ? r->dynamic_radiance_buffer : r->dynamic_radiance_fallback_buffer",
     ):
         if needle not in render:
-            raise AssertionError(f"dynamic volumetric binding missing: {needle}")
+            raise AssertionError(f"dynamic volumetric field binding missing: {needle}")
 
-    gpu = text("gpu.c")
     for needle in (
-        "bool gpu_clear_texture_zero(",
-        "memset(mapped, 0",
-        "CmdUploadBufferToTexture",
+        "reference_mode",
+        "reference_dynamic_lightmap_sample(",
+        "renderer_update_reference_lighting(",
+        "reference_texture",
     ):
-        if needle not in gpu:
-            raise AssertionError(f"dynamic atlas zero initialization missing: {needle}")
+        if needle not in fragment + render:
+            raise AssertionError(f"F2 reference/oracle separation missing: {needle}")
+
+    if "exact_baked_direct * (dynamic_visibility - 1.0f)" in fragment or "Texture2D<float4> BakedDirect" in fragment:
+        raise AssertionError("dynamic sun shadows must not erase emissive direct-light energy")
+    if "static_direct * cached_sun_visibility * (dynamic_visibility - 1.0f)" not in fragment:
+        raise AssertionError("static receiver sun correction must use explicit baked sun visibility only")
 
     cache = text("cache.c")
     for needle in ("DM_CACHE_VERSION 11u", "direct_pixels", "hash_bytes(hash, out->direct_pixels", "fwrite(data->direct_pixels"):
