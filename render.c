@@ -633,9 +633,9 @@ static bool create_grade_layout(RENDERER *r) {
 static bool create_volume_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_STRUCTURED_BUFFER,
                                             NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_TEXTURE, NriDescriptorType_STRUCTURED_BUFFER,
-                                            NriDescriptorType_SAMPLER};
+                                            NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_SAMPLER};
 
-    return gpu_create_compute_layout(r, &r->volume_layout, src, 7, NriDescriptorType_STORAGE_TEXTURE, true);
+    return gpu_create_compute_layout(r, &r->volume_layout, src, 8, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_volume_compose_layout(RENDERER *r) {
@@ -692,11 +692,14 @@ static bool bind_volume_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture
                             gpu_create_texture_view(r, shadow, NriTextureView_TEXTURE),
                             gpu_create_buffer_view(r, r->dynamic_radiance_buffer ? r->dynamic_radiance_buffer : r->dynamic_radiance_fallback_buffer,
                                                    NriBufferView_STRUCTURED_BUFFER, sizeof(float[4])),
+                            gpu_create_buffer_view(r, r->dynamic_radiance_visibility_buffer ? r->dynamic_radiance_visibility_buffer
+                                                                                          : r->dynamic_radiance_visibility_fallback_buffer,
+                                                   NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
                             r->dynamic_shadow_sampler ? r->dynamic_shadow_sampler : sampler_desc};
 
     NriDescriptor *dst = gpu_create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
 
-    return gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 0, src, 7) &&
+    return gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 0, src, 8) &&
            gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
            gpu_bind_uniform_data(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
 }
