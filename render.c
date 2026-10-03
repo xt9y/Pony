@@ -1890,6 +1890,25 @@ static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cm
         !r->radiance_visibility_node_buffer || !r->radiance_visibility_triangle_buffer)
         return true;
 
+    uint32_t visible_fields = 0u;
+    bool needs_update = false;
+
+    for (uint32_t i = 0u; i < r->dynamic_lighting_count && visible_fields < DYNAMIC_INFLUENCE_LIMIT; ++i) {
+        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        if (!allocation->visibility_dims[0] || !allocation->visibility_dims[1] || !allocation->visibility_dims[2]) continue;
+
+        const OBJECT *object = scene_object_by_id_const(r->scene, allocation->object_id);
+        if (!object || object->state != DYNAMIC || object->type != MODEL) return false;
+
+        ++visible_fields;
+        if (allocation->visibility_transform_revision != object->transform_revision) {
+            needs_update = true;
+            break;
+        }
+    }
+
+    if (!needs_update) return true;
+
     const NriBufferBarrierDesc begin = {
         .buffer = r->dynamic_radiance_visibility_buffer,
         .before = {.access = NriAccessBits_SHADER_RESOURCE, .stages = NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER},
