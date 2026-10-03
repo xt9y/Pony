@@ -17,6 +17,7 @@ GPU_BIND_T(1, 0) StructuredBuffer<VolumeProbe> VolumeProbes : register(t1, space
 GPU_BIND_T(2, 0) StructuredBuffer<float> SunBeams : register(t2, space0);
 GPU_BIND_T(3, 0) Texture2D<float> DynamicShadow : register(t3, space0);
 GPU_BIND_T(4, 0) StructuredBuffer<float4> DynamicRadiance : register(t4, space0);
+GPU_BIND_T(5, 0) StructuredBuffer<float> DynamicRadianceVisibility : register(t5, space0);
 GPU_BIND_S(1, 0) SamplerState DynamicShadowSampler : register(s1, space0);
 GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
 GPU_BIND_B(0, 2) cbuffer VolumeData : register(b0, space2) {
@@ -292,6 +293,7 @@ float3 dynamic_volume_radiance(float3 world_position, float3 scattering_directio
         float3 fraction = saturate(coord - float3(base));
         float3 local_direction = normalize(mul((float3x3)dynamic_radiance_inverse[i], scattering_direction));
         float3 field = 0.0f;
+        float visibility = 0.0f;
 
         [unroll] for (uint z = 0u; z < 2u; ++z)
         [unroll] for (uint y = 0u; y < 2u; ++y)
@@ -300,12 +302,14 @@ float3 dynamic_volume_radiance(float3 world_position, float3 scattering_directio
             float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
             float weight = axis_weight.x * axis_weight.y * axis_weight.z;
             uint probe = meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z);
+
             field += dynamic_volume_probe_value(probe, local_direction) * weight;
+            visibility += saturate(DynamicRadianceVisibility[probe]) * weight;
         }
 
         float3 edge_distance = min(coord, maximum - coord);
         float edge = min(edge_distance.x, min(edge_distance.y, edge_distance.z));
-        result += field * smoothstep(0.0f, 2.0f, edge);
+        result += field * (smoothstep(0.0f, 2.0f, edge) * saturate(visibility));
     }
 
     return result;
