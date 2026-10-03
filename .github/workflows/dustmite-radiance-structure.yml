@@ -77,8 +77,8 @@ jobs:
               r'\{"([^"]+\.hlsl)",\s*"([^"]+)",\s*"([^"]+)",\s*(NULL|"[^"]+"),\s*"([^"]+)",\s*([01])\}',
               build,
           )
-          if len(jobs) != 29:
-              raise SystemExit(f"expected 29 shader jobs, found {len(jobs)}")
+          if len(jobs) != 30:
+              raise SystemExit(f"expected 30 shader jobs, found {len(jobs)}")
 
           profiles = {
               "vertex": "vs_6_6",
@@ -105,5 +105,5 @@ jobs:
                   subprocess.run(command, check=True)
                   subprocess.run(["spirv-val", "--target-env", "vulkan1.2", str(output)], check=True)
 
-          print("all 29 frozen Dustmite shader jobs compile and validate")
+          print("all 30 frozen Dustmite shader jobs compile and validate")
           PY
