@@ -2,10 +2,49 @@
 #define RENDER_INTERNAL_H
 
 #define GPU_FRAME_QUEUE_DEPTH 2u
+#define DYNAMIC_POSE_CACHE_MAGIC 0x45534f50u
+#define DYNAMIC_POSE_CACHE_VERSION 1u
 
 #include "game.h"
 
 #include <stddef.h>
+
+typedef struct DYNAMIC_POSE_CACHE_HEADER {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pose_count;
+    uint32_t columns;
+    uint32_t rows;
+    uint32_t reserved;
+    uint64_t cache_hash;
+    uint64_t payload_bytes;
+    uint64_t payload_hash;
+} DYNAMIC_POSE_CACHE_HEADER;
+
+typedef struct DYNAMIC_POSE_BAKE_JOB DYNAMIC_POSE_BAKE_JOB;
+
+typedef struct DYNAMIC_POSE_BAKE_DESC {
+    const SCENE *scene;
+    OBJECT_ID object_id;
+    const LIGHTMAP *layout;
+    const PROBE_GRID *probes;
+    DIRECTIONAL_LIGHT sun;
+    SKY sky;
+    VOLUMETRICS_LIGHTING volumetrics;
+    TRANSFORM base_transform;
+    VEC3 axis;
+    float min_offset;
+    float max_offset;
+    uint32_t pose_count;
+    uint32_t columns;
+    uint32_t rows;
+    uint32_t atlas_width;
+    uint32_t atlas_height;
+    uint64_t atlas_bytes;
+    uint64_t cache_hash;
+} DYNAMIC_POSE_BAKE_DESC;
 
 typedef struct BAKE_UNIFORMS {
     Uint32 item_count;
@@ -78,6 +117,13 @@ bool upload_bvh(RENDERER *renderer, const BVH *tree);
 bool bake_lightmap(RENDERER *renderer, const BVH *tree, const LIGHTMAP *lightmap, const PROBE_GRID *probes);
 bool bake_gpu_layouts_init(RENDERER *renderer);
 void bake_gpu_layouts_deinit(RENDERER *renderer);
+bool bake_worker_init(RENDERER *renderer);
+void bake_worker_deinit(RENDERER *renderer);
+bool bake_reference_lightmap(RENDERER *renderer, const BVH *tree, const LIGHTMAP *layout, NriTexture **out_texture);
+DYNAMIC_POSE_BAKE_JOB *dynamic_pose_bake_start(const DYNAMIC_POSE_BAKE_DESC *desc);
+bool dynamic_pose_bake_done(const DYNAMIC_POSE_BAKE_JOB *job);
+bool dynamic_pose_bake_take(DYNAMIC_POSE_BAKE_JOB *job, bool *success, Uint8 **pixels, char *error, size_t error_size);
+void dynamic_pose_bake_cancel(DYNAMIC_POSE_BAKE_JOB *job);
 void probe_wavefront_scratch_destroy(RENDERER *renderer);
 void release_bake_resources(RENDERER *renderer);
 bool bake_probe_grid_fast(RENDERER *renderer, PROBE_GRID *grid, const BVH *tree, const BEAM_GRID *beams, PROBE_BAKE_PROGRESS_FN progress);
