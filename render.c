@@ -1914,10 +1914,10 @@ static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cm
         const MAT4 model = m4_transform(object->transform, false);
         DYNAMIC_VISIBILITY_UNIFORMS uniforms = {
             .bvh_meta = {r->radiance_visibility_node_count, r->radiance_visibility_triangle_count, 0u, 0u},
-            .field_meta = {allocation->radiance_probe_offset, allocation->radiance_dims[0],
-                           allocation->radiance_dims[1], allocation->radiance_dims[2]},
-            .field_origin_spacing = {allocation->radiance_origin.x, allocation->radiance_origin.y,
-                                     allocation->radiance_origin.z, allocation->radiance_spacing},
+            .field_meta = {allocation->visibility_probe_offset, allocation->visibility_dims[0],
+                           allocation->visibility_dims[1], allocation->visibility_dims[2]},
+            .field_origin_spacing = {allocation->visibility_origin.x, allocation->visibility_origin.y,
+                                     allocation->visibility_origin.z, allocation->visibility_spacing},
             .emitter_center_radius = {allocation->local_emissive_center.x, allocation->local_emissive_center.y,
                                       allocation->local_emissive_center.z, allocation->local_emissive_radius},
             .params = {epsilon, 0.0f, 0.0f, 0.0f},
@@ -1927,7 +1927,7 @@ static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cm
         if (!bind_dynamic_visibility_resources(r, cmd, &uniforms)) return false;
 
         const uint32_t probe_count =
-            allocation->radiance_dims[0] * allocation->radiance_dims[1] * allocation->radiance_dims[2];
+            allocation->visibility_dims[0] * allocation->visibility_dims[1] * allocation->visibility_dims[2];
 
         r->gpu->core.CmdSetPipeline(cmd, r->dynamic_visibility_pipeline);
         r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
