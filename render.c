@@ -510,6 +510,9 @@ typedef struct DYNAMIC_POSE_CACHE_HEADER {
     uint64_t payload_hash;
 } DYNAMIC_POSE_CACHE_HEADER;
 
+static bool dynamic_pose_lightmap_state(const DYNAMIC_LIGHTING_ALLOCATION *allocation, const OBJECT *object,
+                                        uint32_t *pose_a, uint32_t *pose_b, float *blend);
+
 struct RENDER_MATERIAL {
     GLTF_MATERIAL data;
     NriTexture *base_color;
@@ -3819,8 +3822,8 @@ static bool dynamic_pose_cache_write(const DYNAMIC_LIGHTING_ALLOCATION *allocati
     if (!file) return false;
 
     bool good = fwrite(&header, sizeof(header), 1, file) == 1 &&
-                fwrite(pixels, (size_t)atlas_bytes, 1, file) == 1 &&
-                fclose(file) == 0;
+                fwrite(pixels, (size_t)atlas_bytes, 1, file) == 1;
+    if (fclose(file) != 0) good = false;
 
     if (!good) {
         remove(temporary);
