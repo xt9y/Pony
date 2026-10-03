@@ -16,6 +16,7 @@ struct VolumeProbe {
 GPU_BIND_T(1, 0) StructuredBuffer<VolumeProbe> VolumeProbes : register(t1, space0);
 GPU_BIND_T(2, 0) StructuredBuffer<float> SunBeams : register(t2, space0);
 GPU_BIND_T(3, 0) Texture2D<float> DynamicShadow : register(t3, space0);
+GPU_BIND_T(4, 0) StructuredBuffer<float4> DynamicRadiance : register(t4, space0);
 GPU_BIND_S(1, 0) SamplerState DynamicShadowSampler : register(s1, space0);
 GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
 GPU_BIND_B(0, 2) cbuffer VolumeData : register(b0, space2) {
@@ -41,6 +42,11 @@ GPU_BIND_B(0, 2) cbuffer VolumeData : register(b0, space2) {
     float4 shadow_sun_max;
     float4 shadow_extent_bias;
     float4 shadow_texel_enabled;
+
+    uint4 dynamic_radiance_meta;
+    float4 dynamic_radiance_origin_spacing[8];
+    uint4 dynamic_radiance_dims_offset[8];
+    float4x4 dynamic_radiance_inverse[8];
 };
 
 static const uint BEAM_WIDTH = 64u;
@@ -249,6 +255,62 @@ float3 volume_sh_radiance(VolumeProbe probe, float3 direction) {
     return max(radiance, 0.0f);
 }
 
+float3 dynamic_volume_probe_value(uint probe_index, float3 direction) {
+    uint base = probe_index * 9u;
+    direction = normalize(direction);
+    float x = direction.x, y = direction.y, z = direction.z;
+    float g = clamp(volume_params.y, -0.99f, 0.99f);
+    float g2 = g * g;
+    float3 radiance = DynamicRadiance[base + 0u].rgb * 0.2820947918f;
+    radiance += g * (DynamicRadiance[base + 1u].rgb * (0.4886025119f * y) +
+                     DynamicRadiance[base + 2u].rgb * (0.4886025119f * z) +
+                     DynamicRadiance[base + 3u].rgb * (0.4886025119f * x));
+    radiance += g2 * (DynamicRadiance[base + 4u].rgb * (1.0925484306f * x * y) +
+                      DynamicRadiance[base + 5u].rgb * (1.0925484306f * y * z) +
+                      DynamicRadiance[base + 6u].rgb * (0.3153915653f * (3.0f * z * z - 1.0f)) +
+                      DynamicRadiance[base + 7u].rgb * (1.0925484306f * x * z) +
+                      DynamicRadiance[base + 8u].rgb * (0.5462742153f * (x * x - y * y)));
+    return max(radiance, 0.0f);
+}
+
+float3 dynamic_volume_radiance(float3 world_position, float3 scattering_direction) {
+    if (dynamic_radiance_meta.y == 0u) return 0.0f;
+
+    uint count = min(dynamic_radiance_meta.x, 8u);
+    float3 result = 0.0f;
+
+    [loop] for (uint i = 0u; i < count; ++i) {
+        uint4 meta = dynamic_radiance_dims_offset[i];
+        if (any(meta.xyz < 2u) || dynamic_radiance_origin_spacing[i].w <= 0.0f) continue;
+
+        float3 local_position = mul(dynamic_radiance_inverse[i], float4(world_position, 1.0f)).xyz;
+        float3 coord = (local_position - dynamic_radiance_origin_spacing[i].xyz) / dynamic_radiance_origin_spacing[i].w;
+        float3 maximum = float3(meta.xyz - 1u);
+        if (any(coord < 0.0f) || any(coord > maximum)) continue;
+
+        uint3 base = min(uint3(floor(coord)), meta.xyz - 2u);
+        float3 fraction = saturate(coord - float3(base));
+        float3 local_direction = normalize(mul((float3x3)dynamic_radiance_inverse[i], scattering_direction));
+        float3 field = 0.0f;
+
+        [unroll] for (uint z = 0u; z < 2u; ++z)
+        [unroll] for (uint y = 0u; y < 2u; ++y)
+        [unroll] for (uint x = 0u; x < 2u; ++x) {
+            uint3 cell = base + uint3(x, y, z);
+            float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
+            float weight = axis_weight.x * axis_weight.y * axis_weight.z;
+            uint probe = meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z);
+            field += dynamic_volume_probe_value(probe, local_direction) * weight;
+        }
+
+        float3 edge_distance = min(coord, maximum - coord);
+        float edge = min(edge_distance.x, min(edge_distance.y, edge_distance.z));
+        result += field * smoothstep(0.0f, 2.0f, edge);
+    }
+
+    return result;
+}
+
 float3 volume_radiance(float3 p, float3 scattering_direction, float3 surface_position, float3 surface_normal, bool has_surface) {
     float3 coord = clamp((p - grid_origin_spacing.xyz) / grid_origin_spacing.w, 0.0f, float3(grid_dims_width.xyz) - 1.0f);
     uint3 base = uint3(floor(coord));
@@ -267,6 +329,7 @@ float3 volume_radiance(float3 p, float3 scattering_direction, float3 surface_pos
         float3 indirect = volume_sh_radiance(probe, scattering_direction);
         radiance += indirect * weight;
     }
+    radiance += dynamic_volume_radiance(p, scattering_direction);
     return radiance;
 }
 
