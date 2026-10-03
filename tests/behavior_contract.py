@@ -563,7 +563,7 @@ def main() -> None:
         "dynamic_visibility_dims_offset",
         "dynamic_volume_radiance(",
         "DynamicRadiance0.SampleLevel(DynamicRadianceSampler",
-        "DynamicRadianceVisibility.SampleLevel(DynamicRadianceSampler",
+        "DynamicRadianceVisibility[probe]",
         "radiance += dynamic_volume_radiance(p, scattering_direction)",
     ):
         if needle not in compute:
