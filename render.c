@@ -21,7 +21,7 @@
 #define DYNAMIC_RADIANCE_CACHE_VERSION 1u
 #define DYNAMIC_SHADOW_SIZE 512u
 #define DYNAMIC_TIMESTAMP_BASE 8u
-#define DYNAMIC_TIMESTAMP_STRIDE 2u
+#define DYNAMIC_TIMESTAMP_STRIDE 4u
 #define DYNAMIC_TIMING_LOG_INTERVAL 120u
 
 typedef struct MAT4 {
@@ -375,6 +375,15 @@ typedef struct DYNAMIC_RADIANCE_UNIFORMS {
     float field_params[4];
 } DYNAMIC_RADIANCE_UNIFORMS;
 
+typedef struct DYNAMIC_VISIBILITY_UNIFORMS {
+    Uint32 bvh_meta[4];
+    Uint32 field_meta[4];
+    float field_origin_spacing[4];
+    float emitter_center_radius[4];
+    float params[4];
+    float model[16];
+} DYNAMIC_VISIBILITY_UNIFORMS;
+
 typedef struct SSAO_UNIFORMS {
     Uint32 width, height, ao_width, ao_height;
     float tan_half_fov, aspect, radius, bias;
@@ -563,6 +572,15 @@ static bool create_dynamic_radiance_layout(RENDERER *r) {
     };
 
     return gpu_create_compute_layout(r, &r->dynamic_radiance_layout, sources, 2, NriDescriptorType_STORAGE_STRUCTURED_BUFFER, true);
+}
+
+static bool create_dynamic_visibility_layout(RENDERER *r) {
+    static const NriDescriptorType sources[] = {
+        NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_STRUCTURED_BUFFER,
+    };
+
+    return gpu_create_compute_layout(r, &r->dynamic_visibility_layout, sources, 2, NriDescriptorType_STORAGE_STRUCTURED_BUFFER, true);
 }
 
 static bool create_surface_layout(RENDERER *r) {
@@ -1563,7 +1581,8 @@ static bool fx_apply(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *swap, floa
 }
 
 static bool create_pipeline_layouts(RENDERER *r) {
-    return create_surface_layout(r) && create_dynamic_shadow_layout(r) && create_dynamic_radiance_layout(r) && create_line_layout(r) && create_sky_layout(r) && bake_gpu_layouts_init(r) &&
+    return create_surface_layout(r) && create_dynamic_shadow_layout(r) && create_dynamic_radiance_layout(r) && create_dynamic_visibility_layout(r) &&
+           create_line_layout(r) && create_sky_layout(r) && bake_gpu_layouts_init(r) &&
            create_ssao_layout(r) && create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) && create_volume_compose_layout(r) &&
            create_compose_layout(r);
 }
@@ -1573,7 +1592,8 @@ static void destroy_pipeline_layouts(RENDERER *r) {
 
     bake_gpu_layouts_deinit(r);
 
-    NriPipelineLayout **layouts[] = {&r->surface_layout, &r->dynamic_shadow_layout, &r->dynamic_radiance_layout, &r->line_layout, &r->sky_layout, &r->ssao_layout,
+    NriPipelineLayout **layouts[] = {&r->surface_layout, &r->dynamic_shadow_layout, &r->dynamic_radiance_layout, &r->dynamic_visibility_layout,
+                                     &r->line_layout, &r->sky_layout, &r->ssao_layout,
                                      &r->bloom_layout,   &r->grade_layout,          &r->volume_layout, &r->volume_compose_layout,
                                      &r->compose_layout};
 
@@ -1633,6 +1653,8 @@ bool renderer_gpu_resources_init(RENDERER *r) {
     r->dynamic_shadow_pipeline = make_dynamic_shadow_pipeline(r, r->dynamic_shadow_layout, &dynamic_shadow_vs);
     r->dynamic_radiance_pipeline =
         gpu_compile_compute(r, r->dynamic_radiance_layout, "shaders/dynamic_radiance.hlsl", "dynamic_radiance_cs", "BUILD_DYNAMIC_RADIANCE_CS");
+    r->dynamic_visibility_pipeline =
+        gpu_compile_compute(r, r->dynamic_visibility_layout, "shaders/dynamic_visibility.hlsl", "dynamic_visibility_cs", "BUILD_DYNAMIC_VISIBILITY_CS");
     r->line_pipeline = make_line_pipeline(r, r->line_layout, &line_vs, &line_ps);
     r->sky_pipeline = make_sky_pipeline(r, r->sky_layout, &sky_vs, &sky_ps);
 
@@ -1649,16 +1671,20 @@ bool renderer_gpu_resources_init(RENDERER *r) {
     const PROBE fallback_probe = {0};
     const float fallback_beam = 1.0f;
     const float fallback_radiance[4] = {0};
+    const float fallback_visibility = 1.0f;
     r->surface_probe_fallback_buffer =
         gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_probe, sizeof(fallback_probe), sizeof(fallback_probe));
     r->surface_beam_fallback_buffer =
         gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_beam, sizeof(fallback_beam), sizeof(fallback_beam));
     r->dynamic_radiance_fallback_buffer =
         gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, fallback_radiance, sizeof(fallback_radiance), sizeof(fallback_radiance));
+    r->dynamic_radiance_visibility_fallback_buffer =
+        gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_visibility, sizeof(fallback_visibility), sizeof(fallback_visibility));
 
-    if (!r->solid_pipeline || !r->transmission_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_radiance_pipeline || !r->dynamic_shadow_sampler ||
+    if (!r->solid_pipeline || !r->transmission_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_radiance_pipeline ||
+        !r->dynamic_visibility_pipeline || !r->dynamic_shadow_sampler ||
         !r->surface_probe_fallback_buffer || !r->surface_beam_fallback_buffer || !r->dynamic_radiance_fallback_buffer ||
-        !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
+        !r->dynamic_radiance_visibility_fallback_buffer || !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
         renderer_gpu_resources_deinit(r);
         return false;
     }
