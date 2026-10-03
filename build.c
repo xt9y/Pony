@@ -171,7 +171,14 @@ void build(C_Build *b) {
     c_dep_cmake_option(nri, "-DNRI_ENABLE_IMGUI_EXTENSION=OFF");
     c_dep_cmake_option(nri, "-DNRI_ENABLE_WGPU_SUPPORT=OFF");
 #if defined(__APPLE__)
+    /*
+     * Pin NRI's FindVulkan result to the same Apple-Silicon MoltenVK that the
+     * executable uses. CMAKE_PREFIX_PATH alone is not enough when a stale
+     * /usr/local Vulkan installation is still discoverable in CMake's cache.
+     */
     c_dep_cmake_option(nri, "-DCMAKE_PREFIX_PATH=/opt/homebrew");
+    c_dep_cmake_option(nri, "-DVulkan_INCLUDE_DIR=/opt/homebrew/include");
+    c_dep_cmake_option(nri, "-DVulkan_LIBRARY=/opt/homebrew/lib/libMoltenVK.dylib");
 #endif
     c_dep_include(nri, "Include");
     c_dep_link(nri, "NRI");
