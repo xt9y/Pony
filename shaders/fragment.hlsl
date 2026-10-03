@@ -28,7 +28,7 @@ struct SurfaceProbe {
 
 GPU_BIND_T(12, 2) StructuredBuffer<float> SurfaceBeams : register(t12, space2);
 GPU_BIND_T(13, 2) StructuredBuffer<SurfaceProbe> SurfaceProbes : register(t13, space2);
-GPU_BIND_T(14, 2) Texture2D<float4> DynamicReceiver : register(t14, space2);
+GPU_BIND_T(14, 2) StructuredBuffer<float4> DynamicRadiance : register(t14, space2);
 
 GPU_BIND_S(0, 2) SamplerState MaterialSampler : register(s0, space2);
 GPU_BIND_S(1, 2) SamplerState LightmapSampler : register(s1, space2);
@@ -73,6 +73,10 @@ GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3) {
     float4 dynamic_influence_axis_z[8];
     float4 dynamic_influence_diffuse[8];
     float4 dynamic_influence_emissive[8];
+
+    float4 dynamic_radiance_origin_spacing[8];
+    uint4 dynamic_radiance_dims_offset[8];
+    float4x4 dynamic_radiance_inverse[8];
 };
 
 struct SurfaceInput {
@@ -378,40 +382,65 @@ float4 dynamic_lightmap_sample(float2 uv) {
     return weight_sum > 1.0e-6f ? sum / weight_sum : 0.0f;
 }
 
-float3 dynamic_receiver_sample(float2 uv) {
-    uint width, height;
-    DynamicReceiver.GetDimensions(width, height);
+float3 dynamic_radiance_probe_value(uint probe_index, float3 normal) {
+    uint base = probe_index * 9u;
+    const float nx = normal.x, ny = normal.y, nz = normal.z;
+    float3 irradiance = DynamicRadiance[base + 0u].rgb * (0.2820947918f * PI);
+    irradiance += (DynamicRadiance[base + 1u].rgb * (0.4886025119f * ny) +
+                   DynamicRadiance[base + 2u].rgb * (0.4886025119f * nz) +
+                   DynamicRadiance[base + 3u].rgb * (0.4886025119f * nx)) * (2.0f * PI / 3.0f);
+    irradiance += (DynamicRadiance[base + 4u].rgb * (1.0925484306f * nx * ny) +
+                   DynamicRadiance[base + 5u].rgb * (1.0925484306f * ny * nz) +
+                   DynamicRadiance[base + 6u].rgb * (0.3153915653f * (3.0f * nz * nz - 1.0f)) +
+                   DynamicRadiance[base + 7u].rgb * (1.0925484306f * nx * nz) +
+                   DynamicRadiance[base + 8u].rgb * (0.5462742153f * (nx * nx - ny * ny))) * (PI * 0.25f);
+    return max(irradiance, 0.0f);
+}
 
-    if (width == 0u || height == 0u) return 0.0f;
+float3 dynamic_radiance_field(uint index, float3 world_position, float3 world_normal) {
+    uint4 meta = dynamic_radiance_dims_offset[index];
+    if (any(meta.xyz < 2u) || dynamic_radiance_origin_spacing[index].w <= 0.0f) return 0.0f;
 
-    float2 texel_position = uv * float2(width, height) - 0.5f;
-    int2 base = int2(floor(texel_position));
-    float2 fraction = frac(texel_position);
-    float3 sum = 0.0f;
-    float weight_sum = 0.0f;
+    float3 local_position = mul(dynamic_radiance_inverse[index], float4(world_position, 1.0f)).xyz;
+    float3 coord = (local_position - dynamic_radiance_origin_spacing[index].xyz) / dynamic_radiance_origin_spacing[index].w;
+    float3 maximum = float3(meta.xyz - 1u);
 
+    if (any(coord < 0.0f) || any(coord > maximum)) return 0.0f;
+
+    uint3 base = min(uint3(floor(coord)), meta.xyz - 2u);
+    float3 fraction = saturate(coord - float3(base));
+    float3 local_normal = normalize(mul((float3x3)dynamic_radiance_inverse[index], world_normal));
+    float3 irradiance = 0.0f;
+
+    [unroll] for (uint z = 0u; z < 2u; ++z)
     [unroll] for (uint y = 0u; y < 2u; ++y)
     [unroll] for (uint x = 0u; x < 2u; ++x) {
-        int2 pixel = clamp(base + int2(x, y), int2(0, 0), int2((int)width - 1, (int)height - 1));
-        float2 axis_weight = lerp(1.0f - fraction, fraction, float2(x, y));
-        float weight = axis_weight.x * axis_weight.y;
-        float4 sample = DynamicReceiver.Load(int3(pixel, 0));
-        uint generation = dynamic_influence_meta.w;
-        uint stored = (uint)max(sample.a + 0.5f, 0.0f);
-
-        if (stored == 0u || stored > 1024u || generation == 0u || generation > 1024u) continue;
-
-        uint age = generation >= stored ? generation - stored : generation + 1024u - stored;
-        if (age > 48u) continue;
-
-        float freshness = age <= 8u ? 1.0f : saturate(1.0f - (float)(age - 8u) / 40.0f);
-        freshness *= freshness * (3.0f - 2.0f * freshness);
-        float fresh_weight = weight * freshness;
-        sum += max(sample.rgb, 0.0f) * fresh_weight;
-        weight_sum += fresh_weight;
+        uint3 cell = base + uint3(x, y, z);
+        float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
+        float weight = axis_weight.x * axis_weight.y * axis_weight.z;
+        uint probe = meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z);
+        irradiance += dynamic_radiance_probe_value(probe, local_normal) * weight;
     }
 
-    return weight_sum > 1.0e-6f ? sum / weight_sum : 0.0f;
+    float3 edge_distance = min(coord, maximum - coord);
+    float edge = min(edge_distance.x, min(edge_distance.y, edge_distance.z));
+    float fade = smoothstep(0.0f, 2.0f, edge);
+
+    return irradiance * (fade / PI);
+}
+
+float3 dynamic_radiance_lighting(float3 world_position, float3 world_normal) {
+    if (dynamic_influence_meta.z == 0u) return 0.0f;
+
+    uint count = min(dynamic_influence_meta.x, 8u);
+    float3 result = 0.0f;
+
+    [loop] for (uint i = 0u; i < count; ++i) {
+        if (i == dynamic_influence_meta.y) continue;
+        result += dynamic_radiance_field(i, world_position, world_normal);
+    }
+
+    return result;
 }
 
 bool dynamic_proxy_reflection_hit(float3 origin, float3 direction, uint index, out float hit_t, out float3 hit_normal) {
@@ -680,14 +709,14 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
 
     float3 dynamic_correction = 0.0f;
 
-    if (reference_mode < 0.5f && camera_position.w > 0.5f && is_dynamic < 0.5f && dynamic_influence_meta.z != 0u) {
-        dynamic_correction = dynamic_receiver_sample(lighting_uv);
+    if (reference_mode < 0.5f && camera_position.w > 0.5f) {
+        dynamic_correction = dynamic_radiance_lighting(input.world_position, geometric_normal);
         baked = max(baked + dynamic_correction, 0.0f);
     }
 
     if (dynamic_flags.w > 4.5f && dynamic_flags.w < 5.5f) {
         float3 cache_debug = is_dynamic > 0.5f
-                                 ? (dynamic_cache_valid > 0.5f ? float3(0.05f, 1.0f, 0.05f) : float3(1.0f, 0.2f, 0.02f))
+                                 ? (dynamic_cache_valid > 0.5f ? float3(0.05f, 0.25f, 1.0f) : float3(0.05f, 1.0f, 0.05f))
                                  : float3(0.04f, 0.04f, 0.04f);
 
         if (reference_mode > 0.5f) cache_debug = lerp(cache_debug, float3(0.05f, 0.25f, 1.0f), 0.55f);
