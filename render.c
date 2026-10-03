@@ -1030,63 +1030,22 @@ static NriTexture *resolve_texture(RENDERER *r, const GLTF_SCENE *visual, int32_
 static void release_dynamic_lighting(RENDERER *r) {
     if (!r) return;
 
-    for (uint32_t i = 0; i < r->dynamic_lighting_count; ++i) {
-        release_texture(r, r->dynamic_lighting[i].texture);
+    for (uint32_t i = 0; i < r->dynamic_lighting_count; ++i)
         release_texture(r, r->dynamic_lighting[i].reference_texture);
-        release_buffer(r, r->dynamic_lighting[i].sample_buffer);
-    }
 
     release_buffer(r, r->dynamic_object_node_buffer);
     release_buffer(r, r->dynamic_object_triangle_buffer);
+    release_buffer(r, r->dynamic_radiance_buffer);
+
     r->dynamic_object_node_buffer = NULL;
     r->dynamic_object_triangle_buffer = NULL;
     r->dynamic_object_node_count = 0u;
     r->dynamic_object_triangle_count = 0u;
+    r->dynamic_radiance_buffer = NULL;
 
     free(r->dynamic_lighting);
     r->dynamic_lighting = NULL;
     r->dynamic_lighting_count = 0u;
-}
-
-static void release_dynamic_static_transport(RENDERER *r) {
-    if (!r) return;
-
-    release_buffer(r, r->dynamic_static_node_buffer);
-    release_buffer(r, r->dynamic_static_triangle_buffer);
-    release_buffer(r, r->dynamic_static_surface_buffer);
-    release_buffer(r, r->dynamic_static_uv_buffer);
-
-    r->dynamic_static_node_buffer = NULL;
-    r->dynamic_static_triangle_buffer = NULL;
-    r->dynamic_static_surface_buffer = NULL;
-    r->dynamic_static_uv_buffer = NULL;
-    r->dynamic_static_node_count = 0u;
-    r->dynamic_static_triangle_count = 0u;
-}
-
-static void release_dynamic_receiver_cache(RENDERER *r) {
-    if (!r) return;
-
-    release_buffer(r, r->dynamic_receiver_sample_buffer);
-    release_texture(r, r->dynamic_receiver_texture);
-    release_texture(r, r->dynamic_receiver_scratch);
-
-    free(r->dynamic_receiver_grid_offsets);
-    free(r->dynamic_receiver_grid_marks);
-
-    r->dynamic_receiver_sample_buffer = NULL;
-    r->dynamic_receiver_texture = NULL;
-    r->dynamic_receiver_scratch = NULL;
-    r->dynamic_receiver_grid_offsets = NULL;
-    r->dynamic_receiver_grid_marks = NULL;
-    memset(r->dynamic_receiver_grid_dims, 0, sizeof(r->dynamic_receiver_grid_dims));
-    memset(r->dynamic_receiver_grid_min, 0, sizeof(r->dynamic_receiver_grid_min));
-    r->dynamic_receiver_grid_cell_count = 0u;
-    r->dynamic_receiver_grid_mark = 0u;
-    r->dynamic_receiver_cursor_cell = 0u;
-    r->dynamic_receiver_cursor_offset = 0u;
-    r->dynamic_receiver_grid_cell_size = 0.0f;
-    r->dynamic_receiver_ready = false;
 }
 
 static void release_reference_lighting(RENDERER *r) {
@@ -1119,9 +1078,7 @@ static const DYNAMIC_LIGHTING_ALLOCATION *dynamic_lighting_find_const(const REND
 static void release_scene_resources(RENDERER *r) {
     if (!r || !r->gpu->device) return;
 
-    release_dynamic_receiver_cache(r);
     release_dynamic_lighting(r);
-    release_dynamic_static_transport(r);
     release_reference_lighting(r);
 
     if (r->image_textures) {
@@ -2657,9 +2614,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
     free(r->vertices);
     free(r->draws);
     free(r->transmission_draws);
-    release_dynamic_receiver_cache(r);
     release_dynamic_lighting(r);
-    release_dynamic_static_transport(r);
     release_reference_lighting(r);
     free_probe_grid(&r->volume_probes);
     beam_free(&r->beams);
@@ -3090,7 +3045,6 @@ static bool renderer_build_dynamic_static_transport(RENDERER *renderer, const SC
     good = nodes && triangles && surfaces && uvs;
 
     if (good) {
-        release_dynamic_static_transport(renderer);
         renderer->dynamic_static_node_buffer = nodes;
         renderer->dynamic_static_triangle_buffer = triangles;
         renderer->dynamic_static_surface_buffer = surfaces;
@@ -3129,7 +3083,6 @@ static uint32_t dynamic_receiver_grid_index(const RENDERER *renderer, const LMAP
 static bool renderer_build_dynamic_receiver_cache(RENDERER *renderer, const SCENE *scene) {
     if (!renderer || !scene || !scene->lightmap) return false;
 
-    release_dynamic_receiver_cache(renderer);
 
     if (!renderer->dynamic_lighting_count) return true;
 
@@ -3238,8 +3191,7 @@ static bool renderer_build_dynamic_receiver_cache(RENDERER *renderer, const SCEN
                                       NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER);
 
     if (!good) {
-        release_dynamic_receiver_cache(renderer);
-        return false;
+            return false;
     }
 
     SDL_Log("dynamic receiver grid: %ux%ux%u cells | %.3f world units/cell | %u samples",
