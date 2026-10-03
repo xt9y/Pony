@@ -454,6 +454,8 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     float radiance_spacing;
     uint64_t radiance_cache_hash;
     uint32_t visibility_transform_revision;
+    uint32_t visibility_pending_revision;
+    bool visibility_update_pending;
 
     uint32_t reference_transform_revision;
     uint32_t reference_lighting_revision;
@@ -1914,7 +1916,8 @@ static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cm
             .workGroupNumZ = 1u,
         });
 
-        allocation->visibility_transform_revision = object->transform_revision;
+        allocation->visibility_pending_revision = object->transform_revision;
+        allocation->visibility_update_pending = true;
     }
 
     const NriBufferBarrierDesc end = {
@@ -2109,6 +2112,21 @@ static bool draw_surface_range(RENDERER *r, NriCommandBuffer *cmd, const RENDER_
     return true;
 }
 
+static void finish_dynamic_visibility_updates(RENDERER *r, bool submitted) {
+    if (!r) return;
+
+    for (uint32_t i = 0u; i < r->dynamic_lighting_count; ++i) {
+        DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        if (!allocation->visibility_update_pending) continue;
+
+        if (submitted)
+            allocation->visibility_transform_revision = allocation->visibility_pending_revision;
+
+        allocation->visibility_pending_revision = UINT32_MAX;
+        allocation->visibility_update_pending = false;
+    }
+}
+
 static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     if (!r || !frame || !r->gpu->device || !r->solid_pipeline || !r->sky_pipeline || !r->vertex_buffer || !r->lightmap_texture || !r->lightmap_sampler)
         return false;
@@ -2227,12 +2245,17 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
 
     if (!fx_apply(&r->fx, cmd, swap, frame->tan_half_fov, frame->aspect)) goto failed_frame;
 
-    if (!gpu_submit_render_frame(r, queued_frame, cmd, swap_index)) return false;
+    if (!gpu_submit_render_frame(r, queued_frame, cmd, swap_index)) {
+        finish_dynamic_visibility_updates(r, false);
+        return false;
+    }
 
+    finish_dynamic_visibility_updates(r, true);
     return true;
 
 failed_frame:
     gpu_abort_render_frame(r, queued_frame);
+    finish_dynamic_visibility_updates(r, false);
 
     return false;
 }
@@ -3093,6 +3116,8 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         allocation->object_id = object->id;
         allocation->layout = model->surface_layout;
         allocation->visibility_transform_revision = UINT32_MAX;
+        allocation->visibility_pending_revision = UINT32_MAX;
+        allocation->visibility_update_pending = false;
         allocation->local_center = model->geometry->bounds.center;
         allocation->local_extents = model->geometry->bounds.extents;
         allocation->local_radius = sqrtf(v3_len_sq(model->geometry->bounds.extents));
