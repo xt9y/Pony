@@ -453,6 +453,7 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     VEC3 radiance_origin;
     float radiance_spacing;
     uint64_t radiance_cache_hash;
+    uint32_t visibility_transform_revision;
 
     uint32_t reference_transform_revision;
     uint32_t reference_lighting_revision;
@@ -1876,12 +1877,17 @@ static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cm
 
     const float epsilon = fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f);
 
-    for (uint32_t i = 0u; i < r->dynamic_lighting_count; ++i) {
-        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+    uint32_t updated_fields = 0u;
+
+    for (uint32_t i = 0u; i < r->dynamic_lighting_count && updated_fields < DYNAMIC_INFLUENCE_LIMIT; ++i) {
+        DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
         if (!allocation->radiance_dims[0] || !allocation->radiance_dims[1] || !allocation->radiance_dims[2]) continue;
 
         const OBJECT *object = scene_object_by_id_const(r->scene, allocation->object_id);
         if (!object || object->state != DYNAMIC || object->type != MODEL) return false;
+
+        ++updated_fields;
+        if (allocation->visibility_transform_revision == object->transform_revision) continue;
 
         const MAT4 model = m4_transform(object->transform, false);
         DYNAMIC_VISIBILITY_UNIFORMS uniforms = {
@@ -1907,6 +1913,8 @@ static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cm
             .workGroupNumY = 1u,
             .workGroupNumZ = 1u,
         });
+
+        allocation->visibility_transform_revision = object->transform_revision;
     }
 
     const NriBufferBarrierDesc end = {
@@ -3084,6 +3092,7 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
 
         allocation->object_id = object->id;
         allocation->layout = model->surface_layout;
+        allocation->visibility_transform_revision = UINT32_MAX;
         allocation->local_center = model->geometry->bounds.center;
         allocation->local_extents = model->geometry->bounds.extents;
         allocation->local_radius = sqrtf(v3_len_sq(model->geometry->bounds.extents));
