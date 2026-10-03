@@ -576,6 +576,12 @@ struct RENDERER {
     NriBuffer *dynamic_radiance_buffer;
     NriBuffer *dynamic_radiance_fallback_buffer;
 
+    /* Read-only STATIC BVH used only to block moving radiance fields at runtime. */
+    NriBuffer *radiance_visibility_node_buffer;
+    NriBuffer *radiance_visibility_triangle_buffer;
+    uint32_t radiance_visibility_node_count;
+    uint32_t radiance_visibility_triangle_count;
+
     NriBuffer *lightmap_sample_buffer;
     NriBuffer *lightmap_full_sample_buffer;
     NriBuffer *lightmap_sparse_sample_buffer;
