@@ -2924,7 +2924,7 @@ static bool read_dynamic_radiance_buffer(RENDERER *renderer, uint32_t coefficien
     return good;
 }
 
-static bool generate_dynamic_radiance_fields(RENDERER *renderer, uint32_t total_probes) {
+static bool generate_dynamic_radiance_fields(RENDERER *renderer, uint32_t total_probes, uint32_t total_visibility_probes) {
     if (!renderer || !renderer->dynamic_lighting_count || !total_probes) return true;
     if (!renderer->dynamic_radiance_pipeline || !renderer->dynamic_radiance_layout ||
         !renderer->dynamic_object_node_buffer || !renderer->dynamic_object_triangle_buffer)
@@ -2967,14 +2967,14 @@ static bool generate_dynamic_radiance_fields(RENDERER *renderer, uint32_t total_
         gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE,
                           coefficients, (size_t)coefficient_count * sizeof(*coefficients), sizeof(*coefficients));
 
-    float *initial_visibility = malloc((size_t)total_probes * sizeof(*initial_visibility));
+    float *initial_visibility = malloc((size_t)total_visibility_probes * sizeof(*initial_visibility));
     if (initial_visibility)
-        for (uint32_t i = 0u; i < total_probes; ++i) initial_visibility[i] = 1.0f;
+        for (uint32_t i = 0u; i < total_visibility_probes; ++i) initial_visibility[i] = 1.0f;
 
     renderer->dynamic_radiance_visibility_buffer =
         initial_visibility
             ? gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE,
-                                initial_visibility, (size_t)total_probes * sizeof(*initial_visibility), sizeof(*initial_visibility))
+                                initial_visibility, (size_t)total_visibility_probes * sizeof(*initial_visibility), sizeof(*initial_visibility))
             : NULL;
     free(initial_visibility);
 
@@ -3124,6 +3124,7 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
     uint32_t packed_node_count = 0u;
     uint32_t packed_triangle_count = 0u;
     uint32_t total_radiance_probes = 0u;
+    uint32_t total_visibility_probes = 0u;
     bool good = true;
 
     for (uint32_t i = 0, out = 0; i < scene->object_count && good; ++i) {
@@ -3190,12 +3191,24 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
                 allocation->radiance_origin =
                     v3_sub(allocation->local_emissive_center, v3(radius, radius, radius));
 
+                allocation->visibility_probe_offset = total_visibility_probes;
+                allocation->visibility_dims[0] = DYNAMIC_VISIBILITY_FIELD_DIM;
+                allocation->visibility_dims[1] = DYNAMIC_VISIBILITY_FIELD_DIM;
+                allocation->visibility_dims[2] = DYNAMIC_VISIBILITY_FIELD_DIM;
+                allocation->visibility_spacing = (2.0f * radius) / (float)(DYNAMIC_VISIBILITY_FIELD_DIM - 1u);
+                allocation->visibility_origin = allocation->radiance_origin;
+
                 const uint32_t field_probes =
                     DYNAMIC_RADIANCE_FIELD_DIM * DYNAMIC_RADIANCE_FIELD_DIM * DYNAMIC_RADIANCE_FIELD_DIM;
-                if (UINT32_MAX - total_radiance_probes < field_probes) {
+                const uint32_t visibility_probes =
+                    DYNAMIC_VISIBILITY_FIELD_DIM * DYNAMIC_VISIBILITY_FIELD_DIM * DYNAMIC_VISIBILITY_FIELD_DIM;
+
+                if (UINT32_MAX - total_radiance_probes < field_probes ||
+                    UINT32_MAX - total_visibility_probes < visibility_probes) {
                     good = false;
                 } else {
                     total_radiance_probes += field_probes;
+                    total_visibility_probes += visibility_probes;
                 }
             }
 
@@ -3222,7 +3235,7 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
     if (good) {
         renderer->dynamic_object_node_count = packed_node_count;
         renderer->dynamic_object_triangle_count = packed_triangle_count;
-        good = generate_dynamic_radiance_fields(renderer, total_radiance_probes);
+        good = generate_dynamic_radiance_fields(renderer, total_radiance_probes, total_visibility_probes);
     }
 
     free(packed_nodes);
