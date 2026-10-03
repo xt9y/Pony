@@ -173,8 +173,8 @@ def main() -> None:
         "static bool create_probe_layout(",
         "bool bake_gpu_layouts_init(",
         "static bool bake_bind_resources_ex(",
-        "static bool bake_worker_init(",
-        "static void bake_worker_deinit(",
+        "bool bake_worker_init(",
+        "void bake_worker_deinit(",
         "bool bake_lightmap(",
         "bool bake_probe_grid_fast(",
         "bool bake_probe_grid(",
@@ -185,6 +185,8 @@ def main() -> None:
         "bool upload_bvh(RENDERER *renderer, const BVH *tree);",
         "bool bake_gpu_layouts_init(RENDERER *renderer);",
         "void bake_gpu_layouts_deinit(RENDERER *renderer);",
+        "bool bake_worker_init(RENDERER *renderer);",
+        "void bake_worker_deinit(RENDERER *renderer);",
     )
 
     forbid(
