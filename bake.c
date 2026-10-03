@@ -1078,37 +1078,6 @@ static PROBE_WAVEFRONT_BUFFER probe_wavefront_uploaded(RENDERER *r, const void *
     return result;
 }
 
-static PROBE_WAVEFRONT_BUFFER probe_wavefront_storage(RENDERER *r, uint64_t bytes, uint32_t stride) {
-    PROBE_WAVEFRONT_BUFFER result = {0};
-
-    if (!r || !r->gpu->device || !bytes) return result;
-
-    const NriBufferUsageBits usage = NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE;
-    const NriBufferDesc desc = {.size = bytes, .structureStride = stride, .usage = usage};
-
-    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &result.buffer) == NriResult_SUCCESS) {
-        result.stride = stride;
-        result.usage = usage;
-        result.capacity = bytes;
-    }
-
-    return result;
-}
-
-static PROBE_WAVEFRONT_BUFFER probe_wavefront_argument(RENDERER *r) {
-    PROBE_WAVEFRONT_BUFFER result = {0};
-    const NriBufferDesc desc = {
-        .size = 3u * sizeof(uint32_t), .structureStride = sizeof(uint32_t), .usage = NriBufferUsageBits_SHADER_RESOURCE_STORAGE | NriBufferUsageBits_ARGUMENT};
-
-    if (r && r->gpu->device && r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &result.buffer) == NriResult_SUCCESS) {
-        result.stride = sizeof(uint32_t);
-        result.usage = desc.usage;
-        result.capacity = desc.size;
-    }
-
-    return result;
-}
-
 static void probe_wavefront_release_buffer(RENDERER *r, PROBE_WAVEFRONT_BUFFER *buffer) {
     if (!buffer) return;
     release_buffer(r, buffer->buffer);
@@ -1417,16 +1386,6 @@ static PROBE_WAVEFRONT_UNIFORMS probe_wavefront_data(const BVH *tree, const BEAM
                                       .emissive_params = {volumetrics.emissive_probe_intensity, 0.0f, 0.0f, 0.0f},
                                       .beam_origin = {beams->origin.x, beams->origin.y, beams->origin.z, 0.0f},
                                       .beam_step = {beams->step.x, beams->step.y, beams->step.z, 0.0f}};
-}
-
-static NriBuffer *probe_wavefront_readback_buffer(RENDERER *r, uint64_t bytes) {
-    const NriBufferDesc desc = {.size = bytes};
-
-    NriBuffer *buffer = NULL;
-
-    if (r->gpu->core.CreateCommittedBuffer(r->gpu->device, NriMemoryLocation_HOST_READBACK, 1.0f, &desc, &buffer) != NriResult_SUCCESS) return NULL;
-
-    return buffer;
 }
 
 static bool probe_wavefront_copy_to_readback(RENDERER *r, NriCommandBuffer *cmd, PROBE_WAVEFRONT_BUFFER *source, NriBuffer *destination, uint64_t bytes) {
