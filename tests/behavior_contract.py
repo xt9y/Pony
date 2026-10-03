@@ -82,6 +82,10 @@ def main() -> None:
         raise AssertionError("beam_settings values/order changed")
 
     build = text("build.c")
+    if "-Wl,-rpath,/opt/homebrew/lib" not in build:
+        raise AssertionError("Apple Silicon runtime prefix missing")
+    if '-Wl,-rpath,/usr/local/lib' in build:
+        raise AssertionError("macOS must not embed the duplicate /usr/local MoltenVK runtime path")
     jobs = re.findall(
         r'\{"([^"]+\.hlsl)",\s*"([^"]+)",\s*"([^"]+)",\s*(NULL|"[^"]+"),\s*"([^"]+)",\s*([01])\}',
         build,
@@ -103,6 +107,11 @@ def main() -> None:
     main = text("main.c")
     render = text("render.c")
     gpu = text("gpu.c")
+
+    for needle in ("FRAME_STALL_LOG_MS 100.0", 'log_frame_stall(r, "swapchain acquire"', 'log_frame_stall(r, "frame fence"',
+                   'log_frame_stall(r, "frame recycle"', 'log_frame_stall(r, "queue submit"', 'log_frame_stall(r, "queue present"'):
+        if needle not in gpu:
+            raise AssertionError(f"CPU-only frame stall attribution missing: {needle}")
 
     for needle in ("MAX_LAYOUT_RANGES = 32", "counts[set] > MAX_LAYOUT_RANGES"):
         if needle not in gpu:

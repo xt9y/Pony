@@ -181,15 +181,18 @@ void build(C_Build *b) {
     c_warnings_strict(app);
 
 #if defined(__APPLE__)
+    /*
+     * Use exactly one Homebrew prefix on Apple Silicon. Embedding both
+     * /opt/homebrew/lib and /usr/local/lib can load two MoltenVK dylibs into
+     * one process, which Objective-C explicitly warns can cause mysterious
+     * crashes and queue stalls.
+     */
     c_include(app, "/opt/homebrew/include");
     c_link_flag(app, "-L/opt/homebrew/lib");
     c_link_flag(app, "-Wl,-rpath,/opt/homebrew/lib");
-#endif
-
+#else
     c_include(app, "/usr/local/include");
     c_link_flag(app, "-L/usr/local/lib");
-#if defined(__APPLE__)
-    c_link_flag(app, "-Wl,-rpath,/usr/local/lib");
 #endif
 
     c_link_system(app, "SDL3_image");

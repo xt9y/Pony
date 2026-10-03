@@ -14,6 +14,7 @@
 #define UPLOAD_RING_SIZE 2u
 #define UPLOAD_CHUNK_BYTES (32u * 1024u * 1024u)
 #define UPLOAD_SLOW_LOG_MS 5000u
+#define FRAME_STALL_LOG_MS 100.0
 
 struct SWAPCHAIN_TEXTURE {
     NriTexture *texture;
@@ -55,6 +56,19 @@ struct TEXTURE_STATE {
     NriTexture *texture;
     NriAccessLayoutStage state;
 };
+
+static double cpu_elapsed_ms(Uint64 started) {
+    return (double)(SDL_GetPerformanceCounter() - started) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+}
+
+static void log_frame_stall(RENDERER *r, const char *stage, Uint64 started) {
+    if (!r || !r->gpu || !stage) return;
+
+    const double ms = cpu_elapsed_ms(started);
+    if (ms < FRAME_STALL_LOG_MS) return;
+
+    SDL_Log("frame stall: %s %.2f ms | frame %llu", stage, ms, (unsigned long long)r->gpu->frame_index);
+}
 
 static Uint8 *load_spirv(const char *define, size_t *size) {
     char path[256];
@@ -613,11 +627,17 @@ static bool begin_frame_commands(RENDERER *r, FRAME_CONTEXT **out_frame, NriComm
 
     const uint64_t wait_value = r->gpu->frame_index >= FRAME_QUEUE_DEPTH ? 1u + r->gpu->frame_index - FRAME_QUEUE_DEPTH : 0u;
 
-    r->gpu->core.Wait(r->gpu->frame_fence, wait_value);
+    if (wait_value) {
+        const Uint64 wait_started = SDL_GetPerformanceCounter();
+        r->gpu->core.Wait(r->gpu->frame_fence, wait_value);
+        log_frame_stall(r, "frame fence", wait_started);
+    }
 
     FRAME_CONTEXT *frame = &r->gpu->frame_contexts[r->gpu->frame_index % FRAME_QUEUE_DEPTH];
+    const Uint64 recycle_started = SDL_GetPerformanceCounter();
     clear_frame_temporary(r, frame);
     r->gpu->core.ResetCommandAllocator(frame->allocator);
+    log_frame_stall(r, "frame recycle", recycle_started);
     r->current_graphics_layout = r->current_compute_layout = NULL;
     r->gpu->active_frame = frame;
 
@@ -885,8 +905,10 @@ static void destroy_swapchain(RENDERER *r) {
 
 static bool acquire_swapchain_texture(RENDERER *r, uint32_t *index) {
     NriFence *acquire = r->gpu->swapchain_frames[r->gpu->frame_index % r->gpu->swapchain_texture_count].acquire;
+    const Uint64 started = SDL_GetPerformanceCounter();
 
     NriResult result = r->gpu->swapchain_api.AcquireNextTexture(r->gpu->swapchain, acquire, index);
+    log_frame_stall(r, "swapchain acquire", started);
 
     return result == NriResult_SUCCESS && *index < r->gpu->swapchain_texture_count;
 }
@@ -960,12 +982,17 @@ static bool submit_frame(RENDERER *r, FRAME_CONTEXT *frame, NriCommandBuffer *cm
     bool submitted = false;
 
     if (good) {
+        const Uint64 submit_started = SDL_GetPerformanceCounter();
         submitted = r->gpu->core.QueueSubmit(r->gpu->graphics_queue, &submit) == NriResult_SUCCESS;
-
+        log_frame_stall(r, "queue submit", submit_started);
         good = submitted;
     }
 
-    if (good) good = r->gpu->swapchain_api.QueuePresent(r->gpu->swapchain, r->gpu->swapchain_frames[index].release, frame_value) == NriResult_SUCCESS;
+    if (good) {
+        const Uint64 present_started = SDL_GetPerformanceCounter();
+        good = r->gpu->swapchain_api.QueuePresent(r->gpu->swapchain, r->gpu->swapchain_frames[index].release, frame_value) == NriResult_SUCCESS;
+        log_frame_stall(r, "queue present", present_started);
+    }
 
     r->gpu->active_frame = NULL;
 
