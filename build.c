@@ -93,8 +93,7 @@ static void compile_nri_shaders(void) {
     static const SHADER_JOB jobs[] = {
         {"shaders/vertex.hlsl", "surface_vs", "BUILD_SURFACE_VS", NULL, "vertex", 0},
         {"shaders/vertex.hlsl", "dynamic_shadow_vs", "BUILD_DYNAMIC_SHADOW_VS", NULL, "vertex", 0},
-        {"shaders/dynamic_surface.hlsl", "dynamic_surface_cs", "BUILD_DYNAMIC_SURFACE_CS", NULL, "compute", 0},
-        {"shaders/dynamic_receiver.hlsl", "dynamic_receiver_cs", "BUILD_DYNAMIC_RECEIVER_CS", NULL, "compute", 0},
+        {"shaders/dynamic_radiance.hlsl", "dynamic_radiance_cs", "BUILD_DYNAMIC_RADIANCE_CS", NULL, "compute", 0},
         {"shaders/vertex.hlsl", "wireframe_vs", "BUILD_WIREFRAME_VS", NULL, "vertex", 0},
         {"shaders/vertex.hlsl", "fullscreen_vs", "BUILD_FULLSCREEN_VS", NULL, "vertex", 0},
         {"shaders/fragment.hlsl", "surface_fs", "BUILD_SURFACE_FS", NULL, "fragment", 0},
