@@ -237,7 +237,7 @@ float3 material_sky_radiance(float3 direction) {
     return sky + sun_color.rgb * sun_direction.w * (disc + halo);
 }
 
-float dynamic_shadow_visibility(float3 position) {
+float dynamic_shadow_visibility(float3 position, float3 normal) {
     if (shadow_texel_enabled.z < 0.5f || any(shadow_extent_bias.xyz <= 0.0f)) return 1.0f;
 
     float sx = dot(position, shadow_u_min.xyz);
@@ -248,15 +248,35 @@ float dynamic_shadow_visibility(float3 position) {
 
     if (any(uv < 0.0f) || any(uv > 1.0f) || depth < 0.0f || depth > 1.0f) return 1.0f;
 
+    /*
+     * A fitted map makes one texel very small in world space. Scale the
+     * receiver bias with surface slope so coplanar rasterized triangles do not
+     * self-shadow, while near-normal receivers keep tight contact shadows.
+     */
+    float3 sun = normalize(sun_direction.xyz);
+    float n_dot_l = saturate(dot(normalize(normal), sun));
+    float receiver_bias = shadow_extent_bias.w * lerp(4.0f, 1.0f, n_dot_l);
+
+    /*
+     * 3x3 separable tent PCF: still only a one-texel edge footprint, but
+     * removes the blocky equal-weight 3x3 pattern. With the caster-fitted
+     * 2048 map this behaves as edge antialiasing rather than visible blur.
+     */
+    const float weights[3] = {1.0f, 2.0f, 1.0f};
     float visibility = 0.0f;
+    float total = 0.0f;
+
     [unroll] for (int y = -1; y <= 1; ++y) {
         [unroll] for (int x = -1; x <= 1; ++x) {
+            float weight = weights[x + 1] * weights[y + 1];
             float2 sample_uv = saturate(uv + float2((float)x, (float)y) * shadow_texel_enabled.xy);
             float blocker = DynamicShadow.SampleLevel(DynamicShadowSampler, sample_uv, 0.0f);
-            visibility += depth <= blocker + shadow_extent_bias.w ? 1.0f : 0.0f;
+            visibility += (depth <= blocker + receiver_bias ? 1.0f : 0.0f) * weight;
+            total += weight;
         }
     }
-    return visibility / 9.0f;
+
+    return visibility / total;
 }
 
 float3 surface_probe_value(SurfaceProbe probe, float3 normal) {
@@ -790,7 +810,7 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
         cached_sun_visibility = static_beam_visibility(input.world_position);
     }
 
-    float dynamic_visibility = dynamic_shadow_visibility(input.world_position);
+    float dynamic_visibility = dynamic_shadow_visibility(input.world_position, geometric_normal);
     float sun_visibility = reference_mode > 0.5f ? cached_sun_visibility : cached_sun_visibility * dynamic_visibility;
     float3 baked = max(baked_sample.rgb, 0.0f);
     float3 static_direct = sun_color.rgb * roughness_normal_ao_sun.w * geometric_n_dot_l;
