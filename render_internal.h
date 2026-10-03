@@ -27,8 +27,11 @@ typedef struct BAKE_UNIFORMS {
 } BAKE_UNIFORMS;
 
 NriTexture *gpu_create_texture(RENDERER *renderer, NriFormat format, NriTextureUsageBits usage, Uint32 width, Uint32 height);
+NriTexture *gpu_create_texture_3d(RENDERER *renderer, NriFormat format, NriTextureUsageBits usage, Uint32 width, Uint32 height, Uint32 depth);
 bool gpu_upload_texture_data(RENDERER *renderer, NriTexture *texture, const void *data, uint32_t row_pitch, uint32_t slice_pitch, NriAccessBits access,
                              NriLayout layout, NriStageBits stages);
+bool gpu_upload_texture_3d_data(RENDERER *renderer, NriTexture *texture, const void *data, uint32_t row_pitch, uint32_t slice_pitch,
+                                NriAccessBits access, NriLayout layout, NriStageBits stages);
 bool gpu_clear_texture_zero(RENDERER *renderer, NriTexture *texture, uint32_t bytes_per_texel, NriAccessBits access, NriLayout layout, NriStageBits stages);
 NriResult gpu_begin_commands(RENDERER *renderer, NriCommandAllocator **allocator, NriCommandBuffer **command_buffer);
 bool gpu_transition_texture(RENDERER *renderer, NriCommandBuffer *command_buffer, NriTexture *texture, NriAccessBits access, NriLayout layout,

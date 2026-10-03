@@ -648,12 +648,19 @@ static void abort_frame_commands(RENDERER *r, FRAME_CONTEXT *frame) {
 }
 
 NriDescriptor *gpu_create_texture_view(RENDERER *r, NriTexture *texture, NriTextureView type) {
-    if (!texture) return NULL;
+    if (!r || !texture) return NULL;
+
+    const NriTextureDesc *texture_desc = r->gpu->core.GetTextureDesc(texture);
+    if (!texture_desc) return NULL;
 
     NriDescriptor *view = NULL;
-
     const NriTextureViewDesc desc = {
-        .texture = texture, .type = type, .format = r->gpu->core.GetTextureDesc(texture)->format, .mipNum = 1, .layerNum = 1, .sliceNum = 1};
+        .texture = texture,
+        .type = type,
+        .format = texture_desc->format,
+        .mipNum = 1,
+        .layerNum = 1,
+        .sliceNum = texture_desc->type == NriTextureType_TEXTURE_3D ? texture_desc->depth : 1};
 
     if (r->gpu->core.CreateTextureView(&desc, &view) != NriResult_SUCCESS) return NULL;
 
@@ -996,6 +1003,31 @@ NriTexture *gpu_create_texture(RENDERER *r, NriFormat format, NriTextureUsageBit
     if (!find_texture_state(r, result)) {
         release_texture(r, result);
 
+        return NULL;
+    }
+
+    return result;
+}
+
+NriTexture *gpu_create_texture_3d(RENDERER *r, NriFormat format, NriTextureUsageBits usage, Uint32 width, Uint32 height, Uint32 depth) {
+    if (!r || !r->gpu->device || !width || !height || !depth) return NULL;
+
+    const NriTextureDesc desc = {.type = NriTextureType_TEXTURE_3D,
+                                 .usage = usage,
+                                 .format = format,
+                                 .width = (NriDim_t)width,
+                                 .height = (NriDim_t)height,
+                                 .depth = (NriDim_t)depth,
+                                 .mipNum = 1,
+                                 .layerNum = 1,
+                                 .sampleNum = 1};
+
+    NriTexture *result = NULL;
+
+    if (r->gpu->core.CreateCommittedTexture(r->gpu->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &result) != NriResult_SUCCESS) return NULL;
+
+    if (!find_texture_state(r, result)) {
+        release_texture(r, result);
         return NULL;
     }
 
@@ -1352,6 +1384,89 @@ bool gpu_upload_texture_data(RENDERER *r, NriTexture *texture, const void *data,
 fail:
     (void)upload_drain(r);
 
+    return false;
+}
+
+bool gpu_upload_texture_3d_data(RENDERER *r, NriTexture *texture, const void *data, uint32_t row_pitch, uint32_t slice_pitch,
+                                NriAccessBits access, NriLayout layout, NriStageBits stages) {
+    if (!r || !texture || !data || !row_pitch || !slice_pitch) return false;
+
+    const NriTextureDesc *desc = r->gpu->core.GetTextureDesc(texture);
+    const NriDeviceDesc *device = r->gpu->core.GetDeviceDesc(r->gpu->device);
+    if (!desc || desc->type != NriTextureType_TEXTURE_3D || !desc->height || !desc->depth) return false;
+    if ((uint64_t)row_pitch * desc->height > slice_pitch) return false;
+
+    const uint32_t row_alignment = device->memoryAlignment.uploadBufferTextureRow;
+    const uint32_t slice_alignment = device->memoryAlignment.uploadBufferTextureSlice;
+    const uint64_t aligned_row = upload_align(row_pitch, row_alignment);
+    if (aligned_row > UPLOAD_CHUNK_BYTES) return false;
+
+    const NriAccessLayoutStage copy_state = {
+        .access = NriAccessBits_COPY_DESTINATION, .layout = NriLayout_COPY_DESTINATION, .stages = NriStageBits_ALL};
+    const NriAccessLayoutStage final_state = {.access = access, .layout = layout, .stages = stages};
+    const Uint8 *source = data;
+
+    for (uint32_t z = 0u; z < desc->depth; ++z) {
+        uint32_t first_row = 0u;
+
+        while (first_row < desc->height) {
+            uint32_t rows = (uint32_t)(UPLOAD_CHUNK_BYTES / aligned_row);
+            const uint32_t remaining = desc->height - first_row;
+            if (!rows) rows = 1u;
+            if (rows > remaining) rows = remaining;
+
+            uint64_t staging_bytes = upload_align(aligned_row * rows, slice_alignment);
+            while (rows > 1u && staging_bytes > UPLOAD_CHUNK_BYTES) {
+                --rows;
+                staging_bytes = upload_align(aligned_row * rows, slice_alignment);
+            }
+            if (staging_bytes > UPLOAD_CHUNK_BYTES) return false;
+
+            UPLOAD_SLOT *slot = NULL;
+            if (!upload_begin_slot(r, &slot)) goto fail;
+
+            Uint8 *mapped = r->gpu->core.MapBuffer(slot->staging, 0u, staging_bytes);
+            if (!mapped) {
+                (void)r->gpu->core.EndCommandBuffer(slot->command_buffer);
+                goto fail;
+            }
+
+            for (uint32_t row = 0u; row < rows; ++row) {
+                const size_t source_offset = (size_t)z * slice_pitch + (size_t)(first_row + row) * row_pitch;
+                memcpy(mapped + (size_t)row * aligned_row, source + source_offset, row_pitch);
+            }
+            r->gpu->core.UnmapBuffer(slot->staging);
+
+            if (z == 0u && first_row == 0u &&
+                !gpu_texture_barrier(r, slot->command_buffer, texture, (NriAccessLayoutStage){0}, copy_state))
+                goto fail;
+
+            const NriTextureDataLayoutDesc source_layout = {
+                .offset = 0u, .rowPitch = (uint32_t)aligned_row, .slicePitch = (uint32_t)staging_bytes};
+            const NriTextureRegionDesc region = {.x = 0u,
+                                                 .y = (NriDim_t)first_row,
+                                                 .z = (NriDim_t)z,
+                                                 .width = desc->width,
+                                                 .height = (NriDim_t)rows,
+                                                 .depth = 1u,
+                                                 .mipOffset = 0u,
+                                                 .layerOffset = 0u};
+
+            r->gpu->core.CmdUploadBufferToTexture(slot->command_buffer, texture, &region, slot->staging, &source_layout);
+
+            if (z + 1u == desc->depth && first_row + rows == desc->height &&
+                !gpu_texture_barrier(r, slot->command_buffer, texture, copy_state, final_state))
+                goto fail;
+
+            if (!upload_submit_slot(r, slot)) goto fail;
+            first_row += rows;
+        }
+    }
+
+    return true;
+
+fail:
+    (void)upload_drain(r);
     return false;
 }
 

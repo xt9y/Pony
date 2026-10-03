@@ -574,11 +574,14 @@ struct RENDERER {
     uint32_t dynamic_object_node_count;
     uint32_t dynamic_object_triangle_count;
 
-    /* One packed 9-SH object-local radiance field buffer shared by dynamic models. */
+    /* Generation scratch stays structured; runtime sampling uses hardware-filtered 3D textures. */
     NriBuffer *dynamic_radiance_buffer;
-    NriBuffer *dynamic_radiance_fallback_buffer;
-    NriBuffer *dynamic_radiance_visibility_buffer;
-    NriBuffer *dynamic_radiance_visibility_fallback_buffer;
+    NriTexture *dynamic_radiance_textures[7];
+    NriTexture *dynamic_radiance_visibility_texture;
+    NriTexture *dynamic_radiance_fallback_texture;
+    NriTexture *dynamic_radiance_visibility_fallback_texture;
+    NriDescriptor *dynamic_radiance_sampler;
+    uint32_t dynamic_radiance_field_count;
 
     /* Read-only STATIC BVH used only to block moving radiance fields at runtime. */
     NriBuffer *radiance_visibility_node_buffer;
