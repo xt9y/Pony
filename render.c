@@ -1493,6 +1493,14 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
         u.dynamic_radiance_dims_offset[radiance_count][1] = allocation->radiance_dims[1];
         u.dynamic_radiance_dims_offset[radiance_count][2] = allocation->radiance_dims[2];
         u.dynamic_radiance_dims_offset[radiance_count][3] = allocation->radiance_probe_offset;
+        u.dynamic_visibility_origin_spacing[radiance_count][0] = allocation->visibility_origin.x;
+        u.dynamic_visibility_origin_spacing[radiance_count][1] = allocation->visibility_origin.y;
+        u.dynamic_visibility_origin_spacing[radiance_count][2] = allocation->visibility_origin.z;
+        u.dynamic_visibility_origin_spacing[radiance_count][3] = allocation->visibility_spacing;
+        u.dynamic_visibility_dims_offset[radiance_count][0] = allocation->visibility_dims[0];
+        u.dynamic_visibility_dims_offset[radiance_count][1] = allocation->visibility_dims[1];
+        u.dynamic_visibility_dims_offset[radiance_count][2] = allocation->visibility_dims[2];
+        u.dynamic_visibility_dims_offset[radiance_count][3] = allocation->visibility_probe_offset;
         ++radiance_count;
     }
     u.dynamic_radiance_meta[0] = radiance_count;
@@ -1995,6 +2003,14 @@ static bool write_dynamic_influence(const RENDERER *r, MATERIAL_UNIFORMS *unifor
     uniforms->dynamic_radiance_dims_offset[slot][1] = allocation->radiance_dims[1];
     uniforms->dynamic_radiance_dims_offset[slot][2] = allocation->radiance_dims[2];
     uniforms->dynamic_radiance_dims_offset[slot][3] = allocation->radiance_probe_offset;
+    uniforms->dynamic_visibility_origin_spacing[slot][0] = allocation->visibility_origin.x;
+    uniforms->dynamic_visibility_origin_spacing[slot][1] = allocation->visibility_origin.y;
+    uniforms->dynamic_visibility_origin_spacing[slot][2] = allocation->visibility_origin.z;
+    uniforms->dynamic_visibility_origin_spacing[slot][3] = allocation->visibility_spacing;
+    uniforms->dynamic_visibility_dims_offset[slot][0] = allocation->visibility_dims[0];
+    uniforms->dynamic_visibility_dims_offset[slot][1] = allocation->visibility_dims[1];
+    uniforms->dynamic_visibility_dims_offset[slot][2] = allocation->visibility_dims[2];
+    uniforms->dynamic_visibility_dims_offset[slot][3] = allocation->visibility_probe_offset;
 
     return true;
 }
