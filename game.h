@@ -574,12 +574,12 @@ struct RENDERER {
     uint32_t dynamic_object_node_count;
     uint32_t dynamic_object_triangle_count;
 
-    /* Generation scratch stays structured; runtime sampling uses hardware-filtered 3D textures. */
+    /* Radiance uses hardware-filtered 3D textures; tiny moving visibility stays in the stable structured-buffer path. */
     NriBuffer *dynamic_radiance_buffer;
     NriTexture *dynamic_radiance_textures[7];
-    NriTexture *dynamic_radiance_visibility_texture;
     NriTexture *dynamic_radiance_fallback_texture;
-    NriTexture *dynamic_radiance_visibility_fallback_texture;
+    NriBuffer *dynamic_radiance_visibility_buffer;
+    NriBuffer *dynamic_radiance_visibility_fallback_buffer;
     NriDescriptor *dynamic_radiance_sampler;
     uint32_t dynamic_radiance_field_count;
 

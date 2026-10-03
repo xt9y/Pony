@@ -436,9 +436,9 @@ def main() -> None:
         "dynamic_radiance_pipeline",
         "dynamic_radiance_buffer",
         "dynamic_radiance_textures",
-        "dynamic_radiance_visibility_texture",
+        "dynamic_radiance_visibility_buffer",
         "dynamic_radiance_fallback_texture",
-        "dynamic_radiance_visibility_fallback_texture",
+        "dynamic_radiance_visibility_fallback_buffer",
         "dynamic_radiance_sampler",
         "gpu_create_texture_3d(",
         "gpu_upload_texture_3d_data(",
@@ -476,7 +476,7 @@ def main() -> None:
     for needle in (
         "Texture3D<float4> DynamicRadiance0",
         "Texture3D<float4> DynamicRadiance6",
-        "Texture3D<float> DynamicRadianceVisibility",
+        "StructuredBuffer<float> DynamicRadianceVisibility",
         "SamplerState DynamicRadianceSampler",
         "dynamic_radiance_origin_spacing",
         "dynamic_radiance_dims_offset",
@@ -490,7 +490,7 @@ def main() -> None:
         "dynamic_radiance_lighting(",
         "dynamic_radiance_static_visibility(",
         "DynamicRadiance0.SampleLevel(DynamicRadianceSampler",
-        "DynamicRadianceVisibility.SampleLevel(DynamicRadianceSampler",
+        "DynamicRadianceVisibility[probe]",
         "dynamic_influence_meta.w",
         "smoothstep(0.0f, 2.0f, edge)",
         "dynamic_correction = dynamic_radiance_lighting(input.world_position, geometric_normal)",
@@ -541,10 +541,10 @@ def main() -> None:
         "BUILD_DYNAMIC_VISIBILITY_CS",
         "StructuredBuffer<BvhNode> Nodes",
         "StructuredBuffer<BvhTriangle> Triangles",
-        "RWTexture3D<float> Visibility",
+        "RWStructuredBuffer<float> Visibility",
         "trace_any(",
         "world_position = mul(model, float4(local_position, 1.0f)).xyz",
-        "Visibility[uint3(x, y, z + field_meta.x)] = visibility",
+        "Visibility[field_meta.x + probe_index] = visibility",
     ):
         if needle not in dynamic_visibility:
             raise AssertionError(f"static-scene radiance visibility pass missing: {needle}")
@@ -555,7 +555,7 @@ def main() -> None:
         "volume_dynamic_shadow_visibility(",
         "Texture3D<float4> DynamicRadiance0",
         "Texture3D<float4> DynamicRadiance6",
-        "Texture3D<float> DynamicRadianceVisibility",
+        "StructuredBuffer<float> DynamicRadianceVisibility",
         "SamplerState DynamicRadianceSampler",
         "dynamic_volume_filtered(",
         "dynamic_volume_static_visibility(",
@@ -581,12 +581,11 @@ def main() -> None:
 
     for forbidden in (
         "StructuredBuffer<float4> DynamicRadiance",
-        "StructuredBuffer<float> DynamicRadianceVisibility",
-        "DynamicRadianceVisibility[probe]",
-        "meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z)",
+        "dynamic_radiance_probe_value(",
+        "dynamic_volume_probe_value(",
     ):
         if forbidden in fragment + compute:
-            raise AssertionError(f"manual runtime radiance interpolation returned: {forbidden}")
+            raise AssertionError(f"manual 9-SH runtime radiance interpolation returned: {forbidden}")
 
     for needle in (
         "reference_mode",

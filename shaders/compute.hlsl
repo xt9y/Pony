@@ -23,7 +23,7 @@ GPU_BIND_T(7, 0) Texture3D<float4> DynamicRadiance3 : register(t7, space0);
 GPU_BIND_T(8, 0) Texture3D<float4> DynamicRadiance4 : register(t8, space0);
 GPU_BIND_T(9, 0) Texture3D<float4> DynamicRadiance5 : register(t9, space0);
 GPU_BIND_T(10, 0) Texture3D<float4> DynamicRadiance6 : register(t10, space0);
-GPU_BIND_T(11, 0) Texture3D<float> DynamicRadianceVisibility : register(t11, space0);
+GPU_BIND_T(11, 0) StructuredBuffer<float> DynamicRadianceVisibility : register(t11, space0);
 GPU_BIND_S(1, 0) SamplerState DynamicShadowSampler : register(s1, space0);
 GPU_BIND_S(2, 0) SamplerState DynamicRadianceSampler : register(s2, space0);
 GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
@@ -333,9 +333,21 @@ float dynamic_volume_static_visibility(uint index, float3 local_position) {
     float3 maximum = float3(meta.xyz - 1u);
     if (any(coord < 0.0f) || any(coord > maximum)) return 1.0f;
 
-    uint field_count = max(dynamic_radiance_meta.z, 1u);
-    float3 uvw = dynamic_volume_uvw(meta, coord, field_count);
-    return saturate(DynamicRadianceVisibility.SampleLevel(DynamicRadianceSampler, uvw, 0.0f));
+    uint3 base = min(uint3(floor(coord)), meta.xyz - 2u);
+    float3 fraction = saturate(coord - float3(base));
+    float visibility = 0.0f;
+
+    [unroll] for (uint z = 0u; z < 2u; ++z)
+    [unroll] for (uint y = 0u; y < 2u; ++y)
+    [unroll] for (uint x = 0u; x < 2u; ++x) {
+        uint3 cell = base + uint3(x, y, z);
+        float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
+        float weight = axis_weight.x * axis_weight.y * axis_weight.z;
+        uint probe = meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z);
+        visibility += saturate(DynamicRadianceVisibility[probe]) * weight;
+    }
+
+    return saturate(visibility);
 }
 
 float3 dynamic_volume_radiance(float3 world_position, float3 scattering_direction) {

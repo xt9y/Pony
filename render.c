@@ -591,7 +591,7 @@ static bool create_dynamic_visibility_layout(RENDERER *r) {
         NriDescriptorType_STRUCTURED_BUFFER,
     };
 
-    return gpu_create_compute_layout(r, &r->dynamic_visibility_layout, sources, 2, NriDescriptorType_STORAGE_TEXTURE, true);
+    return gpu_create_compute_layout(r, &r->dynamic_visibility_layout, sources, 2, NriDescriptorType_STORAGE_STRUCTURED_BUFFER, true);
 }
 
 static bool create_surface_layout(RENDERER *r) {
@@ -603,7 +603,7 @@ static bool create_surface_layout(RENDERER *r) {
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
         NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
-        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
+        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_STRUCTURED_BUFFER,
         NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
@@ -653,7 +653,7 @@ static bool create_volume_layout(RENDERER *r) {
         NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
         NriDescriptorType_TEXTURE,
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
-        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
+        NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_STRUCTURED_BUFFER,
         NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
     return gpu_create_compute_layout(r, &r->volume_layout, src, 15, NriDescriptorType_STORAGE_TEXTURE, true);
@@ -701,8 +701,8 @@ static bool bind_fx_resources(RENDERER *r, NriCommandBuffer *cmd, NriPipeline *p
 static bool bind_volume_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *normal, NriDescriptor *sampler_desc, NriBuffer *probes, NriBuffer *beams,
                                   NriTexture *output, const void *uniforms, uint32_t size) {
     NriTexture *shadow = r->dynamic_shadow_ready && r->dynamic_shadow_texture ? r->dynamic_shadow_texture : r->default_white;
-    NriTexture *visibility = r->dynamic_radiance_visibility_texture ? r->dynamic_radiance_visibility_texture
-                                                                    : r->dynamic_radiance_visibility_fallback_texture;
+    NriBuffer *visibility = r->dynamic_radiance_visibility_buffer ? r->dynamic_radiance_visibility_buffer
+                                                                  : r->dynamic_radiance_visibility_fallback_buffer;
 
     if (!gpu_transition_texture(r, cmd, normal, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
         !gpu_transition_texture(r, cmd, shadow, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
@@ -723,7 +723,7 @@ static bool bind_volume_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture
         gpu_create_texture_view(r, shadow, NriTextureView_TEXTURE),
         radiance_views[0], radiance_views[1], radiance_views[2], radiance_views[3],
         radiance_views[4], radiance_views[5], radiance_views[6],
-        gpu_create_texture_view(r, visibility, NriTextureView_TEXTURE),
+        gpu_create_buffer_view(r, visibility, NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
         r->dynamic_shadow_sampler ? r->dynamic_shadow_sampler : sampler_desc,
         r->dynamic_radiance_sampler ? r->dynamic_radiance_sampler : sampler_desc};
 
@@ -769,8 +769,8 @@ static bool bind_camera_resources(RENDERER *r, NriCommandBuffer *cmd, const void
 static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const RENDER_MATERIAL *material, NriTexture *lightmap, NriTexture *scene_color,
                                    NriDescriptor *material_sampler, NriDescriptor *lightmap_sampler, NriDescriptor *scene_sampler, const void *uniforms,
                                    size_t size) {
-    NriTexture *visibility = r->dynamic_radiance_visibility_texture ? r->dynamic_radiance_visibility_texture
-                                                                    : r->dynamic_radiance_visibility_fallback_texture;
+    NriBuffer *visibility = r->dynamic_radiance_visibility_buffer ? r->dynamic_radiance_visibility_buffer
+                                                                  : r->dynamic_radiance_visibility_fallback_buffer;
     NriDescriptor *radiance_views[7];
 
     for (uint32_t i = 0u; i < 7u; ++i) {
@@ -798,7 +798,7 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
                                NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
         radiance_views[0], radiance_views[1], radiance_views[2], radiance_views[3],
         radiance_views[4], radiance_views[5], radiance_views[6],
-        gpu_create_texture_view(r, visibility, NriTextureView_TEXTURE),
+        gpu_create_buffer_view(r, visibility, NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
         material_sampler,
         lightmap_sampler,
         scene_sampler,
@@ -828,7 +828,7 @@ static bool bind_dynamic_radiance_resources(RENDERER *r, NriCommandBuffer *cmd, 
 }
 
 static bool bind_dynamic_visibility_resources(RENDERER *r, NriCommandBuffer *cmd, const DYNAMIC_VISIBILITY_UNIFORMS *uniforms) {
-    if (!r || !cmd || !uniforms || !r->dynamic_visibility_layout || !r->dynamic_radiance_visibility_texture ||
+    if (!r || !cmd || !uniforms || !r->dynamic_visibility_layout || !r->dynamic_radiance_visibility_buffer ||
         !r->radiance_visibility_node_buffer || !r->radiance_visibility_triangle_buffer)
         return false;
 
@@ -836,7 +836,8 @@ static bool bind_dynamic_visibility_resources(RENDERER *r, NriCommandBuffer *cmd
         gpu_create_buffer_view(r, r->radiance_visibility_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
         gpu_create_buffer_view(r, r->radiance_visibility_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
     };
-    NriDescriptor *dst = gpu_create_texture_view(r, r->dynamic_radiance_visibility_texture, NriTextureView_STORAGE_TEXTURE);
+    NriDescriptor *dst =
+        gpu_create_buffer_view(r, r->dynamic_radiance_visibility_buffer, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(float));
 
     return src[0] && src[1] && dst &&
            gpu_bind_descriptor_set(r, cmd, r->dynamic_visibility_layout, NriBindPoint_COMPUTE, 0, src, 2) &&
@@ -844,7 +845,7 @@ static bool bind_dynamic_visibility_resources(RENDERER *r, NriCommandBuffer *cmd
            gpu_bind_uniform_data(r, cmd, r->dynamic_visibility_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
 }
 
-static bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
+static bool bind_line_resourcesstatic bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
     return gpu_bind_uniform_data(r, cmd, r->line_layout, NriBindPoint_GRAPHICS, 1, data, size);
 }
 
@@ -1146,7 +1147,7 @@ static void release_dynamic_lighting(RENDERER *r) {
     release_buffer(r, r->dynamic_object_triangle_buffer);
     release_buffer(r, r->dynamic_radiance_buffer);
     for (uint32_t i = 0u; i < 7u; ++i) release_texture(r, r->dynamic_radiance_textures[i]);
-    release_texture(r, r->dynamic_radiance_visibility_texture);
+    release_buffer(r, r->dynamic_radiance_visibility_buffer);
     release_buffer(r, r->radiance_visibility_node_buffer);
     release_buffer(r, r->radiance_visibility_triangle_buffer);
 
@@ -1156,7 +1157,7 @@ static void release_dynamic_lighting(RENDERER *r) {
     r->dynamic_object_triangle_count = 0u;
     r->dynamic_radiance_buffer = NULL;
     for (uint32_t i = 0u; i < 7u; ++i) r->dynamic_radiance_textures[i] = NULL;
-    r->dynamic_radiance_visibility_texture = NULL;
+    r->dynamic_radiance_visibility_buffer = NULL;
     r->dynamic_radiance_field_count = 0u;
     r->radiance_visibility_node_buffer = NULL;
     r->radiance_visibility_triangle_buffer = NULL;
@@ -1528,8 +1529,7 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
         u.dynamic_visibility_dims_offset[radiance_count][0] = allocation->visibility_dims[0];
         u.dynamic_visibility_dims_offset[radiance_count][1] = allocation->visibility_dims[1];
         u.dynamic_visibility_dims_offset[radiance_count][2] = allocation->visibility_dims[2];
-        u.dynamic_visibility_dims_offset[radiance_count][3] =
-            allocation->visibility_probe_offset / (allocation->visibility_dims[0] * allocation->visibility_dims[1]);
+        u.dynamic_visibility_dims_offset[radiance_count][3] = allocation->visibility_probe_offset;
         ++radiance_count;
     }
     u.dynamic_radiance_meta[0] = radiance_count;
@@ -1744,15 +1744,15 @@ bool renderer_gpu_resources_init(RENDERER *r) {
     const PROBE fallback_probe = {0};
     const float fallback_beam = 1.0f;
     const uint16_t fallback_radiance[4] = {0u, 0u, 0u, 0u};
-    const uint16_t fallback_visibility = 0x3c00u;
+    const float fallback_visibility = 1.0f;
     r->surface_probe_fallback_buffer =
         gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_probe, sizeof(fallback_probe), sizeof(fallback_probe));
     r->surface_beam_fallback_buffer =
         gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_beam, sizeof(fallback_beam), sizeof(fallback_beam));
     r->dynamic_radiance_fallback_texture =
         gpu_create_texture_3d(r, NriFormat_RGBA16_SFLOAT, NriTextureUsageBits_SHADER_RESOURCE, 1u, 1u, 1u);
-    r->dynamic_radiance_visibility_fallback_texture =
-        gpu_create_texture_3d(r, NriFormat_R16_SFLOAT, NriTextureUsageBits_SHADER_RESOURCE, 1u, 1u, 1u);
+    r->dynamic_radiance_visibility_fallback_buffer =
+        gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_visibility, sizeof(fallback_visibility), sizeof(fallback_visibility));
 
     const bool radiance_fallback_uploaded =
         r->dynamic_radiance_fallback_texture &&
@@ -1760,17 +1760,10 @@ bool renderer_gpu_resources_init(RENDERER *r) {
                                    sizeof(fallback_radiance), sizeof(fallback_radiance),
                                    NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
                                    NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER);
-    const bool visibility_fallback_uploaded =
-        r->dynamic_radiance_visibility_fallback_texture &&
-        gpu_upload_texture_3d_data(r, r->dynamic_radiance_visibility_fallback_texture, &fallback_visibility,
-                                   sizeof(fallback_visibility), sizeof(fallback_visibility),
-                                   NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
-                                   NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER);
-
     if (!r->solid_pipeline || !r->transmission_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_radiance_pipeline ||
         !r->dynamic_visibility_pipeline || !r->dynamic_shadow_sampler || !r->dynamic_radiance_sampler ||
         !r->surface_probe_fallback_buffer || !r->surface_beam_fallback_buffer ||
-        !radiance_fallback_uploaded || !visibility_fallback_uploaded ||
+        !radiance_fallback_uploaded || !r->dynamic_radiance_visibility_fallback_buffer ||
         !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
         renderer_gpu_resources_deinit(r);
         return false;
@@ -1933,7 +1926,7 @@ static bool render_dynamic_shadow_map(RENDERER *r, NriCommandBuffer *cmd, const 
 static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cmd) {
     if (!r || !cmd) return false;
     if (r->reference_lighting_enabled) return true;
-    if (!r->dynamic_radiance_visibility_texture || !r->dynamic_visibility_pipeline ||
+    if (!r->dynamic_radiance_visibility_buffer || !r->dynamic_visibility_pipeline ||
         !r->radiance_visibility_node_buffer || !r->radiance_visibility_triangle_buffer)
         return true;
 
@@ -1956,10 +1949,12 @@ static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cm
 
     if (!needs_update) return true;
 
-    if (!gpu_transition_texture(r, cmd, r->dynamic_radiance_visibility_texture,
-                                NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE,
-                                NriStageBits_COMPUTE_SHADER))
-        return false;
+    const NriBufferBarrierDesc begin = {
+        .buffer = r->dynamic_radiance_visibility_buffer,
+        .before = {.access = NriAccessBits_SHADER_RESOURCE, .stages = NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER},
+        .after = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER},
+    };
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &begin, .bufferNum = 1u});
 
     const float epsilon = fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f);
     uint32_t updated_fields = 0u;
@@ -1975,12 +1970,9 @@ static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cm
         if (allocation->visibility_transform_revision == object->transform_revision) continue;
 
         const MAT4 model = m4_transform(object->transform, false);
-        const uint32_t slice_offset =
-            allocation->visibility_probe_offset / (allocation->visibility_dims[0] * allocation->visibility_dims[1]);
-
         DYNAMIC_VISIBILITY_UNIFORMS uniforms = {
             .bvh_meta = {r->radiance_visibility_node_count, r->radiance_visibility_triangle_count, 0u, 0u},
-            .field_meta = {slice_offset, allocation->visibility_dims[0],
+            .field_meta = {allocation->visibility_probe_offset, allocation->visibility_dims[0],
                            allocation->visibility_dims[1], allocation->visibility_dims[2]},
             .field_origin_spacing = {allocation->visibility_origin.x, allocation->visibility_origin.y,
                                      allocation->visibility_origin.z, allocation->visibility_spacing},
@@ -2006,12 +1998,16 @@ static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cm
         allocation->visibility_update_pending = true;
     }
 
-    return gpu_transition_texture(r, cmd, r->dynamic_radiance_visibility_texture,
-                                  NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
-                                  NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER);
+    const NriBufferBarrierDesc end = {
+        .buffer = r->dynamic_radiance_visibility_buffer,
+        .before = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER},
+        .after = {.access = NriAccessBits_SHADER_RESOURCE, .stages = NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER},
+    };
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &end, .bufferNum = 1u});
+    return true;
 }
 
-static bool write_dynamic_influence(const RENDERER *r, MATERIAL_UNIFORMS *uniforms, uint32_t slot,
+static bool write_dynamic_influencestatic bool write_dynamic_influence(const RENDERER *r, MATERIAL_UNIFORMS *uniforms, uint32_t slot,
                                     const DYNAMIC_LIGHTING_ALLOCATION *allocation) {
     if (!r || !uniforms || !allocation || slot >= DYNAMIC_INFLUENCE_LIMIT) return false;
 
@@ -2074,8 +2070,7 @@ static bool write_dynamic_influence(const RENDERER *r, MATERIAL_UNIFORMS *unifor
     uniforms->dynamic_visibility_dims_offset[slot][0] = allocation->visibility_dims[0];
     uniforms->dynamic_visibility_dims_offset[slot][1] = allocation->visibility_dims[1];
     uniforms->dynamic_visibility_dims_offset[slot][2] = allocation->visibility_dims[2];
-    uniforms->dynamic_visibility_dims_offset[slot][3] =
-        allocation->visibility_probe_offset / (allocation->visibility_dims[0] * allocation->visibility_dims[1]);
+    uniforms->dynamic_visibility_dims_offset[slot][3] = allocation->visibility_probe_offset;
 
     return true;
 }
@@ -2391,7 +2386,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         release_buffer(r, r->surface_probe_fallback_buffer);
         release_buffer(r, r->surface_beam_fallback_buffer);
         release_texture(r, r->dynamic_radiance_fallback_texture);
-        release_texture(r, r->dynamic_radiance_visibility_fallback_texture);
+        release_buffer(r, r->dynamic_radiance_visibility_fallback_buffer);
         release_texture(r, r->depth_texture);
         release_texture(r, r->dynamic_shadow_texture);
         release_texture(r, r->lightmap_texture);
@@ -3065,28 +3060,18 @@ static bool upload_dynamic_field_textures(RENDERER *r, const float (*coefficient
     free(packed);
     if (!good) return false;
 
-    uint16_t *visibility = malloc((size_t)total_visibility_probes * sizeof(*visibility));
+    float *visibility = malloc((size_t)total_visibility_probes * sizeof(*visibility));
     if (!visibility) return false;
-    for (uint32_t i = 0u; i < total_visibility_probes; ++i) visibility[i] = 0x3c00u;
+    for (uint32_t i = 0u; i < total_visibility_probes; ++i) visibility[i] = 1.0f;
 
-    release_texture(r, r->dynamic_radiance_visibility_texture);
-    r->dynamic_radiance_visibility_texture =
-        gpu_create_texture_3d(r, NriFormat_R16_SFLOAT,
-                              NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE,
-                              DYNAMIC_VISIBILITY_FIELD_DIM, DYNAMIC_VISIBILITY_FIELD_DIM,
-                              field_count * DYNAMIC_VISIBILITY_FIELD_DIM);
-
-    const uint32_t visibility_row_pitch = DYNAMIC_VISIBILITY_FIELD_DIM * (uint32_t)sizeof(uint16_t);
-    const uint32_t visibility_slice_pitch = visibility_row_pitch * DYNAMIC_VISIBILITY_FIELD_DIM;
-    good = r->dynamic_radiance_visibility_texture &&
-           gpu_upload_texture_3d_data(r, r->dynamic_radiance_visibility_texture, visibility,
-                                      visibility_row_pitch, visibility_slice_pitch,
-                                      NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
-                                      NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER);
+    release_buffer(r, r->dynamic_radiance_visibility_buffer);
+    r->dynamic_radiance_visibility_buffer =
+        gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE,
+                          visibility, (size_t)total_visibility_probes * sizeof(*visibility), sizeof(*visibility));
     free(visibility);
 
-    if (good) r->dynamic_radiance_field_count = field_count;
-    return good;
+    if (r->dynamic_radiance_visibility_buffer) r->dynamic_radiance_field_count = field_count;
+    return r->dynamic_radiance_visibility_buffer != NULL;
 }
 
 static bool generate_dynamic_radiance_fields(RENDERER *renderer, uint32_t total_probes, uint32_t total_visibility_probes) {

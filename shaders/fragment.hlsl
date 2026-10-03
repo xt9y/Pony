@@ -35,7 +35,7 @@ GPU_BIND_T(17, 2) Texture3D<float4> DynamicRadiance3 : register(t17, space2);
 GPU_BIND_T(18, 2) Texture3D<float4> DynamicRadiance4 : register(t18, space2);
 GPU_BIND_T(19, 2) Texture3D<float4> DynamicRadiance5 : register(t19, space2);
 GPU_BIND_T(20, 2) Texture3D<float4> DynamicRadiance6 : register(t20, space2);
-GPU_BIND_T(21, 2) Texture3D<float> DynamicRadianceVisibility : register(t21, space2);
+GPU_BIND_T(21, 2) StructuredBuffer<float> DynamicRadianceVisibility : register(t21, space2);
 
 GPU_BIND_S(0, 2) SamplerState MaterialSampler : register(s0, space2);
 GPU_BIND_S(1, 2) SamplerState LightmapSampler : register(s1, space2);
@@ -461,9 +461,21 @@ float dynamic_radiance_static_visibility(uint index, float3 local_position) {
     float3 maximum = float3(meta.xyz - 1u);
     if (any(coord < 0.0f) || any(coord > maximum)) return 1.0f;
 
-    uint field_count = max(dynamic_influence_meta.w, 1u);
-    float3 uvw = dynamic_field_uvw(meta, coord, field_count);
-    return saturate(DynamicRadianceVisibility.SampleLevel(DynamicRadianceSampler, uvw, 0.0f));
+    uint3 base = min(uint3(floor(coord)), meta.xyz - 2u);
+    float3 fraction = saturate(coord - float3(base));
+    float visibility = 0.0f;
+
+    [unroll] for (uint z = 0u; z < 2u; ++z)
+    [unroll] for (uint y = 0u; y < 2u; ++y)
+    [unroll] for (uint x = 0u; x < 2u; ++x) {
+        uint3 cell = base + uint3(x, y, z);
+        float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
+        float weight = axis_weight.x * axis_weight.y * axis_weight.z;
+        uint probe = meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z);
+        visibility += saturate(DynamicRadianceVisibility[probe]) * weight;
+    }
+
+    return saturate(visibility);
 }
 
 float3 dynamic_radiance_field(uint index, float3 world_position, float3 world_normal) {
