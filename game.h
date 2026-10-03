@@ -534,8 +534,7 @@ struct RENDERER {
 
     NriPipelineLayout *surface_layout;
     NriPipelineLayout *dynamic_shadow_layout;
-    NriPipelineLayout *dynamic_surface_layout;
-    NriPipelineLayout *dynamic_receiver_layout;
+    NriPipelineLayout *dynamic_radiance_layout;
     NriPipelineLayout *line_layout;
     NriPipelineLayout *sky_layout;
     NriPipelineLayout *bake_layout;
@@ -555,8 +554,7 @@ struct RENDERER {
     NriPipeline *solid_pipeline;
     NriPipeline *transmission_pipeline;
     NriPipeline *dynamic_shadow_pipeline;
-    NriPipeline *dynamic_surface_pipeline;
-    NriPipeline *dynamic_receiver_pipeline;
+    NriPipeline *dynamic_radiance_pipeline;
     NriPipeline *line_pipeline;
     NriPipeline *bake_pipeline;
     NriPipeline *lightmap_queue_reset_pipeline;
@@ -568,34 +566,15 @@ struct RENDERER {
     uint32_t bvh_triangle_count;
     float bvh_emissive_weight;
 
-    /* Permanent static-scene transport data used by bounded DYNAMIC caches. */
-    NriBuffer *dynamic_static_node_buffer;
-    NriBuffer *dynamic_static_triangle_buffer;
-    NriBuffer *dynamic_static_surface_buffer;
-    NriBuffer *dynamic_static_uv_buffer;
-    uint32_t dynamic_static_node_count;
-    uint32_t dynamic_static_triangle_count;
-
-    /* Packed local-space DYNAMIC BLAS data; only instance transforms change per frame. */
+    /* Packed local-space DYNAMIC BLAS data used to generate object radiance fields. */
     NriBuffer *dynamic_object_node_buffer;
     NriBuffer *dynamic_object_triangle_buffer;
     uint32_t dynamic_object_node_count;
     uint32_t dynamic_object_triangle_count;
 
-    /* Static receiver atlas updated from moving emissive geometry with the bake estimator. */
-    NriBuffer *dynamic_receiver_sample_buffer;
-    NriTexture *dynamic_receiver_texture;
-    NriTexture *dynamic_receiver_scratch;
-    uint32_t *dynamic_receiver_grid_offsets;
-    uint32_t *dynamic_receiver_grid_marks;
-    uint32_t dynamic_receiver_grid_dims[3];
-    uint32_t dynamic_receiver_grid_cell_count;
-    uint32_t dynamic_receiver_grid_mark;
-    uint32_t dynamic_receiver_cursor_cell;
-    uint32_t dynamic_receiver_cursor_offset;
-    float dynamic_receiver_grid_min[3];
-    float dynamic_receiver_grid_cell_size;
-    bool dynamic_receiver_ready;
+    /* One packed 9-SH object-local radiance field buffer shared by dynamic models. */
+    NriBuffer *dynamic_radiance_buffer;
+    NriBuffer *dynamic_radiance_fallback_buffer;
 
     NriBuffer *lightmap_sample_buffer;
     NriBuffer *lightmap_full_sample_buffer;
