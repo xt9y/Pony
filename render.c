@@ -17,6 +17,8 @@
 #define DYNAMIC_RADIANCE_FIELD_DIM 32u
 #define DYNAMIC_RADIANCE_FIELD_SAMPLES 64u
 #define DYNAMIC_RADIANCE_IRRADIANCE_FLOOR 0.00075f
+#define DYNAMIC_RADIANCE_CACHE_MAGIC 0x52464450u
+#define DYNAMIC_RADIANCE_CACHE_VERSION 1u
 #define DYNAMIC_SHADOW_SIZE 512u
 #define DYNAMIC_TIMESTAMP_BASE 8u
 #define DYNAMIC_TIMESTAMP_STRIDE 2u
@@ -441,6 +443,7 @@ struct DYNAMIC_LIGHTING_ALLOCATION {
     uint32_t radiance_dims[3];
     VEC3 radiance_origin;
     float radiance_spacing;
+    uint64_t radiance_cache_hash;
 
     uint32_t reference_transform_revision;
     uint32_t reference_lighting_revision;
