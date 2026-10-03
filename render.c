@@ -3271,9 +3271,12 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         const DYNAMIC_LIGHTING_ALLOCATION *allocation = &renderer->dynamic_lighting[i];
 
         if (allocation->radiance_dims[0])
-            SDL_Log("dynamic radiance object %" PRIu64 ": %ux%ux%u | spacing %.3f | %.3f emissive importance",
+            SDL_Log("dynamic radiance object %" PRIu64
+                    ": SH %ux%ux%u @ %.3f | visibility %ux%ux%u @ %.3f | %.3f emissive importance",
                     allocation->object_id, allocation->radiance_dims[0], allocation->radiance_dims[1],
-                    allocation->radiance_dims[2], allocation->radiance_spacing, allocation->emissive_weight);
+                    allocation->radiance_dims[2], allocation->radiance_spacing,
+                    allocation->visibility_dims[0], allocation->visibility_dims[1], allocation->visibility_dims[2],
+                    allocation->visibility_spacing, allocation->emissive_weight);
     }
 
     return true;
