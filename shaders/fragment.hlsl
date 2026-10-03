@@ -353,7 +353,7 @@ float static_beam_visibility(float3 position) {
     return total > 0.0f ? saturate(visibility / total) : 1.0f;
 }
 
-float4 dynamic_lightmap_sample(float2 uv) {
+float4 reference_dynamic_lightmap_sample(float2 uv) {
     uint width, height;
     Lightmap.GetDimensions(width, height);
 
@@ -667,19 +667,19 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     float3 specular = d * g * f / max(4.0f * n_dot_v * max(n_dot_l, 0.001f), 1.0e-4f);
 
     float is_dynamic = saturate(dynamic_flags.x);
-    float dynamic_cache_valid = saturate(dynamic_flags.y);
+    float dynamic_reference_valid = saturate(dynamic_flags.y);
     float reference_mode = saturate(dynamic_flags.z);
     float2 lighting_uv = front_face ? input.lightmap_uv : input.back_lightmap_uv;
     float4 baked_sample = float4(0.12f, 0.12f, 0.12f, 1.0f);
 
     if (camera_position.w > 0.5f) {
-        baked_sample = is_dynamic > 0.5f && dynamic_cache_valid > 0.5f
-                           ? dynamic_lightmap_sample(lighting_uv)
+        baked_sample = is_dynamic > 0.5f && dynamic_reference_valid > 0.5f
+                           ? reference_dynamic_lightmap_sample(lighting_uv)
                            : Lightmap.Sample(LightmapSampler, lighting_uv);
     }
 
     const float visibility_floor = 1.0f / 1024.0f;
-    if (is_dynamic > 0.5f && baked_sample.a < visibility_floor * 0.5f) dynamic_cache_valid = 0.0f;
+    if (is_dynamic > 0.5f && baked_sample.a < visibility_floor * 0.5f) dynamic_reference_valid = 0.0f;
 
     float cached_sun_visibility = camera_position.w > 0.5f
                                       ? saturate((baked_sample.a - visibility_floor) / (1.0f - visibility_floor))
@@ -688,7 +688,7 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     float3 geometric_normal = normalize(input.world_normal) * (front_face ? 1.0f : -1.0f);
     float geometric_n_dot_l = max(dot(geometric_normal, l), 0.0f);
 
-    if (is_dynamic > 0.5f && dynamic_cache_valid < 0.5f) {
+    if (is_dynamic > 0.5f && dynamic_reference_valid < 0.5f) {
         baked_sample.rgb = surface_probe_irradiance(input.world_position, geometric_normal) / PI;
         cached_sun_visibility = static_beam_visibility(input.world_position);
     }
@@ -698,7 +698,7 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
     float3 baked = max(baked_sample.rgb, 0.0f);
     float3 static_direct = sun_color.rgb * roughness_normal_ao_sun.w * geometric_n_dot_l;
 
-    if (is_dynamic > 0.5f && dynamic_cache_valid < 0.5f) {
+    if (is_dynamic > 0.5f && dynamic_reference_valid < 0.5f) {
         baked += static_direct * sun_visibility;
     } else if (reference_mode < 0.5f && camera_position.w > 0.5f) {
         if (is_dynamic > 0.5f)
@@ -716,7 +716,7 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
 
     if (dynamic_flags.w > 4.5f && dynamic_flags.w < 5.5f) {
         float3 cache_debug = is_dynamic > 0.5f
-                                 ? (dynamic_cache_valid > 0.5f ? float3(0.05f, 0.25f, 1.0f) : float3(0.05f, 1.0f, 0.05f))
+                                 ? (dynamic_reference_valid > 0.5f ? float3(0.05f, 0.25f, 1.0f) : float3(0.05f, 1.0f, 0.05f))
                                  : float3(0.04f, 0.04f, 0.04f);
 
         if (reference_mode > 0.5f) cache_debug = lerp(cache_debug, float3(0.05f, 0.25f, 1.0f), 0.55f);
