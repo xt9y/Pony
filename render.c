@@ -1071,12 +1071,18 @@ static void release_dynamic_lighting(RENDERER *r) {
     release_buffer(r, r->dynamic_object_node_buffer);
     release_buffer(r, r->dynamic_object_triangle_buffer);
     release_buffer(r, r->dynamic_radiance_buffer);
+    release_buffer(r, r->radiance_visibility_node_buffer);
+    release_buffer(r, r->radiance_visibility_triangle_buffer);
 
     r->dynamic_object_node_buffer = NULL;
     r->dynamic_object_triangle_buffer = NULL;
     r->dynamic_object_node_count = 0u;
     r->dynamic_object_triangle_count = 0u;
     r->dynamic_radiance_buffer = NULL;
+    r->radiance_visibility_node_buffer = NULL;
+    r->radiance_visibility_triangle_buffer = NULL;
+    r->radiance_visibility_node_count = 0u;
+    r->radiance_visibility_triangle_count = 0u;
 
     free(r->dynamic_lighting);
     r->dynamic_lighting = NULL;
@@ -2893,6 +2899,32 @@ static bool generate_dynamic_radiance_fields(RENDERER *renderer, uint32_t total_
     return true;
 }
 
+static bool renderer_build_radiance_visibility(RENDERER *renderer, const SCENE *scene) {
+    if (!renderer || !scene || !scene->static_geometry.faces.count || !scene->static_visual.vertex_count) return false;
+
+    BVH tree = {0};
+    if (!bvh_build(&tree, &scene->static_geometry, &scene->static_visual)) return false;
+
+    renderer->radiance_visibility_node_buffer =
+        gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, tree.nodes,
+                          (size_t)tree.node_count * sizeof(*tree.nodes), sizeof(BVH_NODE));
+    renderer->radiance_visibility_triangle_buffer =
+        gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, tree.triangles,
+                          (size_t)tree.triangle_count * sizeof(*tree.triangles), sizeof(BVH_TRIANGLE));
+
+    const bool good = renderer->radiance_visibility_node_buffer && renderer->radiance_visibility_triangle_buffer;
+
+    if (good) {
+        renderer->radiance_visibility_node_count = tree.node_count;
+        renderer->radiance_visibility_triangle_count = tree.triangle_count;
+        SDL_Log("dynamic radiance static visibility: %u BVH nodes | %u triangles",
+                tree.node_count, tree.triangle_count);
+    }
+
+    bvh_free(&tree);
+    return good;
+}
+
 static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene) {
     uint32_t count = 0u;
 
@@ -3326,7 +3358,11 @@ static bool renderer_build_scene(RENDERER *renderer, SCENE *scene, const LIGHTMA
 
     renderer->debug_vertex_count = renderer->vertex_count - renderer->debug_vertex_start;
 
-    if (!upload_scene(renderer, visual) || !renderer_allocate_dynamic_lighting(renderer, scene) || !build_transmission_draws(renderer)) return false;
+    if (!upload_scene(renderer, visual) ||
+        !renderer_build_radiance_visibility(renderer, scene) ||
+        !renderer_allocate_dynamic_lighting(renderer, scene) ||
+        !build_transmission_draws(renderer))
+        return false;
 
     renderer->has_bake = false;
     SDL_Log("materials: %u | draw ranges: %u | dynamic lighting allocations: %u | embedded images: %u", renderer->material_count, renderer->draw_count,
