@@ -181,9 +181,9 @@ static bool bake_read_probe_buffer(RENDERER *r, NriBuffer *output, PROBE_GRID *g
     return good;
 }
 
-static void bake_worker_deinit(RENDERER *r);
+void bake_worker_deinit(RENDERER *r);
 
-static bool bake_worker_init(RENDERER *r) {
+bool bake_worker_init(RENDERER *r) {
     if (!r) return false;
 
     memset(r, 0, sizeof(*r));
@@ -206,7 +206,7 @@ static bool bake_worker_init(RENDERER *r) {
     return true;
 }
 
-static void bake_worker_deinit(RENDERER *r) {
+void bake_worker_deinit(RENDERER *r) {
     if (!r) return;
 
     GPU *gpu = r->gpu;
@@ -816,10 +816,18 @@ cleanup:
     return ok;
 }
 
+static bool bake_lightmap_cancelled(const RENDERER *r) {
+    return r && r->bake_cancel_flag && SDL_GetAtomicInt(r->bake_cancel_flag) != 0;
+}
+
 static bool bake_lightmap_once(RENDERER *r, const LIGHTMAP *lm) {
     const Uint32 pixels = r->lightmap_width * r->lightmap_height;
+    Uint32 batch_samples = r->bake_batch_samples_override ? r->bake_batch_samples_override : BAKE_BATCH_SAMPLES;
 
-    SDL_Log("B: lightmap trace samples per pass: %u", BAKE_BATCH_SAMPLES);
+    if (batch_samples > BAKE_BATCH_SAMPLES) batch_samples = BAKE_BATCH_SAMPLES;
+    if (!batch_samples) batch_samples = 1u;
+
+    SDL_Log("B: lightmap trace samples per pass: %u", batch_samples);
     if (r->bvh_emissive_weight > 0.0f)
         SDL_Log("B: lightmap emissive mesh samples: %u per direct texel", LIGHTMAP_EMISSIVE_MAX_SAMPLES);
     bake_progress(r, "surface lightmap", 0u, r->bake_target_samples);
@@ -839,6 +847,8 @@ static bool bake_lightmap_once(RENDERER *r, const LIGHTMAP *lm) {
     }
 
     if (!gpu_submit_commands(r, allocator, cmd)) return false;
+    if (bake_lightmap_cancelled(r)) return false;
+    if (r->bake_yield_ms) SDL_Delay(r->bake_yield_ms);
 
     if (!build_lightmap_patches(r, lm)) return false;
 
@@ -849,10 +859,12 @@ static bool bake_lightmap_once(RENDERER *r, const LIGHTMAP *lm) {
 
         Uint32 batch_index = 0u;
 
-        for (Uint32 first = 0; first < r->bake_target_samples; first += BAKE_BATCH_SAMPLES, ++batch_index) {
+        for (Uint32 first = 0; first < r->bake_target_samples; first += batch_samples, ++batch_index) {
+            if (bake_lightmap_cancelled(r)) return false;
+
             Uint32 count = r->bake_target_samples - first;
 
-            if (count > BAKE_BATCH_SAMPLES) count = BAKE_BATCH_SAMPLES;
+            if (count > batch_samples) count = batch_samples;
 
             allocator = NULL;
             cmd = NULL;
@@ -867,9 +879,13 @@ static bool bake_lightmap_once(RENDERER *r, const LIGHTMAP *lm) {
 
             if (!gpu_submit_commands(r, allocator, cmd)) return false;
             bake_progress(r, "surface lightmap", first + count, r->bake_target_samples);
+
+            if (bake_lightmap_cancelled(r)) return false;
+            if (r->bake_yield_ms) SDL_Delay(r->bake_yield_ms);
         }
     }
 
+    if (bake_lightmap_cancelled(r)) return false;
     bake_progress(r, "filtering lightmap", 0u, 0u);
 
     allocator = NULL;
@@ -919,6 +935,7 @@ static bool bake_lightmap_once(RENDERER *r, const LIGHTMAP *lm) {
     }
 
     if (!gpu_submit_commands(r, allocator, cmd)) return false;
+    if (bake_lightmap_cancelled(r)) return false;
     release_texture(r, r->lightmap_scratch);
     r->lightmap_scratch = NULL;
 
@@ -984,6 +1001,434 @@ bool bake_lightmap(RENDERER *r, const BVH *tree, const LIGHTMAP *lm, const PROBE
     SDL_Log("lightmap: %ux%u, %u charts, %u valid texels, %.2f texels/unit", lm->width, lm->height, lm->chart_count, lm->sample_count, lm->texel_density);
 
     return bake_lightmap_once(r, lm);
+}
+
+
+bool bake_reference_lightmap(RENDERER *r, const BVH *tree, const LIGHTMAP *layout, NriTexture **out_texture) {
+    if (!r || !tree || !layout || !out_texture || !r->volume_probes.probes) return false;
+
+    NriTexture *base_texture = r->lightmap_texture;
+    const uint32_t base_width = r->lightmap_width;
+    const uint32_t base_height = r->lightmap_height;
+    const uint32_t base_sample_count = r->lightmap_sample_count;
+    const uint32_t base_trace_count = r->lightmap_trace_count;
+    const uint32_t base_target_samples = r->bake_target_samples;
+    const uint32_t base_min_samples = r->lightmap_min_samples;
+    const VEC3 base_probe_origin = r->lightmap_probe_origin;
+    const float base_probe_spacing = r->lightmap_probe_spacing;
+    const uint32_t base_probe_count_x = r->lightmap_probe_count_x;
+    const uint32_t base_probe_count_y = r->lightmap_probe_count_y;
+    const uint32_t base_probe_count_z = r->lightmap_probe_count_z;
+    const float base_epsilon = r->bake_epsilon;
+    const bool base_full_transport = r->bake_full_transport;
+
+    r->lightmap_texture = NULL;
+    r->bake_full_transport = true;
+
+    const bool good = bake_lightmap(r, tree, layout, &r->volume_probes);
+    NriTexture *candidate = r->lightmap_texture;
+
+    r->lightmap_texture = base_texture;
+    release_bake_resources(r);
+    r->lightmap_width = base_width;
+    r->lightmap_height = base_height;
+    r->lightmap_sample_count = base_sample_count;
+    r->lightmap_trace_count = base_trace_count;
+    r->bake_target_samples = base_target_samples;
+    r->lightmap_min_samples = base_min_samples;
+    r->lightmap_probe_origin = base_probe_origin;
+    r->lightmap_probe_spacing = base_probe_spacing;
+    r->lightmap_probe_count_x = base_probe_count_x;
+    r->lightmap_probe_count_y = base_probe_count_y;
+    r->lightmap_probe_count_z = base_probe_count_z;
+    r->bake_epsilon = base_epsilon;
+    r->bake_full_transport = base_full_transport;
+
+    if (!good || !candidate) {
+        release_texture(r, candidate);
+        return false;
+    }
+
+    *out_texture = candidate;
+    return true;
+}
+
+struct DYNAMIC_POSE_BAKE_JOB {
+    SCENE scene;
+    LIGHTMAP layout;
+    PROBE_GRID probes;
+    OBJECT_ID object_id;
+    DIRECTIONAL_LIGHT sun;
+    SKY sky;
+    VOLUMETRICS_LIGHTING volumetrics;
+    TRANSFORM base_transform;
+    VEC3 axis;
+    float min_offset;
+    float max_offset;
+    uint32_t pose_count;
+    uint32_t columns;
+    uint32_t rows;
+    uint32_t atlas_width;
+    uint32_t atlas_height;
+    uint64_t atlas_bytes;
+    uint64_t cache_hash;
+    Uint8 *pixels;
+    SDL_Thread *thread;
+    SDL_AtomicInt cancel;
+    SDL_AtomicInt done;
+    SDL_AtomicInt success;
+    Uint64 started;
+    char error[192];
+};
+
+static void dynamic_pose_job_error(DYNAMIC_POSE_BAKE_JOB *job, const char *message) {
+    if (!job) return;
+    snprintf(job->error, sizeof(job->error), "%s", message && *message ? message : "unknown pose bake error");
+}
+
+static bool dynamic_pose_clone_scene(const SCENE *source, SCENE *destination) {
+    if (!source || !destination || !source->objects || !source->object_count) return false;
+
+    memset(destination, 0, sizeof(*destination));
+    destination->sky = source->sky;
+    destination->volumetrics = source->volumetrics;
+    destination->vision = source->vision;
+    destination->radius = source->radius;
+    destination->next_object_id = source->next_object_id;
+    destination->object_count = source->object_count;
+    destination->object_capacity = source->object_count;
+    destination->geometry_revision = source->geometry_revision;
+    destination->lighting_revision = source->lighting_revision;
+    destination->objects = malloc((size_t)source->object_count * sizeof(*destination->objects));
+
+    if (!destination->objects) return false;
+
+    memcpy(destination->objects, source->objects, (size_t)source->object_count * sizeof(*destination->objects));
+
+    for (uint32_t object = 0u; object < destination->object_count; ++object)
+        destination->objects[object].owner = destination;
+
+    destination->compiled = false;
+    destination->lightmap_valid = false;
+    return scene_compile(destination);
+}
+
+static bool dynamic_pose_clone_layout(const LIGHTMAP *source, LIGHTMAP *destination) {
+    if (!source || !destination || !source->samples || !source->sample_count) return false;
+
+    *destination = *source;
+    destination->uvs = NULL;
+    destination->samples = malloc((size_t)source->sample_count * sizeof(*destination->samples));
+
+    if (!destination->samples) return false;
+
+    memcpy(destination->samples, source->samples, (size_t)source->sample_count * sizeof(*destination->samples));
+    return true;
+}
+
+static bool dynamic_pose_clone_probes(const PROBE_GRID *source, PROBE_GRID *destination) {
+    if (!source || !destination || !source->probes || !source->count_x || !source->count_y || !source->count_z) return false;
+
+    const uint64_t count = (uint64_t)source->count_x * source->count_y * source->count_z;
+    if (!count || count > SIZE_MAX / sizeof(*destination->probes)) return false;
+
+    *destination = *source;
+    destination->probes = malloc((size_t)count * sizeof(*destination->probes));
+
+    if (!destination->probes) return false;
+
+    memcpy(destination->probes, source->probes, (size_t)count * sizeof(*destination->probes));
+    return true;
+}
+
+static VEC3 dynamic_pose_rotate(const float rotation[4], VEC3 value) {
+    const VEC3 q = v3(rotation[0], rotation[1], rotation[2]);
+    const float length_sq = v3_len_sq(q) + rotation[3] * rotation[3];
+
+    if (length_sq <= 1.0e-12f) return value;
+
+    const float inv_length = 1.0f / sqrtf(length_sq);
+    const VEC3 u = v3_scale(q, inv_length);
+    const float w = rotation[3] * inv_length;
+    const VEC3 t = v3_scale(v3_cross(u, value), 2.0f);
+    return v3_add(value, v3_add(v3_scale(t, w), v3_cross(u, t)));
+}
+
+static VEC3 dynamic_pose_position(TRANSFORM transform, VEC3 position) {
+    const VEC3 scaled = v3(position.x * transform.scale.x, position.y * transform.scale.y, position.z * transform.scale.z);
+    return v3_add(dynamic_pose_rotate(transform.rotation, scaled), transform.position);
+}
+
+static VEC3 dynamic_pose_normal(TRANSFORM transform, VEC3 normal) {
+    VEC3 scaled = {
+        fabsf(transform.scale.x) > 1.0e-12f ? normal.x / transform.scale.x : 0.0f,
+        fabsf(transform.scale.y) > 1.0e-12f ? normal.y / transform.scale.y : 0.0f,
+        fabsf(transform.scale.z) > 1.0e-12f ? normal.z / transform.scale.z : 0.0f,
+    };
+    return v3_normalize(dynamic_pose_rotate(transform.rotation, scaled));
+}
+
+static bool dynamic_pose_world_layout(const LIGHTMAP *local, TRANSFORM transform, LIGHTMAP *world) {
+    if (!local || !world || !local->samples || !local->sample_count) return false;
+
+    *world = *local;
+    world->uvs = NULL;
+    world->samples = malloc((size_t)local->sample_count * sizeof(*world->samples));
+
+    if (!world->samples) return false;
+
+    for (uint32_t sample = 0u; sample < local->sample_count; ++sample) {
+        const LMAP_SAMPLE *source = &local->samples[sample];
+        LMAP_SAMPLE *target = &world->samples[sample];
+        const VEC3 position = dynamic_pose_position(transform, v3(source->position[0], source->position[1], source->position[2]));
+        const VEC3 normal = dynamic_pose_normal(transform, v3(source->normal[0], source->normal[1], source->normal[2]));
+
+        *target = *source;
+        target->position[0] = position.x;
+        target->position[1] = position.y;
+        target->position[2] = position.z;
+        target->normal[0] = normal.x;
+        target->normal[1] = normal.y;
+        target->normal[2] = normal.z;
+    }
+
+    return true;
+}
+
+static void dynamic_pose_cache_path_worker(char *path, size_t size, uint64_t hash) {
+    if (!path || !size) return;
+    snprintf(path, size, ".pony-pose-%016" PRIx64 ".bin", hash);
+}
+
+static bool dynamic_pose_cache_write_worker(const DYNAMIC_POSE_BAKE_JOB *job) {
+    if (!job || !job->pixels || !job->cache_hash || !job->atlas_bytes || job->atlas_bytes > SIZE_MAX) return false;
+
+    char path[96];
+    char temporary[112];
+    dynamic_pose_cache_path_worker(path, sizeof(path), job->cache_hash);
+    snprintf(temporary, sizeof(temporary), "%s.tmp", path);
+
+    DYNAMIC_POSE_CACHE_HEADER header = {
+        .magic = DYNAMIC_POSE_CACHE_MAGIC,
+        .version = DYNAMIC_POSE_CACHE_VERSION,
+        .width = job->atlas_width,
+        .height = job->atlas_height,
+        .pose_count = job->pose_count,
+        .columns = job->columns,
+        .rows = job->rows,
+        .cache_hash = job->cache_hash,
+        .payload_bytes = job->atlas_bytes,
+        .payload_hash = hash_bytes(0u, job->pixels, (size_t)job->atlas_bytes),
+    };
+
+    FILE *file = fopen(temporary, "wb");
+    if (!file) return false;
+
+    bool good = fwrite(&header, sizeof(header), 1, file) == 1 &&
+                fwrite(job->pixels, (size_t)job->atlas_bytes, 1, file) == 1;
+    if (fclose(file) != 0) good = false;
+
+    if (!good) {
+        remove(temporary);
+        return false;
+    }
+
+    remove(path);
+    if (rename(temporary, path) != 0) {
+        remove(temporary);
+        return false;
+    }
+
+    return true;
+}
+
+static void dynamic_pose_job_free(DYNAMIC_POSE_BAKE_JOB *job) {
+    if (!job) return;
+
+    scene_free(&job->scene);
+    free(job->layout.samples);
+    job->layout.samples = NULL;
+    free(job->probes.probes);
+    job->probes.probes = NULL;
+    free(job->pixels);
+    job->pixels = NULL;
+    free(job);
+}
+
+static int SDLCALL dynamic_pose_bake_thread_main(void *userdata) {
+    DYNAMIC_POSE_BAKE_JOB *job = userdata;
+    RENDERER worker = {0};
+    bool good = false;
+
+    if (!job || !bake_worker_init(&worker)) {
+        if (job) dynamic_pose_job_error(job, SDL_GetError());
+        if (job) SDL_SetAtomicInt(&job->done, 1);
+        return 1;
+    }
+
+    worker.volume_probes = job->probes;
+    job->probes.probes = NULL;
+    worker.sun = job->sun;
+    worker.sky = job->sky;
+    worker.volumetrics = job->volumetrics;
+    worker.bake_batch_samples_override = 1u;
+    worker.bake_yield_ms = 2u;
+    worker.bake_cancel_flag = &job->cancel;
+
+    OBJECT *object = scene_object_by_id(&job->scene, job->object_id);
+    job->pixels = calloc(1u, (size_t)job->atlas_bytes);
+    good = object && job->pixels != NULL;
+
+    for (uint32_t pose = 0u; good && pose < job->pose_count; ++pose) {
+        if (SDL_GetAtomicInt(&job->cancel)) {
+            good = false;
+            break;
+        }
+
+        const float t = job->pose_count > 1u ? (float)pose / (float)(job->pose_count - 1u) : 0.0f;
+        const float offset = job->min_offset + (job->max_offset - job->min_offset) * t;
+        TRANSFORM state = job->base_transform;
+        state.position = v3_add(state.position, v3_scale(job->axis, offset));
+
+        object->transform = state;
+        job->scene.compiled = false;
+        good = scene_compile(&job->scene);
+
+        BVH tree = {0};
+        LIGHTMAP world_layout = {0};
+        NriTexture *candidate = NULL;
+        Uint8 *pixels = NULL;
+
+        if (good)
+            good = bvh_build_with_surfaces(&tree, &job->scene.geometry, &job->scene.visual,
+                                           job->scene.surface_refs, job->scene.surface_ref_count);
+        if (good) good = dynamic_pose_world_layout(&job->layout, state, &world_layout);
+        if (good) good = bake_reference_lightmap(&worker, &tree, &world_layout, &candidate);
+        if (good)
+            good = download_rgba16f_texture(&worker, candidate, job->layout.width, job->layout.height, &pixels);
+
+        if (good) {
+            const uint32_t cell_x = pose % job->columns;
+            const uint32_t cell_y = pose / job->columns;
+            const size_t source_row_bytes = (size_t)job->layout.width * 8u;
+            const size_t atlas_row_bytes = (size_t)job->atlas_width * 8u;
+            const size_t x_bytes = (size_t)cell_x * source_row_bytes;
+
+            for (uint32_t y = 0u; y < job->layout.height; ++y) {
+                const size_t destination_y = (size_t)cell_y * job->layout.height + y;
+                memcpy(job->pixels + destination_y * atlas_row_bytes + x_bytes,
+                       pixels + (size_t)y * source_row_bytes, source_row_bytes);
+            }
+        }
+
+        free(pixels);
+        release_texture(&worker, candidate);
+        free(world_layout.samples);
+        bvh_free(&tree);
+
+        if (good)
+            SDL_Log("dynamic pose background: object %" PRIu64 " state %u/%u ready at offset %.3f",
+                    job->object_id, pose + 1u, job->pose_count, offset);
+    }
+
+    if (SDL_GetAtomicInt(&job->cancel)) good = false;
+
+    if (good && !dynamic_pose_cache_write_worker(job))
+        SDL_Log("dynamic pose background: object %" PRIu64 " cache write skipped", job->object_id);
+
+    bake_worker_deinit(&worker);
+
+    if (!good && !job->error[0] && !SDL_GetAtomicInt(&job->cancel))
+        dynamic_pose_job_error(job, *SDL_GetError() ? SDL_GetError() : "pose bake failed");
+
+    SDL_SetAtomicInt(&job->success, good ? 1 : 0);
+    SDL_SetAtomicInt(&job->done, 1);
+
+    const double elapsed = (double)(SDL_GetPerformanceCounter() - job->started) * 1000.0 /
+                           (double)SDL_GetPerformanceFrequency();
+    SDL_Log("dynamic pose background: object %" PRIu64 " %s after %.2f ms",
+            job->object_id, good ? "finished" : "stopped", elapsed);
+    return good ? 0 : 1;
+}
+
+DYNAMIC_POSE_BAKE_JOB *dynamic_pose_bake_start(const DYNAMIC_POSE_BAKE_DESC *desc) {
+    if (!desc || !desc->scene || !desc->layout || !desc->probes || !desc->object_id ||
+        desc->pose_count < 2u || !desc->columns || !desc->rows || !desc->atlas_width || !desc->atlas_height ||
+        !desc->atlas_bytes || desc->atlas_bytes > SIZE_MAX || !desc->cache_hash)
+        return NULL;
+
+    DYNAMIC_POSE_BAKE_JOB *job = calloc(1, sizeof(*job));
+    if (!job) return NULL;
+
+    job->object_id = desc->object_id;
+    job->sun = desc->sun;
+    job->sky = desc->sky;
+    job->volumetrics = desc->volumetrics;
+    job->base_transform = desc->base_transform;
+    job->axis = desc->axis;
+    job->min_offset = desc->min_offset;
+    job->max_offset = desc->max_offset;
+    job->pose_count = desc->pose_count;
+    job->columns = desc->columns;
+    job->rows = desc->rows;
+    job->atlas_width = desc->atlas_width;
+    job->atlas_height = desc->atlas_height;
+    job->atlas_bytes = desc->atlas_bytes;
+    job->cache_hash = desc->cache_hash;
+    job->started = SDL_GetPerformanceCounter();
+
+    if (!dynamic_pose_clone_scene(desc->scene, &job->scene) ||
+        !dynamic_pose_clone_layout(desc->layout, &job->layout) ||
+        !dynamic_pose_clone_probes(desc->probes, &job->probes)) {
+        dynamic_pose_job_free(job);
+        return NULL;
+    }
+
+    job->thread = SDL_CreateThread(dynamic_pose_bake_thread_main, "pony-pose-bake", job);
+    if (!job->thread) {
+        dynamic_pose_job_free(job);
+        return NULL;
+    }
+
+    return job;
+}
+
+bool dynamic_pose_bake_done(const DYNAMIC_POSE_BAKE_JOB *job) {
+    return job && SDL_GetAtomicInt((SDL_AtomicInt *)&job->done) != 0;
+}
+
+bool dynamic_pose_bake_take(DYNAMIC_POSE_BAKE_JOB *job, bool *success, Uint8 **pixels, char *error, size_t error_size) {
+    if (!job || !dynamic_pose_bake_done(job)) return false;
+
+    if (job->thread) {
+        SDL_WaitThread(job->thread, NULL);
+        job->thread = NULL;
+    }
+
+    const bool good = SDL_GetAtomicInt(&job->success) != 0 && SDL_GetAtomicInt(&job->cancel) == 0;
+
+    if (success) *success = good;
+    if (pixels) {
+        *pixels = good ? job->pixels : NULL;
+        if (good) job->pixels = NULL;
+    }
+
+    if (error && error_size) snprintf(error, error_size, "%s", job->error);
+    dynamic_pose_job_free(job);
+    return true;
+}
+
+void dynamic_pose_bake_cancel(DYNAMIC_POSE_BAKE_JOB *job) {
+    if (!job) return;
+
+    SDL_SetAtomicInt(&job->cancel, 1);
+
+    if (job->thread) {
+        SDL_WaitThread(job->thread, NULL);
+        job->thread = NULL;
+    }
+
+    dynamic_pose_job_free(job);
 }
 
 #define PROBE_BLOCK_SAMPLES 128u
