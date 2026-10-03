@@ -2569,6 +2569,152 @@ static bool dynamic_emissive_bounds(const BVH *tree, VEC3 *center, VEC3 *extents
     return *radius > 0.0f;
 }
 
+typedef struct DYNAMIC_RADIANCE_CACHE_HEADER {
+    uint32_t magic;
+    uint32_t version;
+    uint64_t hash;
+    uint32_t probe_count;
+    uint32_t coefficient_count;
+    uint32_t field_dim;
+    uint32_t sample_count;
+} DYNAMIC_RADIANCE_CACHE_HEADER;
+
+static char *dynamic_radiance_cache_path(uint64_t hash) {
+    char name[64];
+    const int length = snprintf(name, sizeof(name), ".pony-radiance-%016" PRIx64 ".bin", hash);
+    if (length <= 0 || (size_t)length >= sizeof(name)) return NULL;
+
+    char *path = malloc((size_t)length + 1u);
+    if (!path) return NULL;
+
+    memcpy(path, name, (size_t)length + 1u);
+    return path;
+}
+
+static bool dynamic_radiance_cache_read(uint64_t hash, uint32_t probe_count, float (*coefficients)[4]) {
+    if (!hash || !probe_count || !coefficients) return false;
+
+    char *path = dynamic_radiance_cache_path(hash);
+    if (!path) return false;
+
+    FILE *file = fopen(path, "rb");
+    free(path);
+
+    if (!file) return false;
+
+    const uint32_t coefficient_count = probe_count * 9u;
+    DYNAMIC_RADIANCE_CACHE_HEADER header = {0};
+    bool good =
+        fread(&header, sizeof(header), 1, file) == 1 &&
+        header.magic == DYNAMIC_RADIANCE_CACHE_MAGIC &&
+        header.version == DYNAMIC_RADIANCE_CACHE_VERSION &&
+        header.hash == hash &&
+        header.probe_count == probe_count &&
+        header.coefficient_count == coefficient_count &&
+        header.field_dim == DYNAMIC_RADIANCE_FIELD_DIM &&
+        header.sample_count == DYNAMIC_RADIANCE_FIELD_SAMPLES &&
+        fread(coefficients, sizeof(float[4]), coefficient_count, file) == coefficient_count &&
+        fgetc(file) == EOF &&
+        !ferror(file);
+
+    fclose(file);
+    return good;
+}
+
+static bool dynamic_radiance_cache_write(uint64_t hash, uint32_t probe_count, const float (*coefficients)[4]) {
+    if (!hash || !probe_count || !coefficients) return false;
+
+    char *path = dynamic_radiance_cache_path(hash);
+    if (!path) return false;
+
+    const size_t length = strlen(path);
+    char *temporary = malloc(length + 5u);
+    if (!temporary) {
+        free(path);
+        return false;
+    }
+
+    memcpy(temporary, path, length);
+    memcpy(temporary + length, ".tmp", 5u);
+
+    FILE *file = fopen(temporary, "wb");
+    if (!file) {
+        free(temporary);
+        free(path);
+        return false;
+    }
+
+    const uint32_t coefficient_count = probe_count * 9u;
+    const DYNAMIC_RADIANCE_CACHE_HEADER header = {
+        .magic = DYNAMIC_RADIANCE_CACHE_MAGIC,
+        .version = DYNAMIC_RADIANCE_CACHE_VERSION,
+        .hash = hash,
+        .probe_count = probe_count,
+        .coefficient_count = coefficient_count,
+        .field_dim = DYNAMIC_RADIANCE_FIELD_DIM,
+        .sample_count = DYNAMIC_RADIANCE_FIELD_SAMPLES,
+    };
+
+    bool good =
+        fwrite(&header, sizeof(header), 1, file) == 1 &&
+        fwrite(coefficients, sizeof(float[4]), coefficient_count, file) == coefficient_count &&
+        fflush(file) == 0;
+
+    if (fclose(file) != 0) good = false;
+
+    if (good) {
+        remove(path);
+        good = rename(temporary, path) == 0;
+    }
+
+    if (!good) remove(temporary);
+
+    free(temporary);
+    free(path);
+    return good;
+}
+
+static bool read_dynamic_radiance_buffer(RENDERER *renderer, uint32_t coefficient_count, float (*coefficients)[4]) {
+    if (!renderer || !renderer->dynamic_radiance_buffer || !coefficient_count || !coefficients) return false;
+
+    const uint64_t bytes = (uint64_t)coefficient_count * sizeof(float[4]);
+    const NriBufferDesc desc = {.size = bytes};
+    NriBuffer *staging = NULL;
+
+    if (renderer->gpu->core.CreateCommittedBuffer(renderer->gpu->device, NriMemoryLocation_HOST_READBACK, 1.0f, &desc, &staging) !=
+        NriResult_SUCCESS)
+        return false;
+
+    NriCommandAllocator *allocator = NULL;
+    NriCommandBuffer *cmd = NULL;
+    bool good = false;
+
+    if (gpu_begin_commands(renderer, &allocator, &cmd) == NriResult_SUCCESS) {
+        const NriBufferBarrierDesc barrier = {
+            .buffer = renderer->dynamic_radiance_buffer,
+            .before = {.access = NriAccessBits_SHADER_RESOURCE, .stages = NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER},
+            .after = {.access = NriAccessBits_COPY_SOURCE, .stages = NriStageBits_COPY},
+        };
+
+        renderer->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1u});
+        renderer->gpu->core.CmdCopyBuffer(cmd, staging, 0, renderer->dynamic_radiance_buffer, 0, bytes);
+        good = gpu_submit_commands(renderer, allocator, cmd);
+    }
+
+    if (good) {
+        const float(*mapped)[4] = renderer->gpu->core.MapBuffer(staging, 0, bytes);
+        good = mapped != NULL;
+
+        if (good) {
+            memcpy(coefficients, mapped, (size_t)bytes);
+            renderer->gpu->core.UnmapBuffer(staging);
+        }
+    }
+
+    renderer->gpu->core.DestroyBuffer(staging);
+    return good;
+}
+
 static NriBuffer *create_dynamic_radiance_buffer(RENDERER *renderer, uint64_t coefficient_count) {
     if (!renderer || !renderer->gpu || !renderer->gpu->device || !coefficient_count) return NULL;
     if (coefficient_count > UINT64_MAX / sizeof(float[4])) return NULL;
