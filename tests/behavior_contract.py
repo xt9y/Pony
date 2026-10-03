@@ -357,7 +357,7 @@ def main() -> None:
         "StructuredBuffer<SurfaceProbe> SurfaceProbes",
         "surface_probe_irradiance(",
         "static_beam_visibility(",
-        "dynamic_cache_valid",
+        "dynamic_reference_valid",
         "surface_probe_irradiance(input.world_position, geometric_normal) / PI",
         "cached_sun_visibility = static_beam_visibility(input.world_position)",
         "reference_mode > 0.5f ? cached_sun_visibility : cached_sun_visibility * dynamic_visibility",
