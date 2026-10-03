@@ -604,6 +604,8 @@ struct RENDERER {
 
     NriTexture *depth_texture;
     NriTexture *dynamic_shadow_texture;
+    NriDescriptor *dynamic_shadow_depth_view;
+    NriDescriptor *dynamic_shadow_sample_view;
     NriDescriptor *dynamic_shadow_sampler;
     uint32_t dynamic_shadow_size;
     bool dynamic_shadow_ready;

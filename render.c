@@ -20,7 +20,7 @@
 #define DYNAMIC_RADIANCE_IRRADIANCE_FLOOR 0.00075f
 #define DYNAMIC_RADIANCE_CACHE_MAGIC 0x52464450u
 #define DYNAMIC_RADIANCE_CACHE_VERSION 2u
-#define DYNAMIC_SHADOW_SIZE 2048u
+#define DYNAMIC_SHADOW_SIZE 1024u
 
 typedef struct MAT4 {
     float m[16];
@@ -697,7 +697,9 @@ static bool bind_fx_resources(RENDERER *r, NriCommandBuffer *cmd, NriPipeline *p
 
 static bool bind_volume_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *normal, NriDescriptor *sampler_desc, NriBuffer *probes, NriBuffer *beams,
                                   NriTexture *output, const void *uniforms, uint32_t size) {
-    NriTexture *shadow = r->dynamic_shadow_ready && r->dynamic_shadow_texture ? r->dynamic_shadow_texture : r->default_white;
+    const bool use_dynamic_shadow = r->dynamic_shadow_ready && r->dynamic_shadow_texture && r->dynamic_shadow_sample_view;
+    NriTexture *shadow = use_dynamic_shadow ? r->dynamic_shadow_texture : r->default_white;
+    NriDescriptor *shadow_view = use_dynamic_shadow ? r->dynamic_shadow_sample_view : gpu_create_texture_view(r, r->default_white, NriTextureView_TEXTURE);
     NriBuffer *visibility = r->dynamic_radiance_visibility_buffer ? r->dynamic_radiance_visibility_buffer
                                                                   : r->dynamic_radiance_visibility_fallback_buffer;
 
@@ -715,7 +717,7 @@ static bool bind_volume_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture
         sampler_desc,
         gpu_create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
         gpu_create_buffer_view(r, beams, NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
-        gpu_create_texture_view(r, shadow, NriTextureView_TEXTURE),
+        shadow_view,
         radiance_views[0], radiance_views[1], radiance_views[2], radiance_views[3],
         radiance_views[4], radiance_views[5], radiance_views[6],
         gpu_create_buffer_view(r, visibility, NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
@@ -770,6 +772,10 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
     for (uint32_t i = 0u; i < 7u; ++i)
         radiance_views[i] = r->dynamic_radiance_views[i] ? r->dynamic_radiance_views[i] : r->dynamic_radiance_fallback_view;
 
+    const bool use_dynamic_shadow = r->dynamic_shadow_ready && r->dynamic_shadow_texture && r->dynamic_shadow_sample_view;
+    NriDescriptor *shadow_view =
+        use_dynamic_shadow ? r->dynamic_shadow_sample_view : gpu_create_texture_view(r, r->default_white, NriTextureView_TEXTURE);
+
     NriDescriptor *src[] = {
         gpu_create_texture_view(r, material->base_color, NriTextureView_TEXTURE),
         gpu_create_texture_view(r, material->metallic_roughness, NriTextureView_TEXTURE),
@@ -782,8 +788,7 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
         gpu_create_texture_view(r, material->iridescence, NriTextureView_TEXTURE),
         gpu_create_texture_view(r, material->iridescence_thickness, NriTextureView_TEXTURE),
         gpu_create_texture_view(r, scene_color, NriTextureView_TEXTURE),
-        gpu_create_texture_view(r, r->dynamic_shadow_ready && r->dynamic_shadow_texture ? r->dynamic_shadow_texture : r->default_white,
-                                NriTextureView_TEXTURE),
+        shadow_view,
         gpu_create_buffer_view(r, r->beam_buffer ? r->beam_buffer : r->surface_beam_fallback_buffer,
                                NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
         gpu_create_buffer_view(r, r->volume_probe_buffer ? r->volume_probe_buffer : r->surface_probe_fallback_buffer,
@@ -875,29 +880,57 @@ static bool begin_surface_rendering(RENDERER *r, NriCommandBuffer *cmd, NriTextu
 
 static bool ensure_dynamic_shadow_texture(RENDERER *r) {
     if (!r || !r->gpu->device) return false;
-    if (r->dynamic_shadow_texture && r->dynamic_shadow_size == DYNAMIC_SHADOW_SIZE) return true;
+
+    if (r->dynamic_shadow_texture && r->dynamic_shadow_depth_view && r->dynamic_shadow_sample_view &&
+        r->dynamic_shadow_size == DYNAMIC_SHADOW_SIZE)
+        return true;
+
+    if (r->dynamic_shadow_depth_view) r->gpu->core.DestroyDescriptor(r->dynamic_shadow_depth_view);
+    if (r->dynamic_shadow_sample_view) r->gpu->core.DestroyDescriptor(r->dynamic_shadow_sample_view);
+    r->dynamic_shadow_depth_view = NULL;
+    r->dynamic_shadow_sample_view = NULL;
 
     release_texture(r, r->dynamic_shadow_texture);
     r->dynamic_shadow_texture =
         gpu_create_texture(r, r->depth_format, NriTextureUsageBits_DEPTH_STENCIL_ATTACHMENT | NriTextureUsageBits_SHADER_RESOURCE, DYNAMIC_SHADOW_SIZE,
                            DYNAMIC_SHADOW_SIZE);
-    r->dynamic_shadow_size = r->dynamic_shadow_texture ? DYNAMIC_SHADOW_SIZE : 0u;
+
+    if (r->dynamic_shadow_texture) {
+        r->dynamic_shadow_depth_view =
+            gpu_create_persistent_texture_view(r, r->dynamic_shadow_texture, NriTextureView_DEPTH_STENCIL_ATTACHMENT);
+        r->dynamic_shadow_sample_view =
+            gpu_create_persistent_texture_view(r, r->dynamic_shadow_texture, NriTextureView_TEXTURE);
+    }
+
+    if (!r->dynamic_shadow_texture || !r->dynamic_shadow_depth_view || !r->dynamic_shadow_sample_view) {
+        if (r->dynamic_shadow_depth_view) r->gpu->core.DestroyDescriptor(r->dynamic_shadow_depth_view);
+        if (r->dynamic_shadow_sample_view) r->gpu->core.DestroyDescriptor(r->dynamic_shadow_sample_view);
+        r->dynamic_shadow_depth_view = NULL;
+        r->dynamic_shadow_sample_view = NULL;
+        release_texture(r, r->dynamic_shadow_texture);
+        r->dynamic_shadow_texture = NULL;
+        r->dynamic_shadow_size = 0u;
+        r->dynamic_shadow_ready = false;
+        return false;
+    }
+
+    r->dynamic_shadow_size = DYNAMIC_SHADOW_SIZE;
     r->dynamic_shadow_ready = false;
-    return r->dynamic_shadow_texture != NULL;
+    return true;
 }
 
 static bool begin_dynamic_shadow_rendering(RENDERER *r, NriCommandBuffer *cmd) {
     if (!r || !cmd || !ensure_dynamic_shadow_texture(r)) return false;
-
-    NriDescriptor *depth_view = gpu_create_texture_view(r, r->dynamic_shadow_texture, NriTextureView_DEPTH_STENCIL_ATTACHMENT);
-    if (!depth_view) return false;
 
     if (!gpu_transition_texture(r, cmd, r->dynamic_shadow_texture, NriAccessBits_DEPTH_STENCIL_ATTACHMENT, NriLayout_DEPTH_STENCIL_ATTACHMENT,
                                 NriStageBits_DEPTH_STENCIL_ATTACHMENT))
         return false;
 
     const NriRenderingDesc desc = {
-        .depth = {.descriptor = depth_view, .loadOp = NriLoadOp_CLEAR, .storeOp = NriStoreOp_STORE, .clearValue = {.depthStencil = {.depth = 1.0f}}}};
+        .depth = {.descriptor = r->dynamic_shadow_depth_view,
+                  .loadOp = NriLoadOp_CLEAR,
+                  .storeOp = NriStoreOp_STORE,
+                  .clearValue = {.depthStencil = {.depth = 1.0f}}}};
 
     r->gpu->core.CmdSetViewports(cmd, &(NriViewport){.width = (float)DYNAMIC_SHADOW_SIZE, .height = (float)DYNAMIC_SHADOW_SIZE, .depthMax = 1.0f}, 1);
     r->gpu->core.CmdSetScissors(cmd, &(NriRect){.width = DYNAMIC_SHADOW_SIZE, .height = DYNAMIC_SHADOW_SIZE}, 1);
@@ -2446,6 +2479,10 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         release_texture(r, r->dynamic_radiance_fallback_texture);
         release_buffer(r, r->dynamic_radiance_visibility_fallback_buffer);
         release_texture(r, r->depth_texture);
+        if (r->dynamic_shadow_depth_view) gpu->core.DestroyDescriptor(r->dynamic_shadow_depth_view);
+        if (r->dynamic_shadow_sample_view) gpu->core.DestroyDescriptor(r->dynamic_shadow_sample_view);
+        r->dynamic_shadow_depth_view = NULL;
+        r->dynamic_shadow_sample_view = NULL;
         release_texture(r, r->dynamic_shadow_texture);
         release_texture(r, r->lightmap_texture);
         release_texture(r, r->baked_direct_texture);
