@@ -489,6 +489,7 @@ def main() -> None:
         "dynamic_influence_emissive[index].w",
         "visibility_blend",
         "lerp(1.0f, sampled_visibility, visibility_blend)",
+        "return irradiance * (fade * visibility)",
         "dynamic_radiance_filtered(",
         "transpose((float3x3)dynamic_radiance_model[index])",
         "dynamic_radiance_field(",
@@ -592,6 +593,7 @@ def main() -> None:
         "StructuredBuffer<float4> DynamicRadiance",
         "dynamic_radiance_probe_value(",
         "dynamic_volume_probe_value(",
+        "fade * visibility / PI",
     ):
         if forbidden in fragment + compute:
             raise AssertionError(f"manual 9-SH runtime radiance interpolation returned: {forbidden}")

@@ -516,7 +516,14 @@ float3 dynamic_radiance_field(uint index, float3 world_position, float3 world_no
         smoothstep(emitter_radius * 1.25f, emitter_radius * 3.0f, emitter_distance);
     float visibility = lerp(1.0f, sampled_visibility, visibility_blend);
 
-    return irradiance * (fade * visibility / PI);
+    /*
+     * Match the lightmap transport convention exactly. direct_emissive() in
+     * compute_base.hlsl already stores cosine-weighted irradiance in the
+     * baked lightmap, and surface shading multiplies that value directly by
+     * diffuse albedo. Dividing the SH result by PI here made the dynamic path
+     * systematically PI times dimmer than an identical fresh bake.
+     */
+    return irradiance * (fade * visibility);
 }
 
 float3 dynamic_radiance_lighting(float3 world_position, float3 world_normal) {
@@ -835,7 +842,7 @@ SurfaceOutput surface_fs(SurfaceInput input, bool front_face : SV_IsFrontFace) {
             float3 local_normal = normalize(mul(transpose((float3x3)dynamic_radiance_model[i]), geometric_normal));
             DynamicIrradianceWeights weights = dynamic_radiance_irradiance_weights(local_normal);
             float3 uvw = dynamic_field_uvw(meta, coord, max(dynamic_influence_meta.w, 1u));
-            raw_energy += length(dynamic_radiance_filtered(uvw, weights) / PI);
+            raw_energy += length(dynamic_radiance_filtered(uvw, weights));
         }
 
         float corrected_energy = length(max(dynamic_correction, 0.0f));
