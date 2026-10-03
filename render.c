@@ -1089,6 +1089,7 @@ static void release_dynamic_lighting(RENDERER *r) {
     release_buffer(r, r->dynamic_object_node_buffer);
     release_buffer(r, r->dynamic_object_triangle_buffer);
     release_buffer(r, r->dynamic_radiance_buffer);
+    release_buffer(r, r->dynamic_radiance_visibility_buffer);
     release_buffer(r, r->radiance_visibility_node_buffer);
     release_buffer(r, r->radiance_visibility_triangle_buffer);
 
@@ -1097,6 +1098,7 @@ static void release_dynamic_lighting(RENDERER *r) {
     r->dynamic_object_node_count = 0u;
     r->dynamic_object_triangle_count = 0u;
     r->dynamic_radiance_buffer = NULL;
+    r->dynamic_radiance_visibility_buffer = NULL;
     r->radiance_visibility_node_buffer = NULL;
     r->radiance_visibility_triangle_buffer = NULL;
     r->radiance_visibility_node_count = 0u;
@@ -2206,6 +2208,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         release_buffer(r, r->surface_probe_fallback_buffer);
         release_buffer(r, r->surface_beam_fallback_buffer);
         release_buffer(r, r->dynamic_radiance_fallback_buffer);
+        release_buffer(r, r->dynamic_radiance_visibility_fallback_buffer);
         release_texture(r, r->depth_texture);
         release_texture(r, r->dynamic_shadow_texture);
         release_texture(r, r->lightmap_texture);
@@ -2217,6 +2220,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         if (r->transmission_pipeline) gpu->core.DestroyPipeline(r->transmission_pipeline);
         if (r->dynamic_shadow_pipeline) gpu->core.DestroyPipeline(r->dynamic_shadow_pipeline);
         if (r->dynamic_radiance_pipeline) gpu->core.DestroyPipeline(r->dynamic_radiance_pipeline);
+        if (r->dynamic_visibility_pipeline) gpu->core.DestroyPipeline(r->dynamic_visibility_pipeline);
         if (r->line_pipeline) gpu->core.DestroyPipeline(r->line_pipeline);
 
         destroy_pipeline_layouts(r);
