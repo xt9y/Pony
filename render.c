@@ -544,24 +544,13 @@ static bool create_dynamic_shadow_layout(RENDERER *r) {
     return gpu_create_pipeline_layout(r, &r->dynamic_shadow_layout, sets, counts, NriStageBits_VERTEX_SHADER);
 }
 
-static bool create_dynamic_surface_layout(RENDERER *r) {
+static bool create_dynamic_radiance_layout(RENDERER *r) {
     static const NriDescriptorType sources[] = {
-        NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
-        NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
-        NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
-        NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER,
+        NriDescriptorType_STRUCTURED_BUFFER,
+        NriDescriptorType_STRUCTURED_BUFFER,
     };
 
-    return gpu_create_compute_layout(r, &r->dynamic_surface_layout, sources, 10, NriDescriptorType_STORAGE_TEXTURE, true);
-}
-
-static bool create_dynamic_receiver_layout(RENDERER *r) {
-    static const NriDescriptorType sources[] = {
-        NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
-        NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER,
-    };
-
-    return gpu_create_compute_layout(r, &r->dynamic_receiver_layout, sources, 7, NriDescriptorType_STORAGE_TEXTURE, true);
+    return gpu_create_compute_layout(r, &r->dynamic_radiance_layout, sources, 2, NriDescriptorType_STORAGE_STRUCTURED_BUFFER, true);
 }
 
 static bool create_surface_layout(RENDERER *r) {
@@ -571,7 +560,7 @@ static bool create_surface_layout(RENDERER *r) {
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE,
         NriDescriptorType_TEXTURE, NriDescriptorType_TEXTURE, NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_STRUCTURED_BUFFER,
-        NriDescriptorType_TEXTURE,
+        NriDescriptorType_STRUCTURED_BUFFER,
         NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER, NriDescriptorType_SAMPLER};
 
     static const NriDescriptorType uniform[] = {NriDescriptorType_CONSTANT_BUFFER};
@@ -735,8 +724,8 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
                                                    NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
                             gpu_create_buffer_view(r, r->volume_probe_buffer ? r->volume_probe_buffer : r->surface_probe_fallback_buffer,
                                                    NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
-                            gpu_create_texture_view(r, r->dynamic_receiver_ready && r->dynamic_receiver_texture ? r->dynamic_receiver_texture : r->default_white,
-                                                    NriTextureView_TEXTURE),
+                            gpu_create_buffer_view(r, r->dynamic_radiance_buffer ? r->dynamic_radiance_buffer : r->dynamic_radiance_fallback_buffer,
+                                                   NriBufferView_STRUCTURED_BUFFER, sizeof(float[4])),
                             material_sampler,
                             lightmap_sampler,
                             scene_sampler,
@@ -744,64 +733,6 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
 
     return gpu_bind_descriptor_set(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 2, src, 19) &&
            gpu_bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
-}
-
-static bool bind_dynamic_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const DYNAMIC_LIGHTING_ALLOCATION *allocation,
-                                           const DYNAMIC_SURFACE_UNIFORMS *uniforms) {
-    if (!r || !cmd || !allocation || !allocation->texture || !allocation->sample_buffer || !uniforms ||
-        !r->dynamic_static_node_buffer || !r->dynamic_static_triangle_buffer || !r->dynamic_static_surface_buffer ||
-        !r->dynamic_static_uv_buffer || !r->dynamic_object_node_buffer || !r->dynamic_object_triangle_buffer ||
-        !r->beam_buffer || !r->lightmap_texture || !r->lightmap_sampler)
-        return false;
-
-    if (!gpu_transition_texture(r, cmd, r->lightmap_texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
-        !gpu_transition_texture(r, cmd, allocation->texture, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE,
-                                NriStageBits_COMPUTE_SHADER))
-        return false;
-
-    NriDescriptor *src[] = {
-        gpu_create_buffer_view(r, allocation->sample_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(LMAP_SAMPLE)),
-        gpu_create_buffer_view(r, r->beam_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
-        gpu_create_buffer_view(r, r->dynamic_static_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
-        gpu_create_buffer_view(r, r->dynamic_static_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
-        gpu_create_buffer_view(r, r->dynamic_static_surface_buffer, NriBufferView_STRUCTURED_BUFFER, 16u),
-        gpu_create_buffer_view(r, r->dynamic_static_uv_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(LMAP_UV)),
-        gpu_create_buffer_view(r, r->dynamic_object_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
-        gpu_create_buffer_view(r, r->dynamic_object_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
-        gpu_create_texture_view(r, r->lightmap_texture, NriTextureView_TEXTURE),
-        r->lightmap_sampler,
-    };
-    NriDescriptor *dst = gpu_create_texture_view(r, allocation->texture, NriTextureView_STORAGE_TEXTURE);
-
-    return gpu_bind_descriptor_set(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 0, src, 10) &&
-           gpu_bind_descriptor_set(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
-           gpu_bind_uniform_data(r, cmd, r->dynamic_surface_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
-}
-
-static bool bind_dynamic_receiver_sets(RENDERER *r, NriCommandBuffer *cmd, NriTexture *source, NriTexture *output) {
-    if (!r || !cmd || !source || !output || !r->dynamic_receiver_sample_buffer ||
-        !r->dynamic_static_node_buffer || !r->dynamic_static_triangle_buffer ||
-        !r->dynamic_object_node_buffer || !r->dynamic_object_triangle_buffer || !r->lightmap_sampler)
-        return false;
-
-    if (!gpu_transition_texture(r, cmd, source, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_COMPUTE_SHADER) ||
-        !gpu_transition_texture(r, cmd, output, NriAccessBits_SHADER_RESOURCE_STORAGE, NriLayout_SHADER_RESOURCE_STORAGE, NriStageBits_COMPUTE_SHADER))
-        return false;
-
-    NriDescriptor *src[] = {
-        gpu_create_buffer_view(r, r->dynamic_receiver_sample_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(LMAP_SAMPLE)),
-        gpu_create_buffer_view(r, r->dynamic_static_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
-        gpu_create_buffer_view(r, r->dynamic_static_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
-        gpu_create_buffer_view(r, r->dynamic_object_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
-        gpu_create_buffer_view(r, r->dynamic_object_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
-        gpu_create_texture_view(r, source, NriTextureView_TEXTURE),
-        r->lightmap_sampler,
-    };
-
-    NriDescriptor *dst = gpu_create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
-
-    return gpu_bind_descriptor_set(r, cmd, r->dynamic_receiver_layout, NriBindPoint_COMPUTE, 0, src, 7) &&
-           gpu_bind_descriptor_set(r, cmd, r->dynamic_receiver_layout, NriBindPoint_COMPUTE, 1, &dst, 1);
 }
 
 static bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
@@ -1613,7 +1544,7 @@ static bool fx_apply(FX_STATE *fx, NriCommandBuffer *cmd, NriTexture *swap, floa
 }
 
 static bool create_pipeline_layouts(RENDERER *r) {
-    return create_surface_layout(r) && create_dynamic_shadow_layout(r) && create_dynamic_surface_layout(r) && create_dynamic_receiver_layout(r) && create_line_layout(r) && create_sky_layout(r) && bake_gpu_layouts_init(r) &&
+    return create_surface_layout(r) && create_dynamic_shadow_layout(r) && create_dynamic_radiance_layout(r) && create_line_layout(r) && create_sky_layout(r) && bake_gpu_layouts_init(r) &&
            create_ssao_layout(r) && create_bloom_layout(r) && create_grade_layout(r) && create_volume_layout(r) && create_volume_compose_layout(r) &&
            create_compose_layout(r);
 }
@@ -1623,7 +1554,7 @@ static void destroy_pipeline_layouts(RENDERER *r) {
 
     bake_gpu_layouts_deinit(r);
 
-    NriPipelineLayout **layouts[] = {&r->surface_layout, &r->dynamic_shadow_layout, &r->dynamic_surface_layout, &r->dynamic_receiver_layout, &r->line_layout, &r->sky_layout, &r->ssao_layout,
+    NriPipelineLayout **layouts[] = {&r->surface_layout, &r->dynamic_shadow_layout, &r->dynamic_radiance_layout, &r->line_layout, &r->sky_layout, &r->ssao_layout,
                                      &r->bloom_layout,   &r->grade_layout,          &r->volume_layout, &r->volume_compose_layout,
                                      &r->compose_layout};
 
@@ -1681,10 +1612,8 @@ bool renderer_gpu_resources_init(RENDERER *r) {
     r->solid_pipeline = make_surface_pipeline(r, &r->gpu->core, r->surface_layout, &surface_vs, &surface_ps, false);
     r->transmission_pipeline = make_surface_pipeline(r, &r->gpu->core, r->surface_layout, &surface_vs, &surface_ps, true);
     r->dynamic_shadow_pipeline = make_dynamic_shadow_pipeline(r, r->dynamic_shadow_layout, &dynamic_shadow_vs);
-    r->dynamic_surface_pipeline =
-        gpu_compile_compute(r, r->dynamic_surface_layout, "shaders/dynamic_surface.hlsl", "dynamic_surface_cs", "BUILD_DYNAMIC_SURFACE_CS");
-    r->dynamic_receiver_pipeline =
-        gpu_compile_compute(r, r->dynamic_receiver_layout, "shaders/dynamic_receiver.hlsl", "dynamic_receiver_cs", "BUILD_DYNAMIC_RECEIVER_CS");
+    r->dynamic_radiance_pipeline =
+        gpu_compile_compute(r, r->dynamic_radiance_layout, "shaders/dynamic_radiance.hlsl", "dynamic_radiance_cs", "BUILD_DYNAMIC_RADIANCE_CS");
     r->line_pipeline = make_line_pipeline(r, r->line_layout, &line_vs, &line_ps);
     r->sky_pipeline = make_sky_pipeline(r, r->sky_layout, &sky_vs, &sky_ps);
 
@@ -1700,13 +1629,17 @@ bool renderer_gpu_resources_init(RENDERER *r) {
 
     const PROBE fallback_probe = {0};
     const float fallback_beam = 1.0f;
+    const float fallback_radiance[4] = {0};
     r->surface_probe_fallback_buffer =
         gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_probe, sizeof(fallback_probe), sizeof(fallback_probe));
     r->surface_beam_fallback_buffer =
         gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_beam, sizeof(fallback_beam), sizeof(fallback_beam));
+    r->dynamic_radiance_fallback_buffer =
+        gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, fallback_radiance, sizeof(fallback_radiance), sizeof(fallback_radiance));
 
-    if (!r->solid_pipeline || !r->transmission_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_surface_pipeline || !r->dynamic_receiver_pipeline || !r->dynamic_shadow_sampler ||
-        !r->surface_probe_fallback_buffer || !r->surface_beam_fallback_buffer || !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
+    if (!r->solid_pipeline || !r->transmission_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_radiance_pipeline || !r->dynamic_shadow_sampler ||
+        !r->surface_probe_fallback_buffer || !r->surface_beam_fallback_buffer || !r->dynamic_radiance_fallback_buffer ||
+        !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
         renderer_gpu_resources_deinit(r);
         return false;
     }
