@@ -707,10 +707,8 @@ static bool bind_volume_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture
         return false;
 
     NriDescriptor *radiance_views[7];
-    for (uint32_t i = 0u; i < 7u; ++i) {
-        NriTexture *texture = r->dynamic_radiance_textures[i] ? r->dynamic_radiance_textures[i] : r->dynamic_radiance_fallback_texture;
-        radiance_views[i] = gpu_create_texture_view(r, texture, NriTextureView_TEXTURE);
-    }
+    for (uint32_t i = 0u; i < 7u; ++i)
+        radiance_views[i] = r->dynamic_radiance_views[i] ? r->dynamic_radiance_views[i] : r->dynamic_radiance_fallback_view;
 
     NriDescriptor *src[] = {
         gpu_create_texture_view(r, normal, NriTextureView_TEXTURE),
@@ -769,11 +767,8 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
     NriBuffer *visibility = r->dynamic_radiance_visibility_buffer ? r->dynamic_radiance_visibility_buffer
                                                                   : r->dynamic_radiance_visibility_fallback_buffer;
     NriDescriptor *radiance_views[7];
-
-    for (uint32_t i = 0u; i < 7u; ++i) {
-        NriTexture *texture = r->dynamic_radiance_textures[i] ? r->dynamic_radiance_textures[i] : r->dynamic_radiance_fallback_texture;
-        radiance_views[i] = gpu_create_texture_view(r, texture, NriTextureView_TEXTURE);
-    }
+    for (uint32_t i = 0u; i < 7u; ++i)
+        radiance_views[i] = r->dynamic_radiance_views[i] ? r->dynamic_radiance_views[i] : r->dynamic_radiance_fallback_view;
 
     NriDescriptor *src[] = {
         gpu_create_texture_view(r, material->base_color, NriTextureView_TEXTURE),
@@ -1143,7 +1138,10 @@ static void release_dynamic_lighting(RENDERER *r) {
     release_buffer(r, r->dynamic_object_node_buffer);
     release_buffer(r, r->dynamic_object_triangle_buffer);
     release_buffer(r, r->dynamic_radiance_buffer);
-    for (uint32_t i = 0u; i < 7u; ++i) release_texture(r, r->dynamic_radiance_textures[i]);
+    for (uint32_t i = 0u; i < 7u; ++i) {
+        if (r->dynamic_radiance_views[i]) r->gpu->core.DestroyDescriptor(r->dynamic_radiance_views[i]);
+        release_texture(r, r->dynamic_radiance_textures[i]);
+    }
     release_buffer(r, r->dynamic_radiance_visibility_buffer);
     release_buffer(r, r->radiance_visibility_node_buffer);
     release_buffer(r, r->radiance_visibility_triangle_buffer);
@@ -1153,7 +1151,10 @@ static void release_dynamic_lighting(RENDERER *r) {
     r->dynamic_object_node_count = 0u;
     r->dynamic_object_triangle_count = 0u;
     r->dynamic_radiance_buffer = NULL;
-    for (uint32_t i = 0u; i < 7u; ++i) r->dynamic_radiance_textures[i] = NULL;
+    for (uint32_t i = 0u; i < 7u; ++i) {
+        r->dynamic_radiance_textures[i] = NULL;
+        r->dynamic_radiance_views[i] = NULL;
+    }
     r->dynamic_radiance_visibility_buffer = NULL;
     r->dynamic_radiance_field_count = 0u;
     r->radiance_visibility_node_buffer = NULL;
@@ -1757,10 +1758,13 @@ bool renderer_gpu_resources_init(RENDERER *r) {
                                    sizeof(fallback_radiance), sizeof(fallback_radiance),
                                    NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
                                    NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER);
+    if (radiance_fallback_uploaded)
+        r->dynamic_radiance_fallback_view =
+            gpu_create_persistent_texture_view(r, r->dynamic_radiance_fallback_texture, NriTextureView_TEXTURE);
     if (!r->solid_pipeline || !r->transmission_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_radiance_pipeline ||
         !r->dynamic_visibility_pipeline || !r->dynamic_shadow_sampler || !r->dynamic_radiance_sampler ||
         !r->surface_probe_fallback_buffer || !r->surface_beam_fallback_buffer ||
-        !radiance_fallback_uploaded || !r->dynamic_radiance_visibility_fallback_buffer ||
+        !radiance_fallback_uploaded || !r->dynamic_radiance_fallback_view || !r->dynamic_radiance_visibility_fallback_buffer ||
         !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
         renderer_gpu_resources_deinit(r);
         return false;
@@ -2373,7 +2377,9 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         release_buffer(r, r->beam_buffer);
         release_buffer(r, r->surface_probe_fallback_buffer);
         release_buffer(r, r->surface_beam_fallback_buffer);
-        release_texture(r, r->dynamic_radiance_fallback_texture);
+        if (r->dynamic_radiance_fallback_view) r->gpu->core.DestroyDescriptor(r->dynamic_radiance_fallback_view);
+    r->dynamic_radiance_fallback_view = NULL;
+    release_texture(r, r->dynamic_radiance_fallback_texture);
         release_buffer(r, r->dynamic_radiance_visibility_fallback_buffer);
         release_texture(r, r->depth_texture);
         release_texture(r, r->dynamic_shadow_texture);
@@ -3032,7 +3038,10 @@ static bool upload_dynamic_field_textures(RENDERER *r, const float (*coefficient
     bool good = true;
 
     for (uint32_t texture = 0u; texture < 7u && good; ++texture) {
+        if (r->dynamic_radiance_views[texture]) r->gpu->core.DestroyDescriptor(r->dynamic_radiance_views[texture]);
+        r->dynamic_radiance_views[texture] = NULL;
         release_texture(r, r->dynamic_radiance_textures[texture]);
+
         r->dynamic_radiance_textures[texture] =
             gpu_create_texture_3d(r, NriFormat_RGBA16_SFLOAT, NriTextureUsageBits_SHADER_RESOURCE,
                                   DYNAMIC_RADIANCE_FIELD_DIM, DYNAMIC_RADIANCE_FIELD_DIM, radiance_depth);
@@ -3043,7 +3052,26 @@ static bool upload_dynamic_field_textures(RENDERER *r, const float (*coefficient
                                           row_pitch, slice_pitch,
                                           NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
                                           NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER);
+
+        if (good) {
+            r->dynamic_radiance_views[texture] =
+                gpu_create_persistent_texture_view(r, r->dynamic_radiance_textures[texture], NriTextureView_TEXTURE);
+            good = r->dynamic_radiance_views[texture] != NULL;
+        }
     }
+
+    float max_coefficient = 0.0f;
+    uint64_t nonzero_coefficients = 0u;
+    for (uint32_t i = 0u; i < total_probes * 9u; ++i) {
+        for (uint32_t c = 0u; c < 3u; ++c) {
+            const float magnitude = fabsf(coefficients[i][c]);
+            if (magnitude > max_coefficient) max_coefficient = magnitude;
+            if (magnitude > 1.0e-8f) ++nonzero_coefficients;
+        }
+    }
+
+    SDL_Log("dynamic radiance runtime: %u field(s) | max SH coefficient %.6f | nonzero %" PRIu64 "/%u",
+            field_count, max_coefficient, nonzero_coefficients, total_probes * 27u);
 
     free(packed);
     if (!good) return false;

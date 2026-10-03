@@ -577,7 +577,9 @@ struct RENDERER {
     /* Radiance uses hardware-filtered 3D textures; tiny moving visibility stays in the stable structured-buffer path. */
     NriBuffer *dynamic_radiance_buffer;
     NriTexture *dynamic_radiance_textures[7];
+    NriDescriptor *dynamic_radiance_views[7];
     NriTexture *dynamic_radiance_fallback_texture;
+    NriDescriptor *dynamic_radiance_fallback_view;
     NriBuffer *dynamic_radiance_visibility_buffer;
     NriBuffer *dynamic_radiance_visibility_fallback_buffer;
     NriDescriptor *dynamic_radiance_sampler;

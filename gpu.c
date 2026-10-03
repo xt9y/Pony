@@ -647,7 +647,7 @@ static void abort_frame_commands(RENDERER *r, FRAME_CONTEXT *frame) {
         r->gpu->core.CreateCommandBuffer(frame->allocator, &frame->command_buffer);
 }
 
-NriDescriptor *gpu_create_texture_view(RENDERER *r, NriTexture *texture, NriTextureView type) {
+static NriDescriptor *create_texture_view_untracked(RENDERER *r, NriTexture *texture, NriTextureView type) {
     if (!r || !texture) return NULL;
 
     const NriTextureDesc *texture_desc = r->gpu->core.GetTextureDesc(texture);
@@ -662,9 +662,16 @@ NriDescriptor *gpu_create_texture_view(RENDERER *r, NriTexture *texture, NriText
         .layerNum = 1,
         .sliceNum = texture_desc->type == NriTextureType_TEXTURE_3D ? texture_desc->depth : 1};
 
-    if (r->gpu->core.CreateTextureView(&desc, &view) != NriResult_SUCCESS) return NULL;
+    return r->gpu->core.CreateTextureView(&desc, &view) == NriResult_SUCCESS ? view : NULL;
+}
 
-    return track_descriptor(r, view) ? view : NULL;
+NriDescriptor *gpu_create_texture_view(RENDERER *r, NriTexture *texture, NriTextureView type) {
+    NriDescriptor *view = create_texture_view_untracked(r, texture, type);
+    return view && track_descriptor(r, view) ? view : NULL;
+}
+
+NriDescriptor *gpu_create_persistent_texture_view(RENDERER *r, NriTexture *texture, NriTextureView type) {
+    return create_texture_view_untracked(r, texture, type);
 }
 
 NriDescriptor *gpu_create_buffer_view(RENDERER *r, NriBuffer *buffer, NriBufferView type, uint32_t stride) {

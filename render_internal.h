@@ -42,6 +42,7 @@ NriBuffer *gpu_upload_buffer(RENDERER *renderer, NriBufferUsageBits usage, const
 NriPipeline *gpu_compile_compute(RENDERER *renderer, NriPipelineLayout *layout, const char *path, const char *entrypoint, const char *define);
 NriDescriptor *gpu_create_buffer_view(RENDERER *renderer, NriBuffer *buffer, NriBufferView type, uint32_t stride);
 NriDescriptor *gpu_create_texture_view(RENDERER *renderer, NriTexture *texture, NriTextureView type);
+NriDescriptor *gpu_create_persistent_texture_view(RENDERER *renderer, NriTexture *texture, NriTextureView type);
 NriDescriptor *gpu_create_sampler(RENDERER *renderer, NriFilter min_filter, NriFilter mag_filter, NriAddressMode address);
 bool gpu_init_worker(GPU *gpu);
 void gpu_clear_temporary(RENDERER *renderer);
