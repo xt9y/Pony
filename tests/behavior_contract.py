@@ -107,6 +107,8 @@ def main() -> None:
     main = text("main.c")
     render = text("render.c")
     gpu = text("gpu.c")
+    bake = text("bake.c")
+    internal = text("render_internal.h")
 
     for needle in ("FRAME_STALL_LOG_MS 100.0", 'log_frame_stall(r, "swapchain acquire"', 'log_frame_stall(r, "frame fence"',
                    'log_frame_stall(r, "frame recycle"', 'log_frame_stall(r, "queue submit"', 'log_frame_stall(r, "queue present"'):
@@ -374,25 +376,38 @@ def main() -> None:
         if needle not in fragment:
             raise AssertionError(f"dynamic baked-context fallback missing: {needle}")
 
+    pose_source = render + game + bake + internal
     for needle in (
         "DYNAMIC_POSE_LIGHTMAP_MAX_STATES 33u",
         "DYNAMIC_POSE_LIGHTMAP_BUDGET_BYTES",
         "DYNAMIC_POSE_CACHE_VERSION 1u",
         "pose_atlas_texture",
+        "pose_job",
         "dynamic_pose_atlas_layout(",
         "dynamic_pose_cache_hash(",
         "dynamic_pose_cache_read(",
-        "dynamic_pose_cache_write(",
+        "dynamic_pose_cache_write_worker(",
         ".pony-pose-%016",
         "renderer_build_dynamic_pose_lightmap(",
         "renderer_update_dynamic_pose_lightmaps(",
+        "dynamic_pose_bake_start(",
+        "dynamic_pose_bake_done(",
+        "dynamic_pose_bake_take(",
+        "dynamic_pose_bake_cancel(",
+        "bake_batch_samples_override = 1u",
+        "bake_yield_ms = 2u",
         "download_rgba16f_texture(",
-        "reference_bake_surface(r, &tree, &world_layout, &candidate)",
+        "bake_reference_lightmap(&worker, &tree, &world_layout, &candidate)",
         "pose_source_lightmap != r->lightmap_texture",
         "renderer_configure_dynamic_pose_lightmap_path(",
     ):
-        if needle not in render + game:
+        if needle not in pose_source:
             raise AssertionError(f"pose-baked dynamic receiver path missing: {needle}")
+
+    if "download_rgba16f_texture(r, candidate" in render:
+        raise AssertionError("pose atlas generation must not synchronously read back on the render device")
+    if "baked state %u/%u" in render:
+        raise AssertionError("pose states must not be synchronously baked inside renderer_frame")
 
     for needle in (
         "float4 pose_lightmap;",
