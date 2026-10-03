@@ -4074,7 +4074,7 @@ static bool renderer_update_dynamic_pose_lightmaps(RENDERER *r, const struct LIG
         DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
         if (!allocation->pose_configured) continue;
 
-        if (allocation->pose_ready &&
+        if ((allocation->pose_ready || allocation->pose_failed) &&
             (allocation->pose_source_lightmap != r->lightmap_texture ||
              allocation->pose_environment_hash != environment_hash)) {
             release_texture(r, allocation->pose_atlas_texture);
@@ -4086,6 +4086,13 @@ static bool renderer_update_dynamic_pose_lightmaps(RENDERER *r, const struct LIG
         if (allocation->pose_ready || allocation->pose_failed) continue;
 
         if (!renderer_build_dynamic_pose_lightmap(r, allocation, light)) {
+            /*
+             * Remember the environment that failed so we do not retry the same
+             * expensive bake every frame. A new base bake or lighting state
+             * clears this latch and gives the path another chance.
+             */
+            allocation->pose_source_lightmap = r->lightmap_texture;
+            allocation->pose_environment_hash = environment_hash;
             allocation->pose_failed = true;
             SDL_Log("dynamic pose lightmap object %" PRIu64 ": build failed; using realtime probe fallback",
                     allocation->object_id);
