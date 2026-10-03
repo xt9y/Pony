@@ -2548,6 +2548,88 @@ static bool dynamic_emissive_bounds(const BVH *tree, VEC3 *center, VEC3 *extents
     return *radius > 0.0f;
 }
 
+static NriBuffer *create_dynamic_radiance_buffer(RENDERER *renderer, uint64_t coefficient_count) {
+    if (!renderer || !renderer->gpu || !renderer->gpu->device || !coefficient_count) return NULL;
+    if (coefficient_count > UINT64_MAX / sizeof(float[4])) return NULL;
+
+    const NriBufferDesc desc = {
+        .size = coefficient_count * sizeof(float[4]),
+        .structureStride = sizeof(float[4]),
+        .usage = NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE,
+    };
+    NriBuffer *buffer = NULL;
+
+    return renderer->gpu->core.CreateCommittedBuffer(renderer->gpu->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &buffer) == NriResult_SUCCESS
+               ? buffer
+               : NULL;
+}
+
+static bool generate_dynamic_radiance_fields(RENDERER *renderer, uint32_t total_probes) {
+    if (!renderer || !renderer->dynamic_lighting_count || !total_probes) return true;
+    if (!renderer->dynamic_radiance_pipeline || !renderer->dynamic_radiance_layout ||
+        !renderer->dynamic_object_node_buffer || !renderer->dynamic_object_triangle_buffer)
+        return false;
+
+    renderer->dynamic_radiance_buffer = create_dynamic_radiance_buffer(renderer, (uint64_t)total_probes * 9u);
+    if (!renderer->dynamic_radiance_buffer) return false;
+
+    NriCommandAllocator *allocator = NULL;
+    NriCommandBuffer *cmd = NULL;
+    if (gpu_begin_commands(renderer, &allocator, &cmd) != NriResult_SUCCESS) return false;
+
+    const NriBufferBarrierDesc begin_barrier = {
+        .buffer = renderer->dynamic_radiance_buffer,
+        .before = {0},
+        .after = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER},
+    };
+    renderer->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &begin_barrier, .bufferNum = 1u});
+
+    const float epsilon = fmaxf(renderer->scene_radius * 2.0e-5f, 1.0e-5f);
+    Uint64 started = SDL_GetPerformanceCounter();
+
+    for (uint32_t i = 0u; i < renderer->dynamic_lighting_count; ++i) {
+        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &renderer->dynamic_lighting[i];
+        if (!allocation->emissive_weight || !allocation->radiance_dims[0] || !allocation->radiance_dims[1] || !allocation->radiance_dims[2]) continue;
+
+        const uint32_t probe_count = allocation->radiance_dims[0] * allocation->radiance_dims[1] * allocation->radiance_dims[2];
+        const DYNAMIC_RADIANCE_UNIFORMS uniforms = {
+            .bvh_meta = {allocation->dynamic_node_offset, allocation->dynamic_node_count,
+                         allocation->dynamic_triangle_offset, allocation->dynamic_triangle_count},
+            .field_meta = {allocation->radiance_probe_offset, allocation->radiance_dims[0],
+                           allocation->radiance_dims[1], allocation->radiance_dims[2]},
+            .field_origin_spacing = {allocation->radiance_origin.x, allocation->radiance_origin.y,
+                                     allocation->radiance_origin.z, allocation->radiance_spacing},
+            .field_params = {epsilon, allocation->emissive_weight, 1.0f, (float)DYNAMIC_RADIANCE_FIELD_SAMPLES},
+        };
+
+        if (!bind_dynamic_radiance_resources(renderer, cmd, &uniforms)) {
+            gpu_abort_commands(renderer, allocator, cmd);
+            return false;
+        }
+
+        renderer->gpu->core.CmdSetPipeline(cmd, renderer->dynamic_radiance_pipeline);
+        renderer->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
+            .workGroupNumX = (probe_count + 63u) / 64u,
+            .workGroupNumY = 1u,
+            .workGroupNumZ = 1u,
+        });
+    }
+
+    const NriBufferBarrierDesc end_barrier = {
+        .buffer = renderer->dynamic_radiance_buffer,
+        .before = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER},
+        .after = {.access = NriAccessBits_SHADER_RESOURCE, .stages = NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER},
+    };
+    renderer->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &end_barrier, .bufferNum = 1u});
+
+    if (!gpu_submit_commands(renderer, allocator, cmd)) return false;
+
+    SDL_Log("dynamic radiance fields: %u probes | %u emitter samples/probe | %.2f ms one-time generation",
+            total_probes, DYNAMIC_RADIANCE_FIELD_SAMPLES,
+            (double)(SDL_GetPerformanceCounter() - started) * 1000.0 / (double)SDL_GetPerformanceFrequency());
+    return true;
+}
+
 static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene) {
     uint32_t count = 0u;
 
@@ -2556,9 +2638,6 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
 
     if (!count) return true;
 
-    const uint32_t target_samples =
-        DYNAMIC_SURFACE_SAMPLES_PER_FRAME / count ? DYNAMIC_SURFACE_SAMPLES_PER_FRAME / count : 1u;
-
     renderer->dynamic_lighting = calloc(count, sizeof(*renderer->dynamic_lighting));
     if (!renderer->dynamic_lighting) return false;
 
@@ -2566,6 +2645,7 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
     BVH_TRIANGLE *packed_triangles = NULL;
     uint32_t packed_node_count = 0u;
     uint32_t packed_triangle_count = 0u;
+    uint32_t total_radiance_probes = 0u;
     bool good = true;
 
     for (uint32_t i = 0, out = 0; i < scene->object_count && good; ++i) {
@@ -2575,7 +2655,7 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
 
         struct MODEL *model = object->data;
 
-        if (!model_surface_layout(model, target_samples)) {
+        if (!model_surface_layout(model, 2048u)) {
             good = false;
             break;
         }
@@ -2589,38 +2669,9 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
         allocation->local_extents = model->geometry->bounds.extents;
         allocation->local_radius = sqrtf(v3_len_sq(model->geometry->bounds.extents));
         model_lighting_summary(model, &allocation->average_diffuse, &allocation->average_emissive);
-        allocation->transform_revision = 0u;
-        allocation->lighting_revision = 0u;
-        allocation->scene_lighting_revision = 0u;
-        allocation->reference_transform_revision = 0u;
-        allocation->reference_lighting_revision = 0u;
-        allocation->pending_transform_revision = 0u;
-        allocation->pending_lighting_revision = 0u;
-        allocation->pending_scene_lighting_revision = 0u;
-        allocation->sample_cursor = 0u;
-        allocation->sample_pass = 0u;
-        allocation->acceptance_transform_revision = 0u;
-        allocation->acceptance_scene_lighting_revision = 0u;
-        allocation->cache_needs_clear = true;
-
-        allocation->texture =
-            gpu_create_texture(renderer, NriFormat_RGBA16_SFLOAT,
-                               NriTextureUsageBits_SHADER_RESOURCE | NriTextureUsageBits_SHADER_RESOURCE_STORAGE,
-                               allocation->layout->width, allocation->layout->height);
-
-        if (allocation->texture &&
-            !gpu_clear_texture_zero(renderer, allocation->texture, 8u, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
-                                    NriStageBits_COMPUTE_SHADER | NriStageBits_FRAGMENT_SHADER)) {
-            release_texture(renderer, allocation->texture);
-            allocation->texture = NULL;
-        }
-
-        allocation->sample_buffer =
-            gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE, allocation->layout->samples,
-                              (size_t)allocation->layout->sample_count * sizeof(*allocation->layout->samples), sizeof(LMAP_SAMPLE));
 
         BVH tree = {0};
-        good = allocation->texture && allocation->sample_buffer && bvh_build(&tree, model->geometry, model->visual);
+        good = bvh_build(&tree, model->geometry, model->visual);
 
         if (good) {
             allocation->emissive_weight = tree.emissive_weight;
@@ -2632,7 +2683,31 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
                 allocation->local_emissive_radius = allocation->local_radius;
             }
 
-            good = append_dynamic_bvh(&packed_nodes, &packed_node_count, &packed_triangles, &packed_triangle_count, &tree, allocation);
+            if (allocation->emissive_weight > 1.0e-8f) {
+                const float influence_radius =
+                    sqrtf(allocation->emissive_weight /
+                          fmaxf(3.14159265358979323846f * DYNAMIC_RADIANCE_IRRADIANCE_FLOOR, 1.0e-8f));
+                const float radius = fmaxf(allocation->local_emissive_radius + influence_radius, 0.25f);
+
+                allocation->radiance_probe_offset = total_radiance_probes;
+                allocation->radiance_dims[0] = DYNAMIC_RADIANCE_FIELD_DIM;
+                allocation->radiance_dims[1] = DYNAMIC_RADIANCE_FIELD_DIM;
+                allocation->radiance_dims[2] = DYNAMIC_RADIANCE_FIELD_DIM;
+                allocation->radiance_spacing = (2.0f * radius) / (float)(DYNAMIC_RADIANCE_FIELD_DIM - 1u);
+                allocation->radiance_origin =
+                    v3_sub(allocation->local_emissive_center, v3(radius, radius, radius));
+
+                const uint32_t field_probes =
+                    DYNAMIC_RADIANCE_FIELD_DIM * DYNAMIC_RADIANCE_FIELD_DIM * DYNAMIC_RADIANCE_FIELD_DIM;
+                if (UINT32_MAX - total_radiance_probes < field_probes) {
+                    good = false;
+                } else {
+                    total_radiance_probes += field_probes;
+                }
+            }
+
+            if (good)
+                good = append_dynamic_bvh(&packed_nodes, &packed_node_count, &packed_triangles, &packed_triangle_count, &tree, allocation);
         }
 
         bvh_free(&tree);
@@ -2654,6 +2729,7 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
     if (good) {
         renderer->dynamic_object_node_count = packed_node_count;
         renderer->dynamic_object_triangle_count = packed_triangle_count;
+        good = generate_dynamic_radiance_fields(renderer, total_radiance_probes);
     }
 
     free(packed_nodes);
@@ -2662,6 +2738,15 @@ static bool renderer_allocate_dynamic_lighting(RENDERER *renderer, SCENE *scene)
     if (!good) {
         release_dynamic_lighting(renderer);
         return false;
+    }
+
+    for (uint32_t i = 0u; i < renderer->dynamic_lighting_count; ++i) {
+        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &renderer->dynamic_lighting[i];
+
+        if (allocation->radiance_dims[0])
+            SDL_Log("dynamic radiance object %" PRIu64 ": %ux%ux%u | spacing %.3f | %.3f emissive importance",
+                    allocation->object_id, allocation->radiance_dims[0], allocation->radiance_dims[1],
+                    allocation->radiance_dims[2], allocation->radiance_spacing, allocation->emissive_weight);
     }
 
     return true;
