@@ -735,6 +735,24 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
            gpu_bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
 }
 
+static bool bind_dynamic_radiance_resources(RENDERER *r, NriCommandBuffer *cmd, const DYNAMIC_RADIANCE_UNIFORMS *uniforms) {
+    if (!r || !cmd || !uniforms || !r->dynamic_radiance_layout || !r->dynamic_radiance_buffer ||
+        !r->dynamic_object_node_buffer || !r->dynamic_object_triangle_buffer)
+        return false;
+
+    NriDescriptor *src[] = {
+        gpu_create_buffer_view(r, r->dynamic_object_node_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_NODE)),
+        gpu_create_buffer_view(r, r->dynamic_object_triangle_buffer, NriBufferView_STRUCTURED_BUFFER, sizeof(BVH_TRIANGLE)),
+    };
+    NriDescriptor *dst =
+        gpu_create_buffer_view(r, r->dynamic_radiance_buffer, NriBufferView_STORAGE_STRUCTURED_BUFFER, sizeof(float[4]));
+
+    return src[0] && src[1] && dst &&
+           gpu_bind_descriptor_set(r, cmd, r->dynamic_radiance_layout, NriBindPoint_COMPUTE, 0, src, 2) &&
+           gpu_bind_descriptor_set(r, cmd, r->dynamic_radiance_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
+           gpu_bind_uniform_data(r, cmd, r->dynamic_radiance_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
+}
+
 static bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
     return gpu_bind_uniform_data(r, cmd, r->line_layout, NriBindPoint_GRAPHICS, 1, data, size);
 }
