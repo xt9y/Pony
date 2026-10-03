@@ -1862,6 +1862,63 @@ static bool render_dynamic_shadow_map(RENDERER *r, NriCommandBuffer *cmd, const 
     return true;
 }
 
+static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cmd) {
+    if (!r || !cmd) return false;
+    if (!r->dynamic_radiance_visibility_buffer || !r->dynamic_visibility_pipeline ||
+        !r->radiance_visibility_node_buffer || !r->radiance_visibility_triangle_buffer)
+        return true;
+
+    const NriBufferBarrierDesc begin = {
+        .buffer = r->dynamic_radiance_visibility_buffer,
+        .before = {.access = NriAccessBits_SHADER_RESOURCE, .stages = NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER},
+        .after = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER},
+    };
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &begin, .bufferNum = 1u});
+
+    const float epsilon = fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f);
+
+    for (uint32_t i = 0u; i < r->dynamic_lighting_count; ++i) {
+        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        if (!allocation->radiance_dims[0] || !allocation->radiance_dims[1] || !allocation->radiance_dims[2]) continue;
+
+        const OBJECT *object = scene_object_by_id_const(r->scene, allocation->object_id);
+        if (!object || object->state != DYNAMIC || object->type != MODEL) return false;
+
+        const MAT4 model = m4_transform(object->transform, false);
+        DYNAMIC_VISIBILITY_UNIFORMS uniforms = {
+            .bvh_meta = {r->radiance_visibility_node_count, r->radiance_visibility_triangle_count, 0u, 0u},
+            .field_meta = {allocation->radiance_probe_offset, allocation->radiance_dims[0],
+                           allocation->radiance_dims[1], allocation->radiance_dims[2]},
+            .field_origin_spacing = {allocation->radiance_origin.x, allocation->radiance_origin.y,
+                                     allocation->radiance_origin.z, allocation->radiance_spacing},
+            .emitter_center_radius = {allocation->local_emissive_center.x, allocation->local_emissive_center.y,
+                                      allocation->local_emissive_center.z, allocation->local_emissive_radius},
+            .params = {epsilon, 0.0f, 0.0f, 0.0f},
+        };
+        memcpy(uniforms.model, model.m, sizeof(uniforms.model));
+
+        if (!bind_dynamic_visibility_resources(r, cmd, &uniforms)) return false;
+
+        const uint32_t probe_count =
+            allocation->radiance_dims[0] * allocation->radiance_dims[1] * allocation->radiance_dims[2];
+
+        r->gpu->core.CmdSetPipeline(cmd, r->dynamic_visibility_pipeline);
+        r->gpu->core.CmdDispatch(cmd, &(NriDispatchDesc){
+            .workGroupNumX = (probe_count + 63u) / 64u,
+            .workGroupNumY = 1u,
+            .workGroupNumZ = 1u,
+        });
+    }
+
+    const NriBufferBarrierDesc end = {
+        .buffer = r->dynamic_radiance_visibility_buffer,
+        .before = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER},
+        .after = {.access = NriAccessBits_SHADER_RESOURCE, .stages = NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER},
+    };
+    r->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &end, .bufferNum = 1u});
+    return true;
+}
+
 static bool write_dynamic_influence(const RENDERER *r, MATERIAL_UNIFORMS *uniforms, uint32_t slot,
                                     const DYNAMIC_LIGHTING_ALLOCATION *allocation) {
     if (!r || !uniforms || !allocation || slot >= DYNAMIC_INFLUENCE_LIMIT) return false;
