@@ -283,7 +283,7 @@ def main() -> None:
     render = text("render.c")
     for needle in (
         "renderer_build_scene(renderer, scene, scene->lightmap)",
-        "model_surface_layout(",
+        "reference_surface_layout(",
         "renderer_allocate_dynamic_lighting(",
         "camera_uniforms_for_draw(",
         "dynamic_lighting_find(",
