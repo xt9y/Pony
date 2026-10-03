@@ -432,7 +432,6 @@ def main() -> None:
         "radiance_visibility_node_buffer",
         "radiance_visibility_triangle_buffer",
         "renderer_build_radiance_visibility(",
-        "create_dynamic_radiance_buffer(",
         "generate_dynamic_radiance_fields(",
         "dynamic_emissive_bounds(",
         "radiance_probe_offset",
