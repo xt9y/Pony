@@ -400,6 +400,11 @@ typedef struct VOLUME_UNIFORMS {
     float shadow_sun_max[4];
     float shadow_extent_bias[4];
     float shadow_texel_enabled[4];
+
+    Uint32 dynamic_radiance_meta[4];
+    float dynamic_radiance_origin_spacing[DYNAMIC_INFLUENCE_LIMIT][4];
+    Uint32 dynamic_radiance_dims_offset[DYNAMIC_INFLUENCE_LIMIT][4];
+    float dynamic_radiance_inverse[DYNAMIC_INFLUENCE_LIMIT][16];
 } VOLUME_UNIFORMS;
 
 typedef struct VOLUME_COMPOSE_UNIFORMS {
@@ -606,9 +611,10 @@ static bool create_grade_layout(RENDERER *r) {
 
 static bool create_volume_layout(RENDERER *r) {
     static const NriDescriptorType src[] = {NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER, NriDescriptorType_STRUCTURED_BUFFER,
-                                            NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_TEXTURE, NriDescriptorType_SAMPLER};
+                                            NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_TEXTURE, NriDescriptorType_STRUCTURED_BUFFER,
+                                            NriDescriptorType_SAMPLER};
 
-    return gpu_create_compute_layout(r, &r->volume_layout, src, 6, NriDescriptorType_STORAGE_TEXTURE, true);
+    return gpu_create_compute_layout(r, &r->volume_layout, src, 7, NriDescriptorType_STORAGE_TEXTURE, true);
 }
 
 static bool create_volume_compose_layout(RENDERER *r) {
@@ -663,11 +669,13 @@ static bool bind_volume_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture
                             gpu_create_buffer_view(r, probes, NriBufferView_STRUCTURED_BUFFER, sizeof(PROBE)),
                             gpu_create_buffer_view(r, beams, NriBufferView_STRUCTURED_BUFFER, sizeof(float)),
                             gpu_create_texture_view(r, shadow, NriTextureView_TEXTURE),
+                            gpu_create_buffer_view(r, r->dynamic_radiance_buffer ? r->dynamic_radiance_buffer : r->dynamic_radiance_fallback_buffer,
+                                                   NriBufferView_STRUCTURED_BUFFER, sizeof(float[4])),
                             r->dynamic_shadow_sampler ? r->dynamic_shadow_sampler : sampler_desc};
 
     NriDescriptor *dst = gpu_create_texture_view(r, output, NriTextureView_STORAGE_TEXTURE);
 
-    return gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 0, src, 6) &&
+    return gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 0, src, 7) &&
            gpu_bind_descriptor_set(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 1, &dst, 1) &&
            gpu_bind_uniform_data(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
 }
@@ -1401,6 +1409,27 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
                                  r->dynamic_shadow_ready ? 1.0f : 0.0f, 0.0f}};
 
     (void)dynamic_shadow_projection(r, frame, u.shadow_u_min, u.shadow_v_min, u.shadow_sun_max, u.shadow_extent_bias);
+
+    uint32_t radiance_count = 0u;
+    for (uint32_t i = 0u; i < r->dynamic_lighting_count && radiance_count < DYNAMIC_INFLUENCE_LIMIT; ++i) {
+        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[i];
+        const OBJECT *object = scene_object_by_id_const(r->scene, allocation->object_id);
+        if (!object || object->state != DYNAMIC || !allocation->radiance_dims[0]) continue;
+
+        const MAT4 inverse = m4_inverse_transform(object->transform);
+        memcpy(u.dynamic_radiance_inverse[radiance_count], inverse.m, sizeof(inverse.m));
+        u.dynamic_radiance_origin_spacing[radiance_count][0] = allocation->radiance_origin.x;
+        u.dynamic_radiance_origin_spacing[radiance_count][1] = allocation->radiance_origin.y;
+        u.dynamic_radiance_origin_spacing[radiance_count][2] = allocation->radiance_origin.z;
+        u.dynamic_radiance_origin_spacing[radiance_count][3] = allocation->radiance_spacing;
+        u.dynamic_radiance_dims_offset[radiance_count][0] = allocation->radiance_dims[0];
+        u.dynamic_radiance_dims_offset[radiance_count][1] = allocation->radiance_dims[1];
+        u.dynamic_radiance_dims_offset[radiance_count][2] = allocation->radiance_dims[2];
+        u.dynamic_radiance_dims_offset[radiance_count][3] = allocation->radiance_probe_offset;
+        ++radiance_count;
+    }
+    u.dynamic_radiance_meta[0] = radiance_count;
+    u.dynamic_radiance_meta[1] = r->dynamic_radiance_buffer ? 1u : 0u;
 
     if (!bind_volume_resources(r, cmd, fx->normal_depth, fx->depth_sampler, probes, beams, fx->volume, &u, sizeof(u))) return false;
 
