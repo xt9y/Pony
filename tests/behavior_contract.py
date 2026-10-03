@@ -440,7 +440,7 @@ def main() -> None:
         "radiance_spacing",
         "allocation->emissive_weight",
         "gpu_submit_commands(renderer, allocator, cmd)",
-        "dynamic radiance fields: %u probes",
+        "dynamic radiance fields: %u generated + %u cached | %u probes",
     ):
         if needle not in render + game:
             raise AssertionError(f"object-local radiance field infrastructure missing: {needle}")
