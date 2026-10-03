@@ -2698,6 +2698,13 @@ static bool read_dynamic_radiance_buffer(RENDERER *renderer, uint32_t coefficien
 
         renderer->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &barrier, .bufferNum = 1u});
         renderer->gpu->core.CmdCopyBuffer(cmd, staging, 0, renderer->dynamic_radiance_buffer, 0, bytes);
+
+        const NriBufferBarrierDesc restore = {
+            .buffer = renderer->dynamic_radiance_buffer,
+            .before = {.access = NriAccessBits_COPY_SOURCE, .stages = NriStageBits_COPY},
+            .after = {.access = NriAccessBits_SHADER_RESOURCE, .stages = NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER},
+        };
+        renderer->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &restore, .bufferNum = 1u});
         good = gpu_submit_commands(renderer, allocator, cmd);
     }
 
@@ -2715,38 +2722,75 @@ static bool read_dynamic_radiance_buffer(RENDERER *renderer, uint32_t coefficien
     return good;
 }
 
-static NriBuffer *create_dynamic_radiance_buffer(RENDERER *renderer, uint64_t coefficient_count) {
-    if (!renderer || !renderer->gpu || !renderer->gpu->device || !coefficient_count) return NULL;
-    if (coefficient_count > UINT64_MAX / sizeof(float[4])) return NULL;
-
-    const NriBufferDesc desc = {
-        .size = coefficient_count * sizeof(float[4]),
-        .structureStride = sizeof(float[4]),
-        .usage = NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE,
-    };
-    NriBuffer *buffer = NULL;
-
-    return renderer->gpu->core.CreateCommittedBuffer(renderer->gpu->device, NriMemoryLocation_DEVICE, 1.0f, &desc, &buffer) == NriResult_SUCCESS
-               ? buffer
-               : NULL;
-}
-
 static bool generate_dynamic_radiance_fields(RENDERER *renderer, uint32_t total_probes) {
     if (!renderer || !renderer->dynamic_lighting_count || !total_probes) return true;
     if (!renderer->dynamic_radiance_pipeline || !renderer->dynamic_radiance_layout ||
         !renderer->dynamic_object_node_buffer || !renderer->dynamic_object_triangle_buffer)
         return false;
 
-    renderer->dynamic_radiance_buffer = create_dynamic_radiance_buffer(renderer, (uint64_t)total_probes * 9u);
-    if (!renderer->dynamic_radiance_buffer) return false;
+    const uint32_t coefficient_count = total_probes * 9u;
+    float(*coefficients)[4] = calloc(coefficient_count, sizeof(*coefficients));
+    bool *cache_hits = calloc(renderer->dynamic_lighting_count, sizeof(*cache_hits));
+
+    if (!coefficients || !cache_hits) {
+        free(coefficients);
+        free(cache_hits);
+        return false;
+    }
+
+    uint32_t cached_fields = 0u;
+    uint32_t generated_fields = 0u;
+
+    for (uint32_t i = 0u; i < renderer->dynamic_lighting_count; ++i) {
+        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &renderer->dynamic_lighting[i];
+
+        if (!allocation->radiance_dims[0]) {
+            cache_hits[i] = true;
+            continue;
+        }
+
+        const uint32_t probe_count =
+            allocation->radiance_dims[0] * allocation->radiance_dims[1] * allocation->radiance_dims[2];
+        float(*destination)[4] = coefficients + (size_t)allocation->radiance_probe_offset * 9u;
+
+        cache_hits[i] = dynamic_radiance_cache_read(allocation->radiance_cache_hash, probe_count, destination);
+
+        if (cache_hits[i])
+            ++cached_fields;
+        else
+            ++generated_fields;
+    }
+
+    renderer->dynamic_radiance_buffer =
+        gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE,
+                          coefficients, (size_t)coefficient_count * sizeof(*coefficients), sizeof(*coefficients));
+
+    if (!renderer->dynamic_radiance_buffer) {
+        free(coefficients);
+        free(cache_hits);
+        return false;
+    }
+
+    if (!generated_fields) {
+        SDL_Log("dynamic radiance fields: %u cached object field%s | %u probes",
+                cached_fields, cached_fields == 1u ? "" : "s", total_probes);
+        free(coefficients);
+        free(cache_hits);
+        return true;
+    }
 
     NriCommandAllocator *allocator = NULL;
     NriCommandBuffer *cmd = NULL;
-    if (gpu_begin_commands(renderer, &allocator, &cmd) != NriResult_SUCCESS) return false;
+
+    if (gpu_begin_commands(renderer, &allocator, &cmd) != NriResult_SUCCESS) {
+        free(coefficients);
+        free(cache_hits);
+        return false;
+    }
 
     const NriBufferBarrierDesc begin_barrier = {
         .buffer = renderer->dynamic_radiance_buffer,
-        .before = {0},
+        .before = {.access = NriAccessBits_SHADER_RESOURCE, .stages = NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER},
         .after = {.access = NriAccessBits_SHADER_RESOURCE_STORAGE, .stages = NriStageBits_COMPUTE_SHADER},
     };
     renderer->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &begin_barrier, .bufferNum = 1u});
@@ -2756,9 +2800,13 @@ static bool generate_dynamic_radiance_fields(RENDERER *renderer, uint32_t total_
 
     for (uint32_t i = 0u; i < renderer->dynamic_lighting_count; ++i) {
         const DYNAMIC_LIGHTING_ALLOCATION *allocation = &renderer->dynamic_lighting[i];
-        if (!allocation->emissive_weight || !allocation->radiance_dims[0] || !allocation->radiance_dims[1] || !allocation->radiance_dims[2]) continue;
 
-        const uint32_t probe_count = allocation->radiance_dims[0] * allocation->radiance_dims[1] * allocation->radiance_dims[2];
+        if (cache_hits[i] || !allocation->emissive_weight || !allocation->radiance_dims[0] ||
+            !allocation->radiance_dims[1] || !allocation->radiance_dims[2])
+            continue;
+
+        const uint32_t probe_count =
+            allocation->radiance_dims[0] * allocation->radiance_dims[1] * allocation->radiance_dims[2];
         const DYNAMIC_RADIANCE_UNIFORMS uniforms = {
             .bvh_meta = {allocation->dynamic_node_offset, allocation->dynamic_node_count,
                          allocation->dynamic_triangle_offset, allocation->dynamic_triangle_count},
@@ -2771,6 +2819,8 @@ static bool generate_dynamic_radiance_fields(RENDERER *renderer, uint32_t total_
 
         if (!bind_dynamic_radiance_resources(renderer, cmd, &uniforms)) {
             gpu_abort_commands(renderer, allocator, cmd);
+            free(coefficients);
+            free(cache_hits);
             return false;
         }
 
@@ -2789,11 +2839,32 @@ static bool generate_dynamic_radiance_fields(RENDERER *renderer, uint32_t total_
     };
     renderer->gpu->core.CmdBarrier(cmd, &(NriBarrierDesc){.buffers = &end_barrier, .bufferNum = 1u});
 
-    if (!gpu_submit_commands(renderer, allocator, cmd)) return false;
+    if (!gpu_submit_commands(renderer, allocator, cmd) ||
+        !read_dynamic_radiance_buffer(renderer, coefficient_count, coefficients)) {
+        free(coefficients);
+        free(cache_hits);
+        return false;
+    }
 
-    SDL_Log("dynamic radiance fields: %u probes | %u emitter samples/probe | %.2f ms one-time generation",
-            total_probes, DYNAMIC_RADIANCE_FIELD_SAMPLES,
+    for (uint32_t i = 0u; i < renderer->dynamic_lighting_count; ++i) {
+        const DYNAMIC_LIGHTING_ALLOCATION *allocation = &renderer->dynamic_lighting[i];
+
+        if (cache_hits[i] || !allocation->radiance_dims[0]) continue;
+
+        const uint32_t probe_count =
+            allocation->radiance_dims[0] * allocation->radiance_dims[1] * allocation->radiance_dims[2];
+        const float(*source)[4] = coefficients + (size_t)allocation->radiance_probe_offset * 9u;
+
+        if (!dynamic_radiance_cache_write(allocation->radiance_cache_hash, probe_count, source))
+            SDL_Log("dynamic radiance object %" PRIu64 ": cache write failed", allocation->object_id);
+    }
+
+    SDL_Log("dynamic radiance fields: %u generated + %u cached | %u probes | %u emitter samples/probe | %.2f ms",
+            generated_fields, cached_fields, total_probes, DYNAMIC_RADIANCE_FIELD_SAMPLES,
             (double)(SDL_GetPerformanceCounter() - started) * 1000.0 / (double)SDL_GetPerformanceFrequency());
+
+    free(coefficients);
+    free(cache_hits);
     return true;
 }
 
