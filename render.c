@@ -1739,24 +1739,39 @@ bool renderer_gpu_resources_init(RENDERER *r) {
     gpu_free_shader(&sky_ps);
 
     r->dynamic_shadow_sampler = gpu_create_sampler(r, NriFilter_NEAREST, NriFilter_NEAREST, NriAddressMode_CLAMP_TO_EDGE);
+    r->dynamic_radiance_sampler = gpu_create_sampler(r, NriFilter_LINEAR, NriFilter_LINEAR, NriAddressMode_CLAMP_TO_EDGE);
 
     const PROBE fallback_probe = {0};
     const float fallback_beam = 1.0f;
-    const float fallback_radiance[4] = {0};
-    const float fallback_visibility = 1.0f;
+    const uint16_t fallback_radiance[4] = {0u, 0u, 0u, 0u};
+    const uint16_t fallback_visibility = 0x3c00u;
     r->surface_probe_fallback_buffer =
         gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_probe, sizeof(fallback_probe), sizeof(fallback_probe));
     r->surface_beam_fallback_buffer =
         gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_beam, sizeof(fallback_beam), sizeof(fallback_beam));
-    r->dynamic_radiance_fallback_buffer =
-        gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, fallback_radiance, sizeof(fallback_radiance), sizeof(fallback_radiance));
-    r->dynamic_radiance_visibility_fallback_buffer =
-        gpu_upload_buffer(r, NriBufferUsageBits_SHADER_RESOURCE, &fallback_visibility, sizeof(fallback_visibility), sizeof(fallback_visibility));
+    r->dynamic_radiance_fallback_texture =
+        gpu_create_texture_3d(r, NriFormat_RGBA16_SFLOAT, NriTextureUsageBits_SHADER_RESOURCE, 1u, 1u, 1u);
+    r->dynamic_radiance_visibility_fallback_texture =
+        gpu_create_texture_3d(r, NriFormat_R16_SFLOAT, NriTextureUsageBits_SHADER_RESOURCE, 1u, 1u, 1u);
+
+    const bool radiance_fallback_uploaded =
+        r->dynamic_radiance_fallback_texture &&
+        gpu_upload_texture_3d_data(r, r->dynamic_radiance_fallback_texture, fallback_radiance,
+                                   sizeof(fallback_radiance), sizeof(fallback_radiance),
+                                   NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
+                                   NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER);
+    const bool visibility_fallback_uploaded =
+        r->dynamic_radiance_visibility_fallback_texture &&
+        gpu_upload_texture_3d_data(r, r->dynamic_radiance_visibility_fallback_texture, &fallback_visibility,
+                                   sizeof(fallback_visibility), sizeof(fallback_visibility),
+                                   NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE,
+                                   NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER);
 
     if (!r->solid_pipeline || !r->transmission_pipeline || !r->dynamic_shadow_pipeline || !r->dynamic_radiance_pipeline ||
-        !r->dynamic_visibility_pipeline || !r->dynamic_shadow_sampler ||
-        !r->surface_probe_fallback_buffer || !r->surface_beam_fallback_buffer || !r->dynamic_radiance_fallback_buffer ||
-        !r->dynamic_radiance_visibility_fallback_buffer || !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
+        !r->dynamic_visibility_pipeline || !r->dynamic_shadow_sampler || !r->dynamic_radiance_sampler ||
+        !r->surface_probe_fallback_buffer || !r->surface_beam_fallback_buffer ||
+        !radiance_fallback_uploaded || !visibility_fallback_uploaded ||
+        !r->line_pipeline || !r->sky_pipeline || !fx_init(&r->fx, r)) {
         renderer_gpu_resources_deinit(r);
         return false;
     }
@@ -2375,8 +2390,8 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         release_buffer(r, r->beam_buffer);
         release_buffer(r, r->surface_probe_fallback_buffer);
         release_buffer(r, r->surface_beam_fallback_buffer);
-        release_buffer(r, r->dynamic_radiance_fallback_buffer);
-        release_buffer(r, r->dynamic_radiance_visibility_fallback_buffer);
+        release_texture(r, r->dynamic_radiance_fallback_texture);
+        release_texture(r, r->dynamic_radiance_visibility_fallback_texture);
         release_texture(r, r->depth_texture);
         release_texture(r, r->dynamic_shadow_texture);
         release_texture(r, r->lightmap_texture);

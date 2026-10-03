@@ -16,9 +16,16 @@ struct VolumeProbe {
 GPU_BIND_T(1, 0) StructuredBuffer<VolumeProbe> VolumeProbes : register(t1, space0);
 GPU_BIND_T(2, 0) StructuredBuffer<float> SunBeams : register(t2, space0);
 GPU_BIND_T(3, 0) Texture2D<float> DynamicShadow : register(t3, space0);
-GPU_BIND_T(4, 0) StructuredBuffer<float4> DynamicRadiance : register(t4, space0);
-GPU_BIND_T(5, 0) StructuredBuffer<float> DynamicRadianceVisibility : register(t5, space0);
+GPU_BIND_T(4, 0) Texture3D<float4> DynamicRadiance0 : register(t4, space0);
+GPU_BIND_T(5, 0) Texture3D<float4> DynamicRadiance1 : register(t5, space0);
+GPU_BIND_T(6, 0) Texture3D<float4> DynamicRadiance2 : register(t6, space0);
+GPU_BIND_T(7, 0) Texture3D<float4> DynamicRadiance3 : register(t7, space0);
+GPU_BIND_T(8, 0) Texture3D<float4> DynamicRadiance4 : register(t8, space0);
+GPU_BIND_T(9, 0) Texture3D<float4> DynamicRadiance5 : register(t9, space0);
+GPU_BIND_T(10, 0) Texture3D<float4> DynamicRadiance6 : register(t10, space0);
+GPU_BIND_T(11, 0) Texture3D<float> DynamicRadianceVisibility : register(t11, space0);
 GPU_BIND_S(1, 0) SamplerState DynamicShadowSampler : register(s1, space0);
+GPU_BIND_S(2, 0) SamplerState DynamicRadianceSampler : register(s2, space0);
 GPU_BIND_U(0, 1) GPU_STORAGE_RGBA16F RWTexture2D<float4> Output : register(u0, space1);
 GPU_BIND_B(0, 2) cbuffer VolumeData : register(b0, space2) {
     float4 eye_density;
@@ -285,19 +292,35 @@ DynamicVolumeSHWeights dynamic_volume_sh_weights(float3 direction) {
     return weights;
 }
 
-float3 dynamic_volume_probe_value(uint probe_index, DynamicVolumeSHWeights weights) {
-    uint base = probe_index * 9u;
+float3 dynamic_volume_filtered(float3 uvw, DynamicVolumeSHWeights weights) {
+    float4 p0 = DynamicRadiance0.SampleLevel(DynamicRadianceSampler, uvw, 0.0f);
+    float4 p1 = DynamicRadiance1.SampleLevel(DynamicRadianceSampler, uvw, 0.0f);
+    float4 p2 = DynamicRadiance2.SampleLevel(DynamicRadianceSampler, uvw, 0.0f);
+    float4 p3 = DynamicRadiance3.SampleLevel(DynamicRadianceSampler, uvw, 0.0f);
+    float4 p4 = DynamicRadiance4.SampleLevel(DynamicRadianceSampler, uvw, 0.0f);
+    float4 p5 = DynamicRadiance5.SampleLevel(DynamicRadianceSampler, uvw, 0.0f);
+    float4 p6 = DynamicRadiance6.SampleLevel(DynamicRadianceSampler, uvw, 0.0f);
+
+    float3 c0 = p0.xyz;
+    float3 c1 = float3(p0.w, p1.x, p1.y);
+    float3 c2 = float3(p1.z, p1.w, p2.x);
+    float3 c3 = p2.yzw;
+    float3 c4 = p3.xyz;
+    float3 c5 = float3(p3.w, p4.x, p4.y);
+    float3 c6 = float3(p4.z, p4.w, p5.x);
+    float3 c7 = p5.yzw;
+    float3 c8 = p6.xyz;
+
     float3 radiance =
-        DynamicRadiance[base + 0u].rgb * weights.low.x +
-        DynamicRadiance[base + 1u].rgb * weights.low.y +
-        DynamicRadiance[base + 2u].rgb * weights.low.z +
-        DynamicRadiance[base + 3u].rgb * weights.low.w +
-        DynamicRadiance[base + 4u].rgb * weights.high.x +
-        DynamicRadiance[base + 5u].rgb * weights.high.y +
-        DynamicRadiance[base + 6u].rgb * weights.high.z +
-        DynamicRadiance[base + 7u].rgb * weights.high.w +
-        DynamicRadiance[base + 8u].rgb * weights.last;
+        c0 * weights.low.x + c1 * weights.low.y + c2 * weights.low.z + c3 * weights.low.w +
+        c4 * weights.high.x + c5 * weights.high.y + c6 * weights.high.z + c7 * weights.high.w +
+        c8 * weights.last;
     return max(radiance, 0.0f);
+}
+
+float3 dynamic_volume_uvw(uint4 meta, float3 coord, uint field_count) {
+    float3 texture_size = float3(meta.x, meta.y, max(meta.z * field_count, 1u));
+    return (float3(coord.x, coord.y, coord.z + (float)meta.w) + 0.5f) / texture_size;
 }
 
 float dynamic_volume_static_visibility(uint index, float3 local_position) {
@@ -310,53 +333,32 @@ float dynamic_volume_static_visibility(uint index, float3 local_position) {
     float3 maximum = float3(meta.xyz - 1u);
     if (any(coord < 0.0f) || any(coord > maximum)) return 1.0f;
 
-    uint3 base = min(uint3(floor(coord)), meta.xyz - 2u);
-    float3 fraction = saturate(coord - float3(base));
-    float visibility = 0.0f;
-
-    [unroll] for (uint z = 0u; z < 2u; ++z)
-    [unroll] for (uint y = 0u; y < 2u; ++y)
-    [unroll] for (uint x = 0u; x < 2u; ++x) {
-        uint3 cell = base + uint3(x, y, z);
-        float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
-        float weight = axis_weight.x * axis_weight.y * axis_weight.z;
-        uint probe = meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z);
-        visibility += saturate(DynamicRadianceVisibility[probe]) * weight;
-    }
-
-    return saturate(visibility);
+    uint field_count = max(dynamic_radiance_meta.z, 1u);
+    float3 uvw = dynamic_volume_uvw(meta, coord, field_count);
+    return saturate(DynamicRadianceVisibility.SampleLevel(DynamicRadianceSampler, uvw, 0.0f));
 }
 
 float3 dynamic_volume_radiance(float3 world_position, float3 scattering_direction) {
     if (dynamic_radiance_meta.y == 0u) return 0.0f;
 
     uint count = min(dynamic_radiance_meta.x, 8u);
+    uint field_count = max(dynamic_radiance_meta.z, 1u);
     float3 result = 0.0f;
 
     [loop] for (uint i = 0u; i < count; ++i) {
         uint4 meta = dynamic_radiance_dims_offset[i];
-        if (any(meta.xyz < 2u) || dynamic_radiance_origin_spacing[i].w <= 0.0f) continue;
+        float spacing = dynamic_radiance_origin_spacing[i].w;
+        if (any(meta.xyz < 2u) || spacing <= 0.0f) continue;
 
         float3 local_position = mul(dynamic_radiance_inverse[i], float4(world_position, 1.0f)).xyz;
-        float3 coord = (local_position - dynamic_radiance_origin_spacing[i].xyz) / dynamic_radiance_origin_spacing[i].w;
+        float3 coord = (local_position - dynamic_radiance_origin_spacing[i].xyz) / spacing;
         float3 maximum = float3(meta.xyz - 1u);
         if (any(coord < 0.0f) || any(coord > maximum)) continue;
 
-        uint3 base = min(uint3(floor(coord)), meta.xyz - 2u);
-        float3 fraction = saturate(coord - float3(base));
         float3 local_direction = normalize(mul((float3x3)dynamic_radiance_inverse[i], scattering_direction));
-        DynamicVolumeSHWeights sh_weights = dynamic_volume_sh_weights(local_direction);
-        float3 field = 0.0f;
-
-        [unroll] for (uint z = 0u; z < 2u; ++z)
-        [unroll] for (uint y = 0u; y < 2u; ++y)
-        [unroll] for (uint x = 0u; x < 2u; ++x) {
-            uint3 cell = base + uint3(x, y, z);
-            float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
-            float weight = axis_weight.x * axis_weight.y * axis_weight.z;
-            uint probe = meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z);
-            field += dynamic_volume_probe_value(probe, sh_weights) * weight;
-        }
+        DynamicVolumeSHWeights weights = dynamic_volume_sh_weights(local_direction);
+        float3 uvw = dynamic_volume_uvw(meta, coord, field_count);
+        float3 field = dynamic_volume_filtered(uvw, weights);
 
         float3 edge_distance = min(coord, maximum - coord);
         float edge = min(edge_distance.x, min(edge_distance.y, edge_distance.z));

@@ -2,6 +2,7 @@
 #define GPU_BIND_T(n, s) [[vk::binding(n + 16, s)]]
 #define GPU_BIND_B(n, s) [[vk::binding(n + 32, s)]]
 #define GPU_BIND_U(n, s) [[vk::binding(n + 48, s)]]
+#define GPU_STORAGE_R16F [[vk::image_format("r16f")]]
 #endif
 
 #if defined(BUILD_DYNAMIC_VISIBILITY_CS)
@@ -29,7 +30,7 @@ struct TraceRay {
 
 GPU_BIND_T(0, 0) StructuredBuffer<BvhNode> Nodes : register(t0, space0);
 GPU_BIND_T(1, 0) StructuredBuffer<BvhTriangle> Triangles : register(t1, space0);
-GPU_BIND_U(0, 1) RWStructuredBuffer<float> Visibility : register(u0, space1);
+GPU_BIND_U(0, 1) GPU_STORAGE_R16F RWTexture3D<float> Visibility : register(u0, space1);
 
 GPU_BIND_B(0, 2) cbuffer DynamicVisibilityData : register(b0, space2) {
     uint4 bvh_meta;
@@ -146,7 +147,7 @@ void dynamic_visibility_cs(uint3 id : SV_DispatchThreadID) {
         visibility = trace_any(ray) ? 0.0f : 1.0f;
     }
 
-    Visibility[field_meta.x + probe_index] = visibility;
+    Visibility[uint3(x, y, z + field_meta.x)] = visibility;
 }
 
 #endif
