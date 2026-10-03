@@ -1869,6 +1869,24 @@ static bool write_dynamic_influence(const RENDERER *r, MATERIAL_UNIFORMS *unifor
     uniforms->dynamic_radiance_dims_offset[slot][1] = allocation->radiance_dims[1];
     uniforms->dynamic_radiance_dims_offset[slot][2] = allocation->radiance_dims[2];
     uniforms->dynamic_radiance_dims_offset[slot][3] = allocation->radiance_probe_offset;
+
+    const VEC3 emitter_center = m4_point(model, allocation->local_emissive_center);
+    const VEC3 emitter_axis_x =
+        v3(model.m[0] * allocation->local_emissive_extents.x, model.m[1] * allocation->local_emissive_extents.x,
+           model.m[2] * allocation->local_emissive_extents.x);
+    const VEC3 emitter_axis_y =
+        v3(model.m[4] * allocation->local_emissive_extents.y, model.m[5] * allocation->local_emissive_extents.y,
+           model.m[6] * allocation->local_emissive_extents.y);
+    const VEC3 emitter_axis_z =
+        v3(model.m[8] * allocation->local_emissive_extents.z, model.m[9] * allocation->local_emissive_extents.z,
+           model.m[10] * allocation->local_emissive_extents.z);
+    const float emitter_radius =
+        fmaxf(sqrtf(v3_len_sq(emitter_axis_x) + v3_len_sq(emitter_axis_y) + v3_len_sq(emitter_axis_z)), 1.0e-3f);
+
+    uniforms->dynamic_radiance_emitter_center_radius[slot][0] = emitter_center.x;
+    uniforms->dynamic_radiance_emitter_center_radius[slot][1] = emitter_center.y;
+    uniforms->dynamic_radiance_emitter_center_radius[slot][2] = emitter_center.z;
+    uniforms->dynamic_radiance_emitter_center_radius[slot][3] = emitter_radius;
     return true;
 }
 
@@ -1947,6 +1965,11 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
     (void)dynamic_influences(r, &result, draw ? draw->object_id : 0u);
     result.dynamic_influence_meta[2] = r->dynamic_radiance_buffer ? 1u : 0u;
     result.dynamic_influence_meta[3] = 0u;
+    result.dynamic_visibility_meta[0] = r->radiance_visibility_node_count;
+    result.dynamic_visibility_meta[1] = r->radiance_visibility_triangle_count;
+    result.dynamic_visibility_meta[2] =
+        r->radiance_visibility_node_buffer && r->radiance_visibility_triangle_buffer ? 1u : 0u;
+    result.dynamic_visibility_params[0] = fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f);
     return result;
 }
 
