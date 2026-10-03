@@ -429,14 +429,20 @@ def main() -> None:
         "radiance_cache_hash",
         "hash_bytes(DYNAMIC_RADIANCE_CACHE_VERSION, tree.nodes",
         "hash_bytes(field_hash, tree.triangles",
-        "cached object field",
         "NriAccessBits_COPY_SOURCE",
         "NriAccessBits_SHADER_RESOURCE",
         "DYNAMIC_SHADOW_SIZE 512u",
         "create_dynamic_radiance_layout(",
         "dynamic_radiance_pipeline",
         "dynamic_radiance_buffer",
-        "dynamic_radiance_fallback_buffer",
+        "dynamic_radiance_textures",
+        "dynamic_radiance_visibility_texture",
+        "dynamic_radiance_fallback_texture",
+        "dynamic_radiance_visibility_fallback_texture",
+        "dynamic_radiance_sampler",
+        "gpu_create_texture_3d(",
+        "gpu_upload_texture_3d_data(",
+        "upload_dynamic_field_textures(",
         "radiance_visibility_node_buffer",
         "radiance_visibility_triangle_buffer",
         "renderer_build_radiance_visibility(",
@@ -468,21 +474,24 @@ def main() -> None:
             raise AssertionError(f"object-local radiance field generator missing: {needle}")
 
     for needle in (
-        "StructuredBuffer<float4> DynamicRadiance",
-        "StructuredBuffer<float> DynamicRadianceVisibility",
+        "Texture3D<float4> DynamicRadiance0",
+        "Texture3D<float4> DynamicRadiance6",
+        "Texture3D<float> DynamicRadianceVisibility",
+        "SamplerState DynamicRadianceSampler",
         "dynamic_radiance_origin_spacing",
         "dynamic_radiance_dims_offset",
         "dynamic_visibility_origin_spacing",
         "dynamic_visibility_dims_offset",
         "dynamic_radiance_inverse",
         "dynamic_radiance_model",
-        "dynamic_radiance_probe_value(",
+        "dynamic_radiance_filtered(",
         "transpose((float3x3)dynamic_radiance_model[index])",
         "dynamic_radiance_field(",
         "dynamic_radiance_lighting(",
         "dynamic_radiance_static_visibility(",
-        "DynamicRadianceVisibility[probe]",
-        "meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z)",
+        "DynamicRadiance0.SampleLevel(DynamicRadianceSampler",
+        "DynamicRadianceVisibility.SampleLevel(DynamicRadianceSampler",
+        "dynamic_influence_meta.w",
         "smoothstep(0.0f, 2.0f, edge)",
         "dynamic_correction = dynamic_radiance_lighting(input.world_position, geometric_normal)",
     ):
@@ -504,14 +513,15 @@ def main() -> None:
         "dynamic_visibility_dims_offset",
         "dynamic_radiance_inverse",
         "m4_inverse_transform(object->transform)",
-        "result.dynamic_influence_meta[2] = r->dynamic_radiance_buffer ? 1u : 0u",
+        "result.dynamic_influence_meta[2] = r->dynamic_radiance_textures[0] ? 1u : 0u",
+        "result.dynamic_influence_meta[3] = r->dynamic_radiance_field_count",
         "update_dynamic_radiance_visibility(",
         "visibility_transform_revision",
         "visibility_pending_revision",
         "finish_dynamic_visibility_updates(",
         "updated_fields < DYNAMIC_INFLUENCE_LIMIT",
         "allocation->visibility_dims[0] * allocation->visibility_dims[1] * allocation->visibility_dims[2]",
-        "src, 20",
+        "src, 27",
     ):
         if needle not in render:
             raise AssertionError(f"moving radiance-field transform metadata missing: {needle}")
@@ -531,10 +541,10 @@ def main() -> None:
         "BUILD_DYNAMIC_VISIBILITY_CS",
         "StructuredBuffer<BvhNode> Nodes",
         "StructuredBuffer<BvhTriangle> Triangles",
-        "RWStructuredBuffer<float> Visibility",
+        "RWTexture3D<float> Visibility",
         "trace_any(",
         "world_position = mul(model, float4(local_position, 1.0f)).xyz",
-        "Visibility[field_meta.x + probe_index] = visibility",
+        "Visibility[uint3(x, y, z + field_meta.x)] = visibility",
     ):
         if needle not in dynamic_visibility:
             raise AssertionError(f"static-scene radiance visibility pass missing: {needle}")
@@ -543,25 +553,40 @@ def main() -> None:
     for needle in (
         "Texture2D<float> DynamicShadow",
         "volume_dynamic_shadow_visibility(",
-        "StructuredBuffer<float4> DynamicRadiance",
-        "dynamic_volume_probe_value(",
+        "Texture3D<float4> DynamicRadiance0",
+        "Texture3D<float4> DynamicRadiance6",
+        "Texture3D<float> DynamicRadianceVisibility",
+        "SamplerState DynamicRadianceSampler",
+        "dynamic_volume_filtered(",
         "dynamic_volume_static_visibility(",
         "dynamic_visibility_origin_spacing",
         "dynamic_visibility_dims_offset",
         "dynamic_volume_radiance(",
+        "DynamicRadiance0.SampleLevel(DynamicRadianceSampler",
+        "DynamicRadianceVisibility.SampleLevel(DynamicRadianceSampler",
         "radiance += dynamic_volume_radiance(p, scattering_direction)",
     ):
         if needle not in compute:
             raise AssertionError(f"dynamic volumetric field integration missing: {needle}")
 
     for needle in (
-        "NriDescriptorType_STRUCTURED_BUFFER, NriDescriptorType_SAMPLER",
         "dynamic_radiance_meta",
         "dynamic_shadow_projection(r, frame, u.shadow_u_min",
-        "gpu_create_buffer_view(r, r->dynamic_radiance_buffer ? r->dynamic_radiance_buffer : r->dynamic_radiance_fallback_buffer",
+        "gpu_create_texture_view(r, texture, NriTextureView_TEXTURE)",
+        "r->dynamic_radiance_sampler ? r->dynamic_radiance_sampler : sampler_desc",
+        "u.dynamic_radiance_meta[2] = r->dynamic_radiance_field_count",
     ):
         if needle not in render:
             raise AssertionError(f"dynamic volumetric field binding missing: {needle}")
+
+    for forbidden in (
+        "StructuredBuffer<float4> DynamicRadiance",
+        "StructuredBuffer<float> DynamicRadianceVisibility",
+        "DynamicRadianceVisibility[probe]",
+        "meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z)",
+    ):
+        if forbidden in fragment + compute:
+            raise AssertionError(f"manual runtime radiance interpolation returned: {forbidden}")
 
     for needle in (
         "reference_mode",

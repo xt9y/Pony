@@ -734,7 +734,7 @@ static bool bind_volume_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture
            gpu_bind_uniform_data(r, cmd, r->volume_layout, NriBindPoint_COMPUTE, 2, uniforms, size);
 }
 
-static bool bind_volume_compose_resourcesstatic bool bind_volume_compose_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *hdr, NriTexture *volume, NriTexture *normal,
+static bool bind_volume_compose_resources(RENDERER *r, NriCommandBuffer *cmd, NriTexture *hdr, NriTexture *volume, NriTexture *normal,
                                           NriDescriptor *sampler_desc, NriDescriptor *depth_sampler, NriTexture *output, const void *uniforms, uint32_t size) {
     NriTexture *sources[] = {hdr, volume, normal};
 
@@ -809,7 +809,7 @@ static bool bind_surface_resources(RENDERER *r, NriCommandBuffer *cmd, const REN
            gpu_bind_uniform_data(r, cmd, r->surface_layout, NriBindPoint_GRAPHICS, 3, uniforms, size);
 }
 
-static bool bind_dynamic_radiance_resourcesstatic bool bind_dynamic_radiance_resources(RENDERER *r, NriCommandBuffer *cmd, const DYNAMIC_RADIANCE_UNIFORMS *uniforms) {
+static bool bind_dynamic_radiance_resources(RENDERER *r, NriCommandBuffer *cmd, const DYNAMIC_RADIANCE_UNIFORMS *uniforms) {
     if (!r || !cmd || !uniforms || !r->dynamic_radiance_layout || !r->dynamic_radiance_buffer ||
         !r->dynamic_object_node_buffer || !r->dynamic_object_triangle_buffer)
         return false;
@@ -844,7 +844,7 @@ static bool bind_dynamic_visibility_resources(RENDERER *r, NriCommandBuffer *cmd
            gpu_bind_uniform_data(r, cmd, r->dynamic_visibility_layout, NriBindPoint_COMPUTE, 2, uniforms, sizeof(*uniforms));
 }
 
-static bool bind_line_resourcesstatic bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
+static bool bind_line_resources(RENDERER *r, NriCommandBuffer *cmd, const void *data, size_t size) {
     return gpu_bind_uniform_data(r, cmd, r->line_layout, NriBindPoint_GRAPHICS, 1, data, size);
 }
 
@@ -2011,7 +2011,7 @@ static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cm
                                   NriStageBits_FRAGMENT_SHADER | NriStageBits_COMPUTE_SHADER);
 }
 
-static bool write_dynamic_influencestatic bool write_dynamic_influence(const RENDERER *r, MATERIAL_UNIFORMS *uniforms, uint32_t slot,
+static bool write_dynamic_influence(const RENDERER *r, MATERIAL_UNIFORMS *uniforms, uint32_t slot,
                                     const DYNAMIC_LIGHTING_ALLOCATION *allocation) {
     if (!r || !uniforms || !allocation || slot >= DYNAMIC_INFLUENCE_LIMIT) return false;
 
@@ -3230,7 +3230,7 @@ static bool generate_dynamic_radiance_fields(RENDERER *renderer, uint32_t total_
     return good;
 }
 
-static bool renderer_build_radiance_visibilitystatic bool renderer_build_radiance_visibility(RENDERER *renderer, const SCENE *scene) {
+static bool renderer_build_radiance_visibility(RENDERER *renderer, const SCENE *scene) {
     if (!renderer || !scene) return false;
     if (!scene->static_geometry.faces.count || !scene->static_visual.vertex_count) return true;
 
