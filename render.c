@@ -2820,159 +2820,6 @@ static bool reference_bake_surface(RENDERER *r, const BVH *tree, const LIGHTMAP 
     return true;
 }
 
-static float dynamic_half_to_float(Uint16 h) {
-    const Uint32 exponent = (h >> 10u) & 31u;
-    const Uint32 mantissa = h & 1023u;
-    const float value = exponent == 0u ? ldexpf((float)mantissa, -24)
-                                      : exponent == 31u ? INFINITY : ldexpf((float)(1024u + mantissa), (int)exponent - 25);
-    return (h & 0x8000u) ? -value : value;
-}
-
-static VEC3 dynamic_rgba16f_rgb(const Uint8 *pixels, uint32_t pixel) {
-    Uint16 channels[3] = {0};
-    memcpy(channels, pixels + (size_t)pixel * 8u, sizeof(channels));
-    return v3(dynamic_half_to_float(channels[0]), dynamic_half_to_float(channels[1]), dynamic_half_to_float(channels[2]));
-}
-
-static float dynamic_rgba16f_alpha(const Uint8 *pixels, uint32_t pixel) {
-    Uint16 alpha = 0u;
-    memcpy(&alpha, pixels + (size_t)pixel * 8u + 6u, sizeof(alpha));
-    return dynamic_half_to_float(alpha);
-}
-
-static void log_dynamic_matte_reference_error(RENDERER *r, const DYNAMIC_LIGHTING_ALLOCATION *allocation, const OBJECT *object,
-                                              NriTexture *reference_texture) {
-    if (!r || !allocation || !allocation->layout || !object || !reference_texture || !allocation->texture || !object->data) return;
-
-    if (allocation->transform_revision != object->transform_revision || allocation->lighting_revision != object->lighting_revision ||
-        allocation->scene_lighting_revision != r->scene->lighting_revision ||
-        allocation->sample_pass < DYNAMIC_SURFACE_CONVERGENCE_PASSES) {
-        SDL_Log("dynamic acceptance object %" PRIu64 ": runtime cache is not fully current/converged; comparison skipped", allocation->object_id);
-        return;
-    }
-
-    if (r->gpu->graphics_queue && r->gpu->core.QueueWaitIdle(r->gpu->graphics_queue) != NriResult_SUCCESS) {
-        SDL_Log("dynamic acceptance object %" PRIu64 ": could not synchronize runtime cache for comparison", allocation->object_id);
-        return;
-    }
-
-    Uint8 *runtime = NULL;
-    Uint8 *reference = NULL;
-    const uint32_t width = allocation->layout->width;
-    const uint32_t height = allocation->layout->height;
-
-    if (!download_rgba16f_texture(r, allocation->texture, width, height, &runtime) ||
-        !download_rgba16f_texture(r, reference_texture, width, height, &reference)) {
-        free(runtime);
-        free(reference);
-        SDL_Log("dynamic acceptance object %" PRIu64 ": cache readback failed", allocation->object_id);
-        return;
-    }
-
-    const struct MODEL *model_data = object->data;
-    BVH self_tree = {0};
-
-    if (!model_data->geometry || !model_data->visual || !bvh_build(&self_tree, model_data->geometry, model_data->visual)) {
-        free(runtime);
-        free(reference);
-        SDL_Log("dynamic acceptance object %" PRIu64 ": self BVH build failed", allocation->object_id);
-        return;
-    }
-
-    const MAT4 model = m4_transform(object->transform, false);
-    const MAT4 inverse_model = m4_inverse_transform(object->transform);
-    const MAT4 normal_model = m4_transform(object->transform, true);
-    const VEC3 sun = v3_normalize(r->sun.direction);
-    const float epsilon = fmaxf(r->scene_radius * 2.0e-5f, 1.0e-5f);
-    const float visibility_floor = 1.0f / 1024.0f;
-    const uint64_t pixel_count = (uint64_t)width * height;
-
-    uint32_t compared = 0u;
-    uint32_t missing = 0u;
-    double absolute_sum = 0.0;
-    double squared_sum = 0.0;
-    double reference_squared_sum = 0.0;
-    float maximum = 0.0f;
-
-    for (uint32_t i = 0; i < allocation->layout->sample_count; ++i) {
-        const LMAP_SAMPLE *sample = &allocation->layout->samples[i];
-        union {
-            float f;
-            uint32_t u;
-        } bits = {sample->position[3]};
-
-        if (bits.u >= pixel_count) continue;
-
-        const float alpha = dynamic_rgba16f_alpha(runtime, bits.u);
-
-        if (!isfinite(alpha) || alpha < visibility_floor * 0.5f) {
-            ++missing;
-            continue;
-        }
-
-        VEC3 runtime_rgb = dynamic_rgba16f_rgb(runtime, bits.u);
-        const VEC3 reference_rgb = dynamic_rgba16f_rgb(reference, bits.u);
-
-        VEC3 position = m4_point(model, v3(sample->position[0], sample->position[1], sample->position[2]));
-        VEC3 normal = m4_point(normal_model, v3(sample->normal[0], sample->normal[1], sample->normal[2]));
-        normal = v3_normalize(normal);
-
-        const float cached_visibility = fminf(fmaxf((alpha - visibility_floor) / (1.0f - visibility_floor), 0.0f), 1.0f);
-        const float n_dot_l = fmaxf(v3_dot(normal, sun), 0.0f);
-
-        const VEC3 world_origin = v3_add(position, v3_scale(normal, epsilon));
-        TRACE_RAY local_shadow = {
-            .origin = m4_point(inverse_model, world_origin),
-            .tmin = epsilon,
-            .direction = m4_vector(inverse_model, sun),
-            .tmax = 1.0e20f,
-        };
-
-        const float current_visibility = trace_any(&self_tree, local_shadow) ? 0.0f : 1.0f;
-        const VEC3 direct =
-            v3_scale(r->sun.color, r->sun.intensity * n_dot_l * cached_visibility * (current_visibility - 1.0f));
-        runtime_rgb = v3(fmaxf(runtime_rgb.x + direct.x, 0.0f), fmaxf(runtime_rgb.y + direct.y, 0.0f), fmaxf(runtime_rgb.z + direct.z, 0.0f));
-
-        const float error[3] = {
-            runtime_rgb.x - reference_rgb.x,
-            runtime_rgb.y - reference_rgb.y,
-            runtime_rgb.z - reference_rgb.z,
-        };
-        const float reference_channels[3] = {reference_rgb.x, reference_rgb.y, reference_rgb.z};
-
-        for (uint32_t channel = 0; channel < 3u; ++channel) {
-            if (!isfinite(error[channel]) || !isfinite(reference_channels[channel])) continue;
-
-            const float absolute = fabsf(error[channel]);
-            absolute_sum += absolute;
-            squared_sum += (double)error[channel] * error[channel];
-            reference_squared_sum += (double)reference_channels[channel] * reference_channels[channel];
-            maximum = fmaxf(maximum, absolute);
-        }
-
-        ++compared;
-    }
-
-    const uint32_t total = compared + missing;
-    const double channel_count = (double)compared * 3.0;
-    const double mae = channel_count > 0.0 ? absolute_sum / channel_count : 0.0;
-    const double rmse = channel_count > 0.0 ? sqrt(squared_sum / channel_count) : 0.0;
-    const double reference_rms = channel_count > 0.0 ? sqrt(reference_squared_sum / channel_count) : 0.0;
-    const double nrmse = reference_rms > 1.0e-6 ? rmse / reference_rms : 0.0;
-    const double coverage = total ? (double)compared * 100.0 / (double)total : 0.0;
-
-    const bool accepted = coverage >= DYNAMIC_ACCEPTANCE_MIN_COVERAGE_PERCENT &&
-                          mae <= DYNAMIC_ACCEPTANCE_MAX_RGB_MAE &&
-                          nrmse <= DYNAMIC_ACCEPTANCE_MAX_NRMSE;
-
-    SDL_Log("dynamic acceptance object %" PRIu64 ": %s | matte cache coverage %.1f%% | RGB MAE %.5f | RMSE %.5f | NRMSE %.2f%% | max %.5f",
-            allocation->object_id, accepted ? "PASS" : "FAIL", coverage, mae, rmse, nrmse * 100.0, maximum);
-
-    bvh_free(&self_tree);
-    free(runtime);
-    free(reference);
-}
-
 static bool renderer_update_reference_lighting(RENDERER *r, const struct LIGHT *light) {
     if (!r || !r->reference_lighting_enabled) return true;
     if (!r->scene || !light || light->type != LIGHT_DIRECTIONAL || !r->has_bake || !r->scene->lightmap) return false;
@@ -2992,23 +2839,7 @@ static bool renderer_update_reference_lighting(RENDERER *r, const struct LIGHT *
                   allocation->reference_lighting_revision == object->lighting_revision;
     }
 
-    if (current) {
-        if (r->dynamic_lighting_count == 1u) {
-            DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[0];
-            const OBJECT *object = scene_object_by_id_const(scene, allocation->object_id);
-
-            if (object && allocation->reference_texture &&
-                allocation->sample_pass >= DYNAMIC_SURFACE_CONVERGENCE_PASSES &&
-                (allocation->acceptance_transform_revision != object->transform_revision ||
-                 allocation->acceptance_scene_lighting_revision != scene->lighting_revision)) {
-                log_dynamic_matte_reference_error(r, allocation, object, allocation->reference_texture);
-                allocation->acceptance_transform_revision = object->transform_revision;
-                allocation->acceptance_scene_lighting_revision = scene->lighting_revision;
-            }
-        }
-
-        return true;
-    }
+    if (current) return true;
 
     r->sun = light->directional;
     r->sun.direction = v3_normalize(r->sun.direction);
@@ -3046,18 +2877,6 @@ static bool renderer_update_reference_lighting(RENDERER *r, const struct LIGHT *
 
         good = reference_bake_surface(r, &tree, &world_layout, &dynamic_candidates[i]);
         free(world_layout.samples);
-    }
-
-    if (good && r->dynamic_lighting_count == 1u) {
-        DYNAMIC_LIGHTING_ALLOCATION *allocation = &r->dynamic_lighting[0];
-        const OBJECT *object = scene_object_by_id_const(scene, allocation->object_id);
-
-        if (object && dynamic_candidates && dynamic_candidates[0] &&
-            allocation->sample_pass >= DYNAMIC_SURFACE_CONVERGENCE_PASSES) {
-            log_dynamic_matte_reference_error(r, allocation, object, dynamic_candidates[0]);
-            allocation->acceptance_transform_revision = object->transform_revision;
-            allocation->acceptance_scene_lighting_revision = scene->lighting_revision;
-        }
     }
 
     bvh_free(&tree);
