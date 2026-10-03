@@ -80,6 +80,7 @@ GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3) {
     float4 dynamic_visibility_origin_spacing[8];
     uint4 dynamic_visibility_dims_offset[8];
     float4x4 dynamic_radiance_inverse[8];
+    float4x4 dynamic_radiance_model[8];
 };
 
 struct SurfaceInput {
@@ -440,7 +441,7 @@ float3 dynamic_radiance_field(uint index, float3 world_position, float3 world_no
 
     uint3 base = min(uint3(floor(coord)), meta.xyz - 2u);
     float3 fraction = saturate(coord - float3(base));
-    float3 local_normal = normalize(mul((float3x3)dynamic_radiance_inverse[index], world_normal));
+    float3 local_normal = normalize(mul(transpose((float3x3)dynamic_radiance_model[index]), world_normal));
     float3 irradiance = 0.0f;
 
     [unroll] for (uint z = 0u; z < 2u; ++z)
