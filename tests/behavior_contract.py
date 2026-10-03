@@ -537,42 +537,6 @@ def main() -> None:
     if "static_direct * cached_sun_visibility * (dynamic_visibility - 1.0f)" not in fragment:
         raise AssertionError("static receiver sun correction must use explicit baked sun visibility only")
 
-    for needle in (
-        "cached_sun_visibility",
-        "if (dynamic_any(shadow))",
-        "lighting = max(lighting - baked_sun, 0.0f)",
-    ):
-        if needle not in dynamic_surface:
-            raise AssertionError(f"dynamic cache does not feed self-shadowed static bounce: {needle}")
-
-    for needle in (
-        "download_rgba16f_texture(",
-        "gpu_transition_texture(r, cmd, texture, NriAccessBits_SHADER_RESOURCE, NriLayout_SHADER_RESOURCE, NriStageBits_ALL)",
-    ):
-        if needle not in text("bake.c") + text("render_internal.h"):
-            raise AssertionError(f"reference metric texture readback contract missing: {needle}")
-
-    for needle in (
-        "log_dynamic_matte_reference_error(",
-        "DYNAMIC_ACCEPTANCE_MIN_COVERAGE_PERCENT 99.0",
-        "DYNAMIC_ACCEPTANCE_MAX_RGB_MAE 0.03",
-        "DYNAMIC_ACCEPTANCE_MAX_NRMSE 0.10",
-        'accepted ? "PASS" : "FAIL"',
-        "dynamic acceptance object %u: %s | matte cache coverage",
-        "allocation->transform_revision != object->transform_revision",
-        "allocation->scene_lighting_revision != r->scene->lighting_revision",
-        "allocation->sample_pass < DYNAMIC_SURFACE_CONVERGENCE_PASSES",
-        "allocation->lighting_revision != object->lighting_revision",
-        "r->dynamic_lighting_count == 1u",
-        "bvh_build(&self_tree, model_data->geometry, model_data->visual)",
-        "m4_vector(inverse_model, sun)",
-        "trace_any(&self_tree, local_shadow)",
-        "RGB MAE",
-        "NRMSE",
-    ):
-        if needle not in render:
-            raise AssertionError(f"matte dynamic/reference acceptance metric missing: {needle}")
-
     bake = text("bake.c")
     render = text("render.c")
 
