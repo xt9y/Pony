@@ -26,32 +26,10 @@ struct SurfaceProbe {
     float4 coefficient[9];
 };
 
-struct RadianceVisibilityNode {
-    float4 bmin;
-    float4 bmax;
-    uint4 meta;
-};
-
-struct RadianceVisibilityTriangle {
-    float4 a;
-    float4 b;
-    float4 c;
-    float4 normal;
-    float4 emissive;
-};
-
-struct RadianceVisibilityRay {
-    float3 origin;
-    float tmin;
-    float3 direction;
-    float tmax;
-};
-
 GPU_BIND_T(12, 2) StructuredBuffer<float> SurfaceBeams : register(t12, space2);
 GPU_BIND_T(13, 2) StructuredBuffer<SurfaceProbe> SurfaceProbes : register(t13, space2);
 GPU_BIND_T(14, 2) StructuredBuffer<float4> DynamicRadiance : register(t14, space2);
-GPU_BIND_T(15, 2) StructuredBuffer<RadianceVisibilityNode> RadianceVisibilityNodes : register(t15, space2);
-GPU_BIND_T(16, 2) StructuredBuffer<RadianceVisibilityTriangle> RadianceVisibilityTriangles : register(t16, space2);
+GPU_BIND_T(15, 2) StructuredBuffer<float> DynamicRadianceVisibility : register(t15, space2);
 
 GPU_BIND_S(0, 2) SamplerState MaterialSampler : register(s0, space2);
 GPU_BIND_S(1, 2) SamplerState LightmapSampler : register(s1, space2);
@@ -100,10 +78,6 @@ GPU_BIND_B(0, 3) cbuffer MaterialData : register(b0, space3) {
     float4 dynamic_radiance_origin_spacing[8];
     uint4 dynamic_radiance_dims_offset[8];
     float4x4 dynamic_radiance_inverse[8];
-    float4 dynamic_radiance_emitter_center_radius[8];
-
-    uint4 dynamic_visibility_meta;
-    float4 dynamic_visibility_params;
 };
 
 struct SurfaceInput {
@@ -409,103 +383,6 @@ float4 reference_dynamic_lightmap_sample(float2 uv) {
     return weight_sum > 1.0e-6f ? sum / weight_sum : 0.0f;
 }
 
-bool radiance_visibility_box(RadianceVisibilityRay ray, RadianceVisibilityNode node) {
-    float lo = ray.tmin;
-    float hi = ray.tmax;
-
-    [unroll] for (uint axis = 0u; axis < 3u; ++axis) {
-        float d = ray.direction[axis];
-
-        if (abs(d) < 1.0e-7f) {
-            if (ray.origin[axis] < node.bmin[axis] || ray.origin[axis] > node.bmax[axis]) return false;
-            continue;
-        }
-
-        float a = (node.bmin[axis] - ray.origin[axis]) / d;
-        float b = (node.bmax[axis] - ray.origin[axis]) / d;
-        lo = max(lo, min(a, b));
-        hi = min(hi, max(a, b));
-        if (lo > hi) return false;
-    }
-
-    return hi >= ray.tmin;
-}
-
-bool radiance_visibility_triangle(RadianceVisibilityRay ray, RadianceVisibilityTriangle tri) {
-    float3 edge1 = tri.b.xyz - tri.a.xyz;
-    float3 edge2 = tri.c.xyz - tri.a.xyz;
-    float3 p = cross(ray.direction, edge2);
-    float determinant = dot(edge1, p);
-    if (abs(determinant) < 1.0e-7f) return false;
-
-    float inverse = rcp(determinant);
-    float3 relative = ray.origin - tri.a.xyz;
-    float u = dot(relative, p) * inverse;
-    if (u < 0.0f || u > 1.0f) return false;
-
-    float3 q = cross(relative, edge1);
-    float v = dot(ray.direction, q) * inverse;
-    if (v < 0.0f || u + v > 1.0f) return false;
-
-    float t = dot(edge2, q) * inverse;
-    return t > ray.tmin && t < ray.tmax;
-}
-
-bool radiance_visibility_any(RadianceVisibilityRay ray) {
-    if (dynamic_visibility_meta.z == 0u || dynamic_visibility_meta.x == 0u) return false;
-
-    uint node_index = 0u;
-
-    while (node_index != 0xffffffffu && node_index < dynamic_visibility_meta.x) {
-        RadianceVisibilityNode node = RadianceVisibilityNodes[node_index];
-
-        if (!radiance_visibility_box(ray, node)) {
-            node_index = node.meta.y;
-            continue;
-        }
-
-        if (node.meta.w != 0u) {
-            [loop] for (uint i = 0u; i < node.meta.w; ++i) {
-                uint triangle_index = node.meta.z + i;
-                if (triangle_index >= dynamic_visibility_meta.y) continue;
-
-                RadianceVisibilityTriangle tri = RadianceVisibilityTriangles[triangle_index];
-                if (tri.normal.w >= 0.999f) continue;
-                if (radiance_visibility_triangle(ray, tri)) return true;
-            }
-
-            node_index = node.meta.y;
-        } else {
-            node_index = node.meta.x;
-        }
-    }
-
-    return false;
-}
-
-float dynamic_radiance_static_visibility(uint index, float3 world_position, float3 world_normal) {
-    if (dynamic_visibility_meta.z == 0u) return 1.0f;
-
-    float3 emitter_center = dynamic_radiance_emitter_center_radius[index].xyz;
-    float emitter_radius = max(dynamic_radiance_emitter_center_radius[index].w, 1.0e-3f);
-    float3 delta = emitter_center - world_position;
-    float distance2 = dot(delta, delta);
-    float epsilon = max(dynamic_visibility_params.x, 1.0e-5f);
-
-    if (distance2 <= epsilon * epsilon) return 1.0f;
-
-    float distance = sqrt(distance2);
-    float3 direction = delta / distance;
-
-    RadianceVisibilityRay ray;
-    ray.origin = world_position + normalize(world_normal) * epsilon + direction * epsilon;
-    ray.tmin = epsilon;
-    ray.direction = direction;
-    ray.tmax = max(epsilon, distance - max(epsilon * 2.0f, emitter_radius * 0.02f));
-
-    return radiance_visibility_any(ray) ? 0.0f : 1.0f;
-}
-
 float3 dynamic_radiance_probe_value(uint probe_index, float3 normal) {
     uint base = probe_index * 9u;
     const float nx = normal.x, ny = normal.y, nz = normal.z;
@@ -535,6 +412,7 @@ float3 dynamic_radiance_field(uint index, float3 world_position, float3 world_no
     float3 fraction = saturate(coord - float3(base));
     float3 local_normal = normalize(mul((float3x3)dynamic_radiance_inverse[index], world_normal));
     float3 irradiance = 0.0f;
+    float visibility = 0.0f;
 
     [unroll] for (uint z = 0u; z < 2u; ++z)
     [unroll] for (uint y = 0u; y < 2u; ++y)
@@ -543,14 +421,16 @@ float3 dynamic_radiance_field(uint index, float3 world_position, float3 world_no
         float3 axis_weight = lerp(1.0f - fraction, fraction, float3(x, y, z));
         float weight = axis_weight.x * axis_weight.y * axis_weight.z;
         uint probe = meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z);
+
         irradiance += dynamic_radiance_probe_value(probe, local_normal) * weight;
+        visibility += saturate(DynamicRadianceVisibility[probe]) * weight;
     }
 
     float3 edge_distance = min(coord, maximum - coord);
     float edge = min(edge_distance.x, min(edge_distance.y, edge_distance.z));
     float fade = smoothstep(0.0f, 2.0f, edge);
 
-    return irradiance * (fade / PI);
+    return irradiance * (fade * saturate(visibility) / PI);
 }
 
 float3 dynamic_radiance_lighting(float3 world_position, float3 world_normal) {
@@ -561,12 +441,7 @@ float3 dynamic_radiance_lighting(float3 world_position, float3 world_normal) {
 
     [loop] for (uint i = 0u; i < count; ++i) {
         if (i == dynamic_influence_meta.y) continue;
-
-        float3 contribution = dynamic_radiance_field(i, world_position, world_normal);
-        if (max(contribution.r, max(contribution.g, contribution.b)) <= 1.0e-6f) continue;
-
-        contribution *= dynamic_radiance_static_visibility(i, world_position, world_normal);
-        result += contribution;
+        result += dynamic_radiance_field(i, world_position, world_normal);
     }
 
     return result;
