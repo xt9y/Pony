@@ -2049,7 +2049,7 @@ static MATERIAL_UNIFORMS material_uniforms(const RENDERER *r, const RENDER_MATER
 
     (void)dynamic_shadow_projection(r, frame, result.shadow_u_min, result.shadow_v_min, result.shadow_sun_max, result.shadow_extent_bias);
     (void)dynamic_influences(r, &result, draw ? draw->object_id : 0u);
-    result.dynamic_influence_meta[2] = r->dynamic_radiance_buffer && r->dynamic_radiance_visibility_buffer ? 1u : 0u;
+    result.dynamic_influence_meta[2] = r->dynamic_radiance_buffer ? 1u : 0u;
     result.dynamic_influence_meta[3] = 0u;
     return result;
 }
@@ -3023,7 +3023,8 @@ static bool generate_dynamic_radiance_fields(RENDERER *renderer, uint32_t total_
 }
 
 static bool renderer_build_radiance_visibility(RENDERER *renderer, const SCENE *scene) {
-    if (!renderer || !scene || !scene->static_geometry.faces.count || !scene->static_visual.vertex_count) return false;
+    if (!renderer || !scene) return false;
+    if (!scene->static_geometry.faces.count || !scene->static_visual.vertex_count) return true;
 
     BVH tree = {0};
     if (!bvh_build(&tree, &scene->static_geometry, &scene->static_visual)) return false;
