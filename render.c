@@ -354,6 +354,10 @@ typedef struct MATERIAL_UNIFORMS {
     float dynamic_radiance_origin_spacing[DYNAMIC_INFLUENCE_LIMIT][4];
     Uint32 dynamic_radiance_dims_offset[DYNAMIC_INFLUENCE_LIMIT][4];
     float dynamic_radiance_inverse[DYNAMIC_INFLUENCE_LIMIT][16];
+    float dynamic_radiance_emitter_center_radius[DYNAMIC_INFLUENCE_LIMIT][4];
+
+    Uint32 dynamic_visibility_meta[4];
+    float dynamic_visibility_params[4];
 } MATERIAL_UNIFORMS;
 
 typedef struct DYNAMIC_SHADOW_UNIFORMS {
