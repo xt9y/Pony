@@ -1959,23 +1959,12 @@ static bool draw_frame(RENDERER *r, const RENDER_FRAME *frame) {
     const uint32_t timing_base =
         DYNAMIC_TIMESTAMP_BASE + (uint32_t)(r->gpu->frame_index % GPU_FRAME_QUEUE_DEPTH) * DYNAMIC_TIMESTAMP_STRIDE;
 
-    if (r->gpu->frame_index >= GPU_FRAME_QUEUE_DEPTH && r->gpu->frame_index % DYNAMIC_TIMING_LOG_INTERVAL == 0u) {
-        gpu_timestamp_log(r, timing_base, "dynamic object cache");
-        gpu_timestamp_log(r, timing_base + 2u, "dynamic receiver cache");
-        gpu_timestamp_log(r, timing_base + 4u, "dynamic shadow map");
-    }
+    if (r->gpu->frame_index >= GPU_FRAME_QUEUE_DEPTH && r->gpu->frame_index % DYNAMIC_TIMING_LOG_INTERVAL == 0u)
+        gpu_timestamp_log(r, timing_base, "dynamic shadow map");
 
     if (!gpu_timestamp_begin(r, cmd, timing_base)) goto failed_frame;
-    if (!update_dynamic_surface_caches(r, cmd, frame)) goto failed_frame;
-    if (!gpu_timestamp_end(r, cmd, timing_base)) goto failed_frame;
-
-    if (!gpu_timestamp_begin(r, cmd, timing_base + 2u)) goto failed_frame;
-    if (!update_dynamic_receiver_cache(r, cmd, frame)) goto failed_frame;
-    if (!gpu_timestamp_end(r, cmd, timing_base + 2u)) goto failed_frame;
-
-    if (!gpu_timestamp_begin(r, cmd, timing_base + 4u)) goto failed_frame;
     if (!render_dynamic_shadow_map(r, cmd, frame)) goto failed_frame;
-    if (!gpu_timestamp_end(r, cmd, timing_base + 4u)) goto failed_frame;
+    if (!gpu_timestamp_end(r, cmd, timing_base)) goto failed_frame;
 
     CAMERA_UNIFORMS camera = {0};
 
@@ -2104,6 +2093,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         release_buffer(r, r->beam_buffer);
         release_buffer(r, r->surface_probe_fallback_buffer);
         release_buffer(r, r->surface_beam_fallback_buffer);
+        release_buffer(r, r->dynamic_radiance_fallback_buffer);
         release_texture(r, r->depth_texture);
         release_texture(r, r->dynamic_shadow_texture);
         release_texture(r, r->lightmap_texture);
@@ -2114,8 +2104,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         if (r->solid_pipeline) gpu->core.DestroyPipeline(r->solid_pipeline);
         if (r->transmission_pipeline) gpu->core.DestroyPipeline(r->transmission_pipeline);
         if (r->dynamic_shadow_pipeline) gpu->core.DestroyPipeline(r->dynamic_shadow_pipeline);
-        if (r->dynamic_surface_pipeline) gpu->core.DestroyPipeline(r->dynamic_surface_pipeline);
-        if (r->dynamic_receiver_pipeline) gpu->core.DestroyPipeline(r->dynamic_receiver_pipeline);
+        if (r->dynamic_radiance_pipeline) gpu->core.DestroyPipeline(r->dynamic_radiance_pipeline);
         if (r->line_pipeline) gpu->core.DestroyPipeline(r->line_pipeline);
 
         destroy_pipeline_layouts(r);
@@ -3390,9 +3379,7 @@ bool renderer_set_scene(RENDERER *renderer, SCENE *scene) {
 
     renderer->scene = scene;
 
-    if (!renderer_build_scene(renderer, scene, scene->lightmap) ||
-        !renderer_build_dynamic_static_transport(renderer, scene) ||
-        !renderer_build_dynamic_receiver_cache(renderer, scene)) {
+    if (!renderer_build_scene(renderer, scene, scene->lightmap)) {
         renderer->scene = NULL;
         return false;
     }
