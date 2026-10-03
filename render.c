@@ -2370,6 +2370,7 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
 
         if (r->material_sampler) gpu->core.DestroyDescriptor(r->material_sampler);
         if (r->dynamic_shadow_sampler) gpu->core.DestroyDescriptor(r->dynamic_shadow_sampler);
+        if (r->dynamic_radiance_sampler) gpu->core.DestroyDescriptor(r->dynamic_radiance_sampler);
 
         release_buffer(r, r->vertex_buffer);
         release_bake_resources(r);
@@ -2377,9 +2378,10 @@ void renderer_gpu_resources_deinit(RENDERER *r) {
         release_buffer(r, r->beam_buffer);
         release_buffer(r, r->surface_probe_fallback_buffer);
         release_buffer(r, r->surface_beam_fallback_buffer);
-        if (r->dynamic_radiance_fallback_view) r->gpu->core.DestroyDescriptor(r->dynamic_radiance_fallback_view);
-    r->dynamic_radiance_fallback_view = NULL;
-    release_texture(r, r->dynamic_radiance_fallback_texture);
+
+        if (r->dynamic_radiance_fallback_view) gpu->core.DestroyDescriptor(r->dynamic_radiance_fallback_view);
+        r->dynamic_radiance_fallback_view = NULL;
+        release_texture(r, r->dynamic_radiance_fallback_texture);
         release_buffer(r, r->dynamic_radiance_visibility_fallback_buffer);
         release_texture(r, r->depth_texture);
         release_texture(r, r->dynamic_shadow_texture);
