@@ -271,6 +271,7 @@ def main() -> None:
         "shaders/vertex.hlsl",
         "shaders/fragment.hlsl",
         "shaders/dynamic_radiance.hlsl",
+        "shaders/dynamic_visibility.hlsl",
         "shaders/compute.hlsl",
         "shaders/compute_base.hlsl",
         "shaders/vision_compute.hlsl",
