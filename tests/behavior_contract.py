@@ -461,18 +461,14 @@ def main() -> None:
 
     for needle in (
         "StructuredBuffer<float4> DynamicRadiance",
+        "StructuredBuffer<float> DynamicRadianceVisibility",
         "dynamic_radiance_origin_spacing",
         "dynamic_radiance_dims_offset",
         "dynamic_radiance_inverse",
         "dynamic_radiance_probe_value(",
         "dynamic_radiance_field(",
         "dynamic_radiance_lighting(",
-        "RadianceVisibilityNodes",
-        "RadianceVisibilityTriangles",
-        "radiance_visibility_any(",
-        "dynamic_radiance_static_visibility(",
-        "dynamic_radiance_emitter_center_radius",
-        "if (max(contribution.r, max(contribution.g, contribution.b)) <= 1.0e-6f) continue",
+        "visibility += saturate(DynamicRadianceVisibility[probe]) * weight",
         "meta.w + cell.x + meta.x * (cell.y + meta.y * cell.z)",
         "smoothstep(0.0f, 2.0f, edge)",
         "dynamic_correction = dynamic_radiance_lighting(input.world_position, geometric_normal)",
@@ -494,10 +490,12 @@ def main() -> None:
         "dynamic_radiance_inverse",
         "m4_inverse_transform(object->transform)",
         "result.dynamic_influence_meta[2] = r->dynamic_radiance_buffer ? 1u : 0u",
-        "dynamic_radiance_emitter_center_radius",
-        "dynamic_visibility_meta",
-        "dynamic_visibility_params",
-        "src, 21",
+        "update_dynamic_radiance_visibility(",
+        "visibility_transform_revision",
+        "visibility_pending_revision",
+        "finish_dynamic_visibility_updates(",
+        "updated_fields < DYNAMIC_INFLUENCE_LIMIT",
+        "src, 20",
     ):
         if needle not in render:
             raise AssertionError(f"moving radiance-field transform metadata missing: {needle}")
@@ -511,6 +509,19 @@ def main() -> None:
     ):
         if needle not in fragment:
             raise AssertionError(f"bounded dynamic reflection integration missing: {needle}")
+
+    dynamic_visibility = text("shaders/dynamic_visibility.hlsl")
+    for needle in (
+        "BUILD_DYNAMIC_VISIBILITY_CS",
+        "StructuredBuffer<BvhNode> Nodes",
+        "StructuredBuffer<BvhTriangle> Triangles",
+        "RWStructuredBuffer<float> Visibility",
+        "trace_any(",
+        "world_position = mul(model, float4(local_position, 1.0f)).xyz",
+        "Visibility[field_meta.x + probe_index] = visibility",
+    ):
+        if needle not in dynamic_visibility:
+            raise AssertionError(f"static-scene radiance visibility pass missing: {needle}")
 
     compute = text("shaders/compute.hlsl")
     for needle in (
