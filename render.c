@@ -2849,7 +2849,18 @@ static bool generate_dynamic_radiance_fields(RENDERER *renderer, uint32_t total_
         gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE,
                           coefficients, (size_t)coefficient_count * sizeof(*coefficients), sizeof(*coefficients));
 
-    if (!renderer->dynamic_radiance_buffer) {
+    float *initial_visibility = malloc((size_t)total_probes * sizeof(*initial_visibility));
+    if (initial_visibility)
+        for (uint32_t i = 0u; i < total_probes; ++i) initial_visibility[i] = 1.0f;
+
+    renderer->dynamic_radiance_visibility_buffer =
+        initial_visibility
+            ? gpu_upload_buffer(renderer, NriBufferUsageBits_SHADER_RESOURCE | NriBufferUsageBits_SHADER_RESOURCE_STORAGE,
+                                initial_visibility, (size_t)total_probes * sizeof(*initial_visibility), sizeof(*initial_visibility))
+            : NULL;
+    free(initial_visibility);
+
+    if (!renderer->dynamic_radiance_buffer || !renderer->dynamic_radiance_visibility_buffer) {
         free(coefficients);
         free(cache_hits);
         return false;
