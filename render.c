@@ -357,6 +357,7 @@ typedef struct MATERIAL_UNIFORMS {
     float dynamic_visibility_origin_spacing[DYNAMIC_INFLUENCE_LIMIT][4];
     Uint32 dynamic_visibility_dims_offset[DYNAMIC_INFLUENCE_LIMIT][4];
     float dynamic_radiance_inverse[DYNAMIC_INFLUENCE_LIMIT][16];
+    float dynamic_radiance_model[DYNAMIC_INFLUENCE_LIMIT][16];
 } MATERIAL_UNIFORMS;
 
 typedef struct DYNAMIC_SHADOW_UNIFORMS {
@@ -2014,6 +2015,7 @@ static bool write_dynamic_influence(const RENDERER *r, MATERIAL_UNIFORMS *unifor
 
     const MAT4 inverse = m4_inverse_transform(object->transform);
     memcpy(uniforms->dynamic_radiance_inverse[slot], inverse.m, sizeof(inverse.m));
+    memcpy(uniforms->dynamic_radiance_model[slot], model.m, sizeof(model.m));
     uniforms->dynamic_radiance_origin_spacing[slot][0] = allocation->radiance_origin.x;
     uniforms->dynamic_radiance_origin_spacing[slot][1] = allocation->radiance_origin.y;
     uniforms->dynamic_radiance_origin_spacing[slot][2] = allocation->radiance_origin.z;
