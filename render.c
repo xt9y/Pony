@@ -1485,7 +1485,7 @@ static bool fx_volume(FX_STATE *fx, NriCommandBuffer *cmd, NriBuffer *probes, Nr
         ++radiance_count;
     }
     u.dynamic_radiance_meta[0] = radiance_count;
-    u.dynamic_radiance_meta[1] = r->dynamic_radiance_buffer ? 1u : 0u;
+    u.dynamic_radiance_meta[1] = r->dynamic_radiance_buffer && !r->reference_lighting_enabled ? 1u : 0u;
 
     if (!bind_volume_resources(r, cmd, fx->normal_depth, fx->depth_sampler, probes, beams, fx->volume, &u, sizeof(u))) return false;
 
@@ -1866,6 +1866,7 @@ static bool render_dynamic_shadow_map(RENDERER *r, NriCommandBuffer *cmd, const 
 
 static bool update_dynamic_radiance_visibility(RENDERER *r, NriCommandBuffer *cmd) {
     if (!r || !cmd) return false;
+    if (r->reference_lighting_enabled) return true;
     if (!r->dynamic_radiance_visibility_buffer || !r->dynamic_visibility_pipeline ||
         !r->radiance_visibility_node_buffer || !r->radiance_visibility_triangle_buffer)
         return true;
